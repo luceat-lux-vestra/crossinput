@@ -1,0 +1,24 @@
+# Build artifacts
+DerivedData/
+.build/
+build/
+*.xcuserstate
+xcuserdata/
+.kotlin/
+.gradle/
+local.properties
+*.apk
+*.jar
+
+# Upstream checkout (조사용, 원본은 별도 관리 — THIRD_PARTY_NOTICES.md 참조)
+/leap-scrcpy/
+/deskflow-android/
+
+# OS
+.DS_Store
+
+# Env / secrets
+*.pem
+*.key
+.env
+.env.*
