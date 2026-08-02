@@ -13,7 +13,7 @@ Ampersand 작업 시 에이전트(및 개발자)가 반드시 따라야 하는 �
 7. **upstream 코드 복사 시 THIRD_PARTY_NOTICES.md 갱신** — 어떤 파일을 어느 upstream(저장소, commit, 라이선스)에서 복사/파생했는지 기록.
 8. **Electron / Node / Python 런타임 최종 앱 금지** — macOS 앱은 Swift, Android helper는 Kotlin. (개발 도구는 제외 — 예: 문서 생성 등)
 9. **클라우드 / root / Knox 우회 금지** — DeX 제어는 기기 로컬 공개 API(UHID, DisplayManager 등)만 사용.
-10. **English for all repository artifacts** — commits, PR titles/descriptions, issues, docs, and code comments are written in English. Korean is only allowed in chat with the user.
+10. **English for all repository artifacts** — commits, PR titles/descriptions, issues, docs, and code comments are written in English. Korean is only allowed in chat with the user. New documents must be written in English; existing Korean documents are migrated to English as they are updated.
 
 ## 검증 기준
 
