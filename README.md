@@ -7,11 +7,11 @@ Push your pointer to the screen edge to switch from macOS to the DeX external di
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
 │ trackpad capture · edge switch │   │ UHID virtual mouse        │
-└───────────┬───────────────────┘   └────────────┬──────────────┘
-            │  ADB over Wi-Fi (wireless debugging) │ UHID (no root)
-            └───────────► ────────────► ──────────┘
-                                          ▼
-                              DeX display / Android screen
+└───────────┬────────────────────┘   └────────────┬──────────────┘
+            │                                     │
+            └──► ADB over Wi-Fi (wireless debugging) ► UHID (no root)
+                                                    ▼
+                                    DeX display / Android screen
 ```
 
 ## Features

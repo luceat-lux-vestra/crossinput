@@ -1,6 +1,6 @@
 # Ampersand Architecture
 
-> Status: draft (Phase 0 in progress — subject to change until finalized)
+> Status: draft (v1 in progress — Phase 0 verified on device; key decisions recorded in docs/adr/)
 
 ## Goal
 
@@ -17,7 +17,7 @@ macOS menu bar app. Pushing the MacBook trackpad pointer to the screen edge swit
 ┌───────────────────────────────────▼──────────────────────────────────────┐
 │                        Android helper (Kotlin)                           │
 │  app_process entrypoint  │  display discovery (DisplayManager)           │
-│  UHID create/inject  │  display/rotation/state reporting                 │
+│ UHID create/inject │ display/rotation/state reporting                 │
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ UHID (virtual HID device)
                               ┌─────▼─────┐
@@ -30,7 +30,7 @@ macOS menu bar app. Pushing the MacBook trackpad pointer to the screen edge swit
 | Layer | Tech | Constraints |
 |---|---|---|
 | macOS app | Swift 6, SwiftUI, AppKit, CoreGraphics, Quartz Event Services, Swift Concurrency | Electron/Node/Python forbidden |
-| Build | SPM, XCTest, Xcode project | macOS 14+, Apple Silicon first |
+| Build | Swift Package Manager + XCTest | macOS 14+, Apple Silicon first (Xcode project not required — packaging via `scripts/package-macos.sh`) |
 | Android helper | Kotlin, Java 17, Gradle Kotlin DSL, app_process execution | minSdk supports S10 5G |
 | Communication | ADB over Wi-Fi (wireless debugging), CXI binary protocol | — |
 | License | Apache-2.0 + LICENSE, NOTICE, THIRD_PARTY_NOTICES.md | — |

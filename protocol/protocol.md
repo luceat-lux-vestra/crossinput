@@ -1,7 +1,7 @@
 # CXI Protocol (v1)
 
 Binary protocol between the macOS app and the Android helper.
-transport: ADB subprocess stdin/stdout (app_process execution).
+Transport: ADB subprocess stdin/stdout (app_process execution).
 
 > Rule: changing this document requires updating the golden fixtures in `protocol/fixtures/` and both implementations (Swift/Kotlin) (AGENTS.md hard rule 6).
 
@@ -70,7 +70,7 @@ densityDpi u32
 rotation u8      (0/1/2/3)
 name: u32 length + UTF-8 bytes
 uniqueId: u32 length + UTF-8 bytes
-layerStack u32   (if present, -1 means omitted — always recorded in v1)
+layerStack u32   (always recorded in v1; -1 if unknown)
 ```
 
 ## Message flow (minimal scenario)
