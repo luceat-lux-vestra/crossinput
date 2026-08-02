@@ -1,8 +1,8 @@
 # Ampersand — CrossInput
 
-**One MacBook trackpad for macOS and Samsung DeX.**
+**One MacBook trackpad for macOS and Android.**
 
-Push your pointer to the screen edge to switch from macOS to the DeX external display; push it back to return. No app install on your phone and no root required — after a one-time wireless debugging setup, your MacBook trackpad becomes the mouse on the DeX screen.
+Push your pointer to the screen edge to switch to your Samsung DeX external display — or, when DeX isn't running, control the Android phone screen directly. Push it back to return to macOS. No app install on your phone and no root required: after a one-time wireless debugging setup, your MacBook trackpad becomes the mouse on your Android device.
 
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
@@ -18,7 +18,7 @@ Push your pointer to the screen edge to switch from macOS to the DeX external di
 
 - **Edge switching**: push the pointer past the screen edge to switch between macOS and DeX
 - **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface
-- **Phone screen too**: when DeX is not in use, control the Android screen directly
+- **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
 - **No installable app**: the helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs
 - **Scope**: v1 is mac → Android one-way (reverse direction and keyboard are roadmap extensions — [ADR-0003](docs/adr/ADR-0003-scope.md))
 
