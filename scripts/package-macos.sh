@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# macOS 앱 패키징/배포 스크립트 (Phase 8 전용)
-# 사용: ./scripts/package-macos.sh
+# macOS app packaging/distribution script (Phase 8)
+# Usage: ./scripts/package-macos.sh
+# shellcheck disable=SC2086
 
-echo "==> package-macos: Phase 8(배포)에서 구현 — 현재 no-op"
+echo "==> package-macos: implemented in Phase 8 (distribution) — currently a no-op"
 exit 0

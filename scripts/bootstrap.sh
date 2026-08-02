@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ampersand 저장소 초기화 스크립트
-# 사용: ./scripts/bootstrap.sh [--no-git]
+# Ampersand repository bootstrap script
+# Usage: ./scripts/bootstrap.sh [--no-git]
 #
-# 하는 일:
-#   1. git hooks 설치 (존재하면)
-#   2. Android SDK 위치 확인 (~/Library/Android/sdk)
-#   3. Android helper Gradle wrapper 확인
-#   4. 필요 도구 확인 (adb, xcodebuild, java 17)
+# What it does:
+#   1. install git hooks (if present)
+#   2. verify Android SDK location (~/Library/Android/sdk)
+#   3. verify the Android helper Gradle wrapper
+#   4. verify required tools (adb, xcodebuild, java 17)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -24,11 +24,11 @@ fail() {
   exit 1
 }
 
-# --- 도구 확인 ------------------------------------------------------------
-command -v adb >/dev/null || fail "adb가 PATH에 없습니다 (platform-tools)"
-command -v xcodebuild >/dev/null || fail "xcodebuild가 없습니다 (Xcode 필요)"
-[ -d "$ANDROID_SDK" ] || fail "Android SDK 없음: $ANDROID_SDK (ANDROID_HOME 설정 필요)"
-[ -d "$JAVA_17" ] || fail "Java 17 없음: $JAVA_17 (JAVA_17_HOME 설정 필요)"
+# --- tool checks ------------------------------------------------------------
+command -v adb >/dev/null || fail "adb not found in PATH (platform-tools)"
+command -v xcodebuild >/dev/null || fail "xcodebuild not found (Xcode required)"
+[ -d "$ANDROID_SDK" ] || fail "Android SDK not found: $ANDROID_SDK (set ANDROID_HOME)"
+[ -d "$JAVA_17" ] || fail "Java 17 not found: $JAVA_17 (set JAVA_17_HOME)"
 
 echo "    adb:        $(adb version | head -1)"
 echo "    android SDK: $ANDROID_SDK"
@@ -36,14 +36,13 @@ echo "    java 17:    $JAVA_17"
 
 # --- Android helper wrapper -----------------------------------------------
 if [ ! -x "android/helper/gradlew" ]; then
-  echo "==> android/helper gradle wrapper 없음 — 생성:"
-  echo "    (Android Studio에서 프로젝트를 열거나, gradle 설치 후 gradle wrapper 실행)"
+  echo "==> android/helper gradle wrapper missing — generate it:"
+  echo "    (open the project in Android Studio, or run 'gradle wrapper' with gradle installed)"
 fi
-
 # --- git hooks --------------------------------------------------------------
 if [ -d .git ] && [ -d scripts/hooks ]; then
-  echo "==> git hooks 설치"
+  echo "==> installing git hooks"
   cp scripts/hooks/* .git/hooks/ 2>/dev/null || true
 fi
 
-echo "==> 완료. 다음: ./scripts/build-android-helper.sh"
+echo "==> done. Next: ./scripts/build-android-helper.sh"

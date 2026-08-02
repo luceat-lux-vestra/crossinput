@@ -1,13 +1,13 @@
 import Foundation
 import Protocol
 
-/// adb subprocess 기반 Android helper 연결 관리자 (스켈레톤)
+/// Android helper connection manager based on an adb subprocess (skeleton)
 public final class ConnectionManager: Sendable {
     public init() {}
 
     public func connect(serial: String) async throws {
-        // TODO: B-01: adb 서버 실행, app_process spawn, HELLO 핸드셰이크
-        // Phase 3 스파이크에서 구현
-        fatalError("ConnectionManager.connect 미구현 — Phase 3")
+        // TODO: B-01: start adb server, spawn app_process, HELLO handshake
+        // Implemented in the Phase 3 spike
+        fatalError("ConnectionManager.connect not implemented — Phase 3")
     }
 }

@@ -1,18 +1,18 @@
 # Security Policy
 
-## 지원 범위
+## Supported versions
 
-현재 기술 검증 단계이며 공식 보안 지원 대상 버전은 없습니다.
-안정 릴리스가 나오기 전까지 모든 보고를 환영합니다.
+Currently in the technical verification phase; there are no officially supported versions.
+All reports are welcome until a stable release exists.
 
-## 취약점 신고
+## Reporting a vulnerability
 
-- 공개 이슈가 아닌 채널로 보고해 주세요: security@crossinput.example.invalid (placeholder)
-- 개인키, ADB 자격 증명, 클립보드 내용 등 민감 정보를 이슈에 올리지 마세요.
-- 응답 SLA: 7일 이내 최초 응답 목표.
+- Please report through a non-public channel: security@crossinput.example.invalid (placeholder)
+- Do not post sensitive information (private keys, ADB credentials, clipboard contents) in issues.
+- Response SLA: first response within 7 days.
 
-## 보안 원칙 (AGENTS.md 하드 룰과 연계)
+## Security principles (linked to AGENTS.md hard rules)
 
-- 키 입력 / 클립보드 / 입력 payload는 로그에 남기지 않음.
-- root, Knox 우회, 클라우드 경유 금지 — 기기 로컬 공개 API만 사용.
-- 포인터 가둠 코드는 테스트 전용 외 어떤 경로로도 허용되지 않음.
+- Keystrokes / clipboard / input payloads are never logged.
+- No root, Knox bypass, or cloud relay — device-local public APIs only.
+- Pointer-trapping code is not allowed on any path except test-only.
