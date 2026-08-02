@@ -21,6 +21,15 @@ The installed regular APK approach (`/dev/uhid` app-uid access) is **deferred as
 - The v1 adb push approach is arguably better UX since "the user does nothing on the phone".
 - The benefit at this stage is limited relative to the verification cost (Play Store review risk, per-device SELinux differences).
 
+### Distribution: no developer account required for the APK path
+
+A developer account is **not** a blocker for the installed-APK path. Unlike Apple (signing requires an account), Android APKs can be signed with any self-generated keystore:
+
+- **Sideload via GitHub Releases** (F-Droid style): free, no account. The user's only step is allowing "install unknown apps" once — comparable friction to one-time wireless debugging pairing.
+- **Play Store** (optional): requires a one-time Google Play Developer account ($25) — needed only when the store's reach/review is desired.
+
+So the deciding factor for the v2 experiment stays purely technical: whether `/dev/uhid` is accessible from the app uid (SELinux). If it passes, both wireless debugging and the adb bundle (ADR-0004) become optional, not mandatory.
+
 ## Alternatives
 
 - Accept one-time wireless debugging pairing: stays as verified, only the entry barrier is high.

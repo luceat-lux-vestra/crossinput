@@ -5,7 +5,7 @@ AGENTS.md hard rule 7: **any copy or derivation of upstream code requires updati
 
 | Component | Source | Version/Commit | License | Usage | Location in this repo |
 |---|---|---|---|---|---|
-| leap-scrcpy | https://github.com/yume-chan/leap-scrcpy | `f9aaf1b05118261d75b82ba88b462f08e37eecdc` | ISC | Phase 0 baseline reproduction (unmodified) and UHID/HID idea reference | `leap-scrcpy/` (gitignored checkout), `docs/research/` |
+| leap-scrcpy | https://github.com/yume-chan/leap-scrcpy | `f9aaf1b05118261d75b82ba88b462f08e37eecdc` | ISC | Idea/UHID reference (build verified only; run-level reproduction not completed — Phase 0 was verified with our own UHID probe) | `leap-scrcpy/` (gitignored checkout), `docs/research/upstream-inventory.md` |
 | Deskflow | https://github.com/deskflow/deskflow | 1.26.0 (macOS arm64) | GPL-3.0 | Phase 0 verification Deskflow server (dev tool, not in distribution) | separate install `/Applications/Deskflow.app` |
 
 ## Usage rules

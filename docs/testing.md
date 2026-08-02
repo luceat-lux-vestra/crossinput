@@ -29,13 +29,15 @@
 
 ### Verification items (R1)
 
-| # | Item | Pass criteria |
-|---|---|---|
-| 1 | Relative mouse | Pointer shown on DeX screen, moves across full resolution |
-| 2 | Absolute mouse | Coordinate-pointer position match |
-| 3 | Absolute stylus | hover movement |
-| 4 | Composite mouse (wheel) | left/right click, drag, vertical/horizontal scroll |
-| 5 | Input persists after app switch | delivered to DeX screen even after focus changes |
+Status: ✅ verified on device (SM-G977N) · ⏳ not yet verified. Full results in [issue #2](https://github.com/luceat-lux-vestra/crossinput/issues/2).
+
+| # | Item | Pass criteria | Status |
+|---|---|---|---|
+| 1 | Relative mouse | Pointer shown on DeX screen, moves across full resolution | ✅ (movement 1:1, pointer acceleration as on a real mouse) |
+| 2 | Absolute mouse | Coordinate-pointer position match | ⏳ |
+| 3 | Absolute stylus | hover movement | ⏳ |
+| 4 | Composite mouse (wheel) | left/right click, drag, vertical/horizontal scroll | ⏳ (click and focus change verified; drag/scroll pending) |
+| 5 | Input persists after app switch | delivered to DeX screen even after focus changes | ✅ (click delivered after focus change, displayId verified) |
 
 ## Edge switching stability (Phase 5)
 
