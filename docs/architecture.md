@@ -4,14 +4,13 @@
 
 ## Goal
 
-macOS menu bar app. Pushing the MacBook trackpad pointer to the screen edge switches to the Samsung DeX external display; pushing again returns to macOS.
+macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mouse) to the screen edge switches to the Samsung DeX external display; pushing again returns to macOS.
 
 ## System composition
 
 ```
 ┌───────────────────────────── macOS (Swift 6) ─────────────────────────────┐
-│ Menu Bar UI  Edge Switch State Machine  CGEventTap (input capture)        │
-│ Connection Manager ──► adb subprocess (ADB over Wi-Fi)                    │
+│ Menu Bar UI  Edge Switch State Machine  CGEventTap (input capture)        ││ Connection Manager ──► adb subprocess (ADB over Wi-Fi)                    │
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ ADB stdin/stdout framing (CXI protocol)
 ┌───────────────────────────────────▼──────────────────────────────────────┐
