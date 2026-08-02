@@ -1,6 +1,6 @@
 # Ampersand Roadmap
 
-> Updated: 2026-08-03 (Phase 0 complete, name/scope/distribution decisions applied)
+> Updated: 2026-08-03 (Phase 0, 0.5, 1 complete; name/scope/distribution decisions applied)
 > Original plan: `DEXCURSOR_IMPLEMENTATION_PLAN.md` (1221 lines, kept in local Downloads — historical document)
 
 ## Phase overview
@@ -9,7 +9,7 @@
 |---|---|---|---|
 | 0 | UHID input verification (DeX external display delivery) | On-device click/move/cursor display confirmed | ✅ done (category A) |
 | 0.5 | Execution method decided (ADR-0006) | v1 = adb push + run confirmed; installed app deferred to v2 | ✅ done |
-| 1 | Repository bootstrap | bootstrap.sh / build-android-helper.sh / xcodebuild / CI green | 🔄 in progress |
+| 1 | Repository bootstrap | bootstrap.sh / build-android-helper.sh / swift build + tests / CI green | ✅ done (macOS packaging via `scripts/package-macos.sh` deferred to Phase 8) |
 | 2 | Android helper minimal implementation | display discovery + UHID + CXI protocol | ⏳ |
 | 3 | DeX input routing | UHID input delivered to the DeX external display (leverages Phase 0 findings) | ⏳ |
 | 4 | CGEventTap prototype | input capture verified with a fake sink | ⏳ |
@@ -48,3 +48,5 @@
 - 2026-08-03: leap-scrcpy server APK built (`app-debug.apk` 5.8MB), client built (`pnpm build`)
 - 2026-08-03: UHID mouse on-device verification complete — move/click/cursor display (category A)
 - 2026-08-03: product name Ampersand / tagline CrossInput / repo crossinput (ADR-0002), scope (ADR-0003), adb bundling (ADR-0004), distribution (ADR-0005), execution method decided (ADR-0006: v1 = adb push + run, installed app deferred to v2)
+- 2026-08-03: repository bootstrap complete — CI green (macOS swift build+test / Android gradle build / protocol fixture checks), repo `crossinput` created on GitHub (private)
+- 2026-08-03: verification results recorded in issue #2; docs/ migrated to English

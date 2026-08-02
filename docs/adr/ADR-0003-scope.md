@@ -5,7 +5,7 @@
 
 ## Context
 
-The product's essence is an "input bridge". The primary direction (macOS input → Android) is already on-device verified with CGEventTap capture + UHID injection. The reverse direction (dex→mac) was also considered at user request. The iPad (iPadOS) has no CGEventTap-equivalent API, so input capture is impossible with the current architecture.
+The product's essence is an "input bridge". The primary direction (macOS input → Android) is verified on device for the injection side (UHID); the macOS capture side (CGEventTap) is planned for Phase 4 and not yet implemented. The reverse direction (dex→mac) was also considered at user request. The iPad (iPadOS) has no CGEventTap-equivalent API, so input capture is impossible with the current architecture.
 
 ## Decision
 

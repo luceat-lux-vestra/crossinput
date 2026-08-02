@@ -1,6 +1,6 @@
 # ADR-0001: DeX Input Delivery Method (UHID)
 
-> Status: **accepted** — confirmed by Phase 0 leap-scrcpy baseline results.
+> Status: **accepted** — confirmed by Phase 0 on-device verification (our UHID probe, SM-G977N).
 > Date: 2026-08-03
 
 ## Context
@@ -10,7 +10,7 @@ UHID can use `/dev/uhid` with shell permission without root and supports relativ
 
 ## Decision (accepted)
 
-Use UHID as the primary input delivery method. If Phase 0 verification showed "input not delivered to the DeX external display (category B)", the routing cause would be investigated first.
+Use UHID as the primary input delivery method. The routing-cause investigation (what happens if input lands on the phone screen instead of the DeX display) only becomes necessary if a device exhibits category B behavior — Phase 0 showed category A on the test device.
 
 ## Alternatives
 
@@ -27,7 +27,7 @@ Use UHID as the primary input delivery method. If Phase 0 verification showed "i
 
 - (done) Phase 0: UHID relative mouse on-device verification — DeX external display click/move/cursor display confirmed (SM-G977N, Android 12)
 - (done) UHID minimal CLI probe (relative mouse) works
-- (pending) Whether `/dev/uhid` is accessible from an installed regular app (ADR-0006)
+- (pending) Whether `/dev/uhid` is accessible from an installed regular app (see ADR-0006)
 
 ## Revisit conditions
 
