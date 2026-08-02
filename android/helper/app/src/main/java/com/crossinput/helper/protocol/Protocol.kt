@@ -1,8 +1,8 @@
 package com.crossinput.helper.protocol
 
 /**
- * CXI 프로토콜 상수 (protocol/protocol.md와 동기화).
- * 변경 시: protocol.md + protocol/fixtures/ 갱신 필수 (AGENTS.md 하드 룰 6).
+ * CXI protocol constants (kept in sync with protocol/protocol.md).
+ * On change: protocol.md + protocol/fixtures/ must be updated (AGENTS.md hard rule 6).
  */
 object Protocol {
     const val MAGIC = "CXI"

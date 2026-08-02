@@ -11,7 +11,7 @@ public enum SwitchState: String, Sendable {
     case error
 }
 
-/// Edge Switch 상태 머신 (스켈레톤 — 전이 규칙은 Phase 5에서 구현)
+/// Edge Switch state machine (skeleton — transition rules implemented in Phase 5)
 public final class EdgeSwitchStateMachine {
     public private(set) var state: SwitchState = .disabled
 

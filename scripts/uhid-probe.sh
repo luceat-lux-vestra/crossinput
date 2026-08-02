@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# UHID probe 드라이버 — APK push + 기기 측 FIFO stdin 연결.
+# UHID probe driver — APK push + on-device FIFO stdin.
 #
-# 사용법:
+# Usage:
 #   scripts/uhid-probe.sh [mouse-rel|mouse-abs|mouse-wheel|stylus] [start|stop|send]
-#     (인자 없이 type만 주면 start)
+#     (start is the default when only the type is given)
 #
-# start: 프로브를 기기에서 백그라운드로 실행 (호스트 세션 종료에도 유지)
-# send:  "cmd" 를 기기 FIFO로 전송 (예: "abs 100 100", "down 0", "up 0", "wheel 3", "quit")
-# stop:  프로브 종료 (quit 전송 후 대기)
+# start: run the probe on the device in the background (survives host session end)
+# send:  send "cmd" to the on-device FIFO (e.g. "abs 100 100", "down 0", "up 0", "wheel 3", "quit")
+# stop:  terminate the probe (send quit, wait)
 #
-# 명령: echo "abs 100 100" > ... 등으로 직접 보낼 수도 있음.
+# Commands can also be sent directly, e.g.: echo "abs 100 100" > ...
 set -euo pipefail
 
 TYPE="${1:-mouse-rel}"
@@ -35,8 +35,8 @@ case "$MODE" in
             "nohup sh -c 'app_process -cp $REMOTE / com.crossinput.helper.UhidProbe $TYPE $REMOTE_CMD $EXTRA > $REMOTE_LOG 2>&1' >/dev/null 2>&1 &" >/dev/null
         sleep 2
         echo "device: $DEVICE  type: $TYPE  extra: [$EXTRA]"
-        echo "프로브 실행됨 (기기 백그라운드, 호스트 세션과 독립)."
-        echo "명령 주입: scripts/uhid-probe.sh $TYPE send 'abs 100 100'"
+        echo "probe running (device background, independent of the host session).""
+        echo "inject: scripts/uhid-probe.sh $TYPE send 'abs 100 100'"
         ;;
     send)
         adb -s "$DEVICE" shell "echo '$3' >> $REMOTE_CMD" >/dev/null
