@@ -13,6 +13,7 @@ Ampersand 작업 시 에이전트(및 개발자)가 반드시 따라야 하는 �
 7. **upstream 코드 복사 시 THIRD_PARTY_NOTICES.md 갱신** — 어떤 파일을 어느 upstream(저장소, commit, 라이선스)에서 복사/파생했는지 기록.
 8. **Electron / Node / Python 런타임 최종 앱 금지** — macOS 앱은 Swift, Android helper는 Kotlin. (개발 도구는 제외 — 예: 문서 생성 등)
 9. **클라우드 / root / Knox 우회 금지** — DeX 제어는 기기 로컬 공개 API(UHID, DisplayManager 등)만 사용.
+10. **English for all repository artifacts** — commits, PR titles/descriptions, issues, docs, and code comments are written in English. Korean is only allowed in chat with the user.
 
 ## 검증 기준
 
@@ -23,9 +24,11 @@ Ampersand 작업 시 에이전트(및 개발자)가 반드시 따라야 하는 �
 ## 작업 흐름
 
 1. 작업 전에 관련 문서(docs/, protocol/)부터 읽기
-2. 코드 변경 후: build + lint + 관련 테스트 실행
-3. 검증 결과를 `docs/research/` 또는 이슈/PR에 기록
-4. PR은 검증 기록 없이 병합 금지
+2. 작업 시작 시 GitHub 이슈 생성 (라벨 필수: `type/*`, `area/*`, `priority/*`) — 작업 단위마다 이슈로 추적, 진행은 이슈에 기록
+3. 코드 변경 후: build + lint + 관련 테스트 실행
+4. 검증 결과를 `docs/research/` 또는 이슈/PR에 기록
+5. PR은 이슈를 참조(`Fixes #N`)하고, 검증 기록 없이 병합 금지
+6. 완료 시 이슈를 닫고 병합 내역을 이슈에 남기기
 
 ## 문서 요구 사항
 
