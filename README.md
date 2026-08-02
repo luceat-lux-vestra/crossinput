@@ -1,12 +1,12 @@
 # Ampersand — CrossInput
 
-**One MacBook trackpad for macOS and Android.**
+**One MacBook pointer for macOS and Android.**
 
-Push your pointer to the screen edge to switch to your Samsung DeX external display — or, when DeX isn't running, control the Android phone screen directly. Push it back to return to macOS. No app install on your phone and no root required: after a one-time wireless debugging setup, your MacBook trackpad becomes the mouse on your Android device.
+Push your trackpad or mouse pointer to the screen edge to switch to your Samsung DeX external display — or, when DeX isn't running, control the Android phone screen directly. Push it back to return to macOS. No app install on your phone and no root required: after a one-time wireless debugging setup, your MacBook trackpad or mouse becomes the pointer on your Android device.
 
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
-│ trackpad capture · edge switch │   │ UHID virtual mouse        │
+│ pointer capture · edge switch │   │ UHID virtual mouse        │
 └───────────┬────────────────────┘   └────────────┬──────────────┘
             │                                     │
             └──► ADB over Wi-Fi (wireless debugging) ► UHID (no root)
@@ -17,10 +17,11 @@ Push your pointer to the screen edge to switch to your Samsung DeX external disp
 ## Features
 
 - **Edge switching**: push the pointer past the screen edge to switch between macOS and DeX
+- **Works with any pointer device**: trackpad, wired or wireless mouse — captured at the macOS level (CGEventTap), no device-specific setup
 - **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface
 - **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
 - **No installable app**: the helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs
-- **Scope**: v1 is mac → Android one-way (reverse direction and keyboard are roadmap extensions — [ADR-0003](docs/adr/ADR-0003-scope.md))
+- **Scope**: v1 is mac → Android one-way, pointer input only. Keyboard is a planned post-v1 extension (Android-side delivery is easy; macOS system-shortcut handling is the open item). Reverse direction (dex → mac) and iPad are roadmap extensions — [ADR-0003](docs/adr/ADR-0003-scope.md)
 
 ## Status
 

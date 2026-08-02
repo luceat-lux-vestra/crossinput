@@ -38,6 +38,7 @@
 
 ## Extension scope (after v1, ADR-0003)
 
+- mac→Android keyboard: UHID keyboard delivery — Android side is straightforward; macOS system-shortcut handling (Cmd+Tab etc.) during capture is the open item
 - dex→mac touch: AccessibilityService capture + CGEventPost injection
 - dex→mac keyboard: custom IME app (our keyboard must be the active IME), Korean via text transport
 - iPad: out of scope (no CGEventTap-equivalent API on iPadOS)
