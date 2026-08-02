@@ -4,9 +4,9 @@ import SwiftUI
 struct AmpersandApp: App {
     var body: some Scene {
         MenuBarExtra("Ampersand", systemImage: "cursorarrow.motionlines") {
-            Text("Ampersand (스켈레톤)")
+            Text("Ampersand (skeleton)")
             Divider()
-            Button("종료") { NSApplication.shared.terminate(nil) }
+            Button("Quit") { NSApplication.shared.terminate(nil) }
         }
     }
 }

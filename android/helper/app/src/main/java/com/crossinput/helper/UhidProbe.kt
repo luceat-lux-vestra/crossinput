@@ -9,22 +9,22 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * UHID 최소 CLI probe — Phase 0 (R1 입력 위험 검증용 개발 도구, 제품 코드 아님).
+ * Minimal UHID CLI probe — Phase 0 dev tool for R1 (input risk) verification, not product code.
  *
- * 실행 (호스트):
+ * Run (host):
  *   scripts/uhid-probe.sh [mouse-rel|mouse-abs|mouse-wheel|stylus]
  *
- * stdin 명령 (행 단위):
- *   rel <dx> <dy>       상대 이동 (mouse-rel, mouse-wheel)
- *   abs <x> <y>         절대 이동 0..32767 (mouse-abs, stylus)
- *   down <0|1|2>        버튼 누름 (0=좌, 1=우, 2=중)
- *   up <0|1|2>          버튼 해제
- *   wheel <n>           수직 휠 (±127)
- *   hwheel <n>          수평 휠 (±127, mouse-wheel만)
- *   in | out            스타일러스 in-range 설정 (stylus만)
- *   quit                종료
+ * stdin commands (line-based):
+ *   rel <dx> <dy>       relative move (mouse-rel, mouse-wheel)
+ *   abs <x> <y>         absolute move 0..32767 (mouse-abs, stylus)
+ *   down <0|1|2>        button down (0=left, 1=right, 2=middle)
+ *   up <0|1|2>          button up
+ *   wheel <n>           vertical wheel (±127)
+ *   hwheel <n>          horizontal wheel (±127, mouse-wheel only)
+ *   in | out            stylus in-range (stylus only)
+ *   quit                exit
  *
- * 로깅 규칙: report payload는 절대 로그에 남기지 않음 (AGENTS.md #4).
+ * Logging rule: report payloads are never logged (AGENTS.md rule 4).
  */
 object UhidProbe {
 
@@ -107,15 +107,15 @@ object UhidProbe {
         Os.write(fd, createPayload, 0, createPayload.size)
         System.out.println("device created type=$type")
 
-        // CREATE2는 커널 워커가 비동기로 처리하므로 device가 running이 되기 전에
-        // INPUT2를 쓰면 ENOTSUP이 반환됨 — 준비 시간 확보.
+        // CREATE2 is processed asynchronously by the kernel worker, so INPUT2
+        // before the device is running returns ENOTSUP — allow time to settle.
         Thread.sleep(500)
 
         val cmdFile = args.getOrNull(1)
         val state = ProbeState(type)
         if (cmdFile != null) {
             val f = java.io.File(cmdFile)
-            java.io.RandomAccessFile(f, "rw").use { it.setLength(0) } // 시작 시 초기화
+            java.io.RandomAccessFile(f, "rw").use { it.setLength(0) } // truncate on start
             val raf = java.io.RandomAccessFile(f, "r")
             var offset = 0L
             val pending = StringBuilder()
@@ -203,8 +203,7 @@ object UhidProbe {
     private fun writeInput(fd: FileDescriptor, report: ByteArray) {
         val buf = ByteBuffer.allocate(4 + 2 + report.size)
         buf.order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(12) // UHID_INPUT2
-        buf.putShort(report.size.toShort())
+        buf.putInt(12) // UHID_INPUT2        buf.putShort(report.size.toShort())
         buf.put(report)
         Os.write(fd, buf.array(), 0, buf.capacity())
     }

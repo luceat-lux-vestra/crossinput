@@ -26,7 +26,7 @@ android {
 
     buildTypes {
         debug {
-            // app_process 실행을 위해 debug build 사용 (release는 path 하드코딩 문제 회피)
+            // debug build for app_process execution (release avoids path hardcoding issues)
         }
     }
 }
