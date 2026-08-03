@@ -133,6 +133,8 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = true
             startWatchdog()
         }
+        Diagnostics.log("pointer suppressed; hiding macOS cursor")
+        hideCursor()
     }
 
     /// Returns to listening mode immediately (fail-safe path).
@@ -145,8 +147,11 @@ public final class InputCapture: @unchecked Sendable {
             return was
         }
         if wasSuppressing {
-            // Physically return the pointer to the user (into the screen).
-            centerPointer()
+            showCursor()
+            // Physically return the pointer to the crossing edge point the user
+            // pushed through, so Android->macOS continues where control left off
+            // instead of jumping to the screen center.
+            restorePointerAtEdge()
             onSuppressionReleased?()
         }
     }
@@ -241,10 +246,32 @@ public final class InputCapture: @unchecked Sendable {
         onScreenEdge?(edge)
     }
 
-    private func centerPointer() {
-        if let screen = NSScreen.main {
-            CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
+    private func restorePointerAtEdge() {
+        guard screenFrame != .zero, let displayID = currentDisplayID,
+              let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
+            if let screen = NSScreen.main {
+                CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
+            }
+            return
         }
+        let f = screenFrame
+        let p = currentPosition
+        let hold: CGPoint
+        switch edge {
+        case .left:   hold = CGPoint(x: f.minX + edgeThreshold, y: p.y)
+        case .right:  hold = CGPoint(x: f.maxX - edgeThreshold, y: p.y)
+        case .top:    hold = CGPoint(x: p.x, y: f.maxY - edgeThreshold)
+        case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
+        }
+        CGWarpMouseCursorPosition(hold)
+    }
+
+    private func hideCursor() {
+        CGDisplayHideCursor(CGMainDisplayID())
+    }
+
+    private func showCursor() {
+        CGDisplayShowCursor(CGMainDisplayID())
     }
 
     /// Pins the macOS pointer to the configured Android edge of the current
