@@ -11,26 +11,29 @@ import Darwin // for dlopen/dlsym
 // modern macOS (CGDisplayHideCursor deprecated/no-op on 14+). Mirrors
 // Deskflow/Synergy's SetsCursorInBackground pattern.
 // Symbols not in public tbd — resolve at runtime via dlsym.
-private typealias CGSDefaultConnectionFn = @convention(c) () -> UInt32
+private typealias CGSMainConnectionIDFn = @convention(c) () -> UInt32
 private typealias CGSSetConnectionPropertyFn = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
 private typealias CGAssociateMouseAndMouseCursorPositionFn = @convention(c) (Int32) -> Void
 
-nonisolated(unsafe) private var cgsDefaultConnection: CGSDefaultConnectionFn?
+nonisolated(unsafe) private var cgsMainConnectionID: CGSMainConnectionIDFn?
 nonisolated(unsafe) private var cgsSetConnectionProperty: CGSSetConnectionPropertyFn?
 nonisolated(unsafe) private var cgsAssociateMouseAndMouseCursorPosition: CGAssociateMouseAndMouseCursorPositionFn?
 
 private func resolveCGSSymbols() {
-    guard cgsDefaultConnection == nil || cgsSetConnectionProperty == nil || cgsAssociateMouseAndMouseCursorPosition == nil else { return }
-    let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
-    if let h = handle {
-        cgsDefaultConnection = unsafeBitCast(dlsym(h, "CGSDefaultConnection"), to: CGSDefaultConnectionFn.self)
-        cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
-        cgsAssociateMouseAndMouseCursorPosition = unsafeBitCast(dlsym(h, "CGAssociateMouseAndMouseCursorPosition"), to: CGAssociateMouseAndMouseCursorPositionFn.self)
-        Diagnostics.log("CGS symbols resolved: conn=\(cgsDefaultConnection != nil), setProp=\(cgsSetConnectionProperty != nil), associate=\(cgsAssociateMouseAndMouseCursorPosition != nil)")
-    } else {
-        Diagnostics.log("CGS dlopen failed")
+        guard cgsMainConnectionID == nil || cgsSetConnectionProperty == nil || cgsAssociateMouseAndMouseCursorPosition == nil else { return }
+        var handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+        if handle == nil {
+            handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+        }
+        if let h = handle {
+            cgsMainConnectionID = unsafeBitCast(dlsym(h, "CGSMainConnectionID"), to: CGSMainConnectionIDFn.self)
+            cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
+            cgsAssociateMouseAndMouseCursorPosition = unsafeBitCast(dlsym(h, "CGAssociateMouseAndMouseCursorPosition"), to: CGAssociateMouseAndMouseCursorPositionFn.self)
+            Diagnostics.log("CGS symbols resolved (handle=\(h)): conn=\(cgsMainConnectionID != nil), setProp=\(cgsSetConnectionProperty != nil), associate=\(cgsAssociateMouseAndMouseCursorPosition != nil)")
+        } else {
+            Diagnostics.log("CGS dlopen failed for both SkyLight and CoreGraphics")
+        }
     }
-}
 
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
@@ -354,8 +357,11 @@ public final class InputCapture: @unchecked Sendable {
 
     private func hideCursor() {
         resolveCGSSymbols()
-        if let cid = cgsDefaultConnection?(), let setter = cgsSetConnectionProperty {
-            setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
+            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+            Diagnostics.log("CGS SetsCursorInBackground(true): cid=\(cid), result=\(result)")
+        } else {
+            Diagnostics.log("CGS hideCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
         }
         if let displayID = currentDisplayID {
             CGDisplayHideCursor(displayID)
@@ -365,8 +371,11 @@ public final class InputCapture: @unchecked Sendable {
 
     private func showCursor() {
         resolveCGSSymbols()
-        if let cid = cgsDefaultConnection?(), let setter = cgsSetConnectionProperty {
-            setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanFalse)
+        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
+            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanFalse)
+            Diagnostics.log("CGS SetsCursorInBackground(false): cid=\(cid), result=\(result)")
+        } else {
+            Diagnostics.log("CGS showCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
         }
         if let displayID = currentDisplayID {
             CGDisplayShowCursor(displayID)
