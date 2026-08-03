@@ -47,7 +47,11 @@ public final class InputCapture: @unchecked Sendable {
     private let stateLock = NSLock()
     private var currentPosition: CGPoint = .zero
     private var screenFrame: CGRect = .zero
+    private var currentScreen: NSScreen?
     private var isSuppressing = false
+    /// Per-display configuration: which edge of that display leads to the
+    /// Android target. Absence means that display never triggers a switch.
+    private var androidEdgeByDisplay: [CGDirectDisplayID: ScreenEdge] = [:]
     private let edgeThreshold: CGFloat = 2
     private var emergencyHotKey: EventHotKeyRef?
 
@@ -81,7 +85,7 @@ public final class InputCapture: @unchecked Sendable {
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: mask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -127,7 +131,6 @@ public final class InputCapture: @unchecked Sendable {
         stateLock.withLock {
             guard !isSuppressing else { return }
             isSuppressing = true
-            updateTapOptions()
             startWatchdog()
         }
     }
@@ -139,7 +142,6 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = false
             watchdog?.cancel()
             watchdog = nil
-            updateTapOptions()
             return was
         }
         if wasSuppressing {
@@ -151,6 +153,18 @@ public final class InputCapture: @unchecked Sendable {
 
     public var isSuppressed: Bool {
         stateLock.withLock { isSuppressing }
+    }
+
+    /// Configures which edge of the given display leads to the Android target.
+    /// Pass nil to disable edge switching on that display.
+    public func setAndroidEdge(_ edge: ScreenEdge?, forDisplay displayID: CGDirectDisplayID) {
+        stateLock.withLock {
+            if let edge {
+                androidEdgeByDisplay[displayID] = edge
+            } else {
+                androidEdgeByDisplay.removeValue(forKey: displayID)
+            }
+        }
     }
 
     // MARK: - Event handling (capture thread)
@@ -166,6 +180,7 @@ public final class InputCapture: @unchecked Sendable {
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 onPointerEvent?(PointerEvent(.move(dx: dx, dy: dy)))
+                holdPointerAtEdge()
                 return nil // consume: pointer held at the edge
             }
             detectEdge()
@@ -174,7 +189,11 @@ public final class InputCapture: @unchecked Sendable {
              .otherMouseDown, .otherMouseUp:
             if isSuppressing {
                 let button = Self.buttonIndex(for: type)
-                let down = type.rawValue % 2 == 0 // Down events are even
+                let down: Bool
+                switch type {
+                case .leftMouseDown, .rightMouseDown, .otherMouseDown: down = true
+                default: down = false
+                }
                 onPointerEvent?(PointerEvent(.button(button: button, down: down)))
                 return nil
             }
@@ -196,17 +215,30 @@ public final class InputCapture: @unchecked Sendable {
         currentPosition = event.location
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(currentPosition) }) {
             screenFrame = screen.frame
+            currentScreen = screen
         }
     }
 
+    private var currentDisplayID: CGDirectDisplayID? {
+        guard let num = currentScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return nil }
+        return CGDirectDisplayID(num.uint32Value)
+    }
+
     private func detectEdge() {
-        guard screenFrame != .zero else { return }
+        guard screenFrame != .zero, let displayID = currentDisplayID else { return }
         let p = currentPosition
         let f = screenFrame
-        if p.x <= f.minX + edgeThreshold { onScreenEdge?(.left) }
-        else if p.x >= f.maxX - edgeThreshold { onScreenEdge?(.right) }
-        else if p.y <= f.minY + edgeThreshold { onScreenEdge?(.bottom) }
-        else if p.y >= f.maxY - edgeThreshold { onScreenEdge?(.top) }
+        let edge: ScreenEdge
+        if p.x <= f.minX + edgeThreshold { edge = .left }
+        else if p.x >= f.maxX - edgeThreshold { edge = .right }
+        else if p.y <= f.minY + edgeThreshold { edge = .bottom }
+        else if p.y >= f.maxY - edgeThreshold { edge = .top }
+        else { return }
+        // Only the configured Android edge of this display triggers a switch;
+        // other screens/edges are ordinary macOS multi-monitor navigation.
+        guard stateLock.withLock({ androidEdgeByDisplay[displayID] }) == edge else { return }
+        onScreenEdge?(edge)
     }
 
     private func centerPointer() {
@@ -215,51 +247,23 @@ public final class InputCapture: @unchecked Sendable {
         }
     }
 
-    // MARK: - Tap option updates
-
-    private func updateTapOptions() {
-        guard let tap else { return }
-        tapQueue.async { [weak self] in
-            guard let self, let tap = self.tap else { return }
-            let options: CGEventTapOptions = self.isSuppressing ? .defaultTap : .listenOnly
-            CGEvent.tapEnable(tap: tap, enable: false)
-            // Options are only applied at creation; re-creating the tap with
-            // the new options keeps the suppression contract exact.
-            self.recreateTapIfNeeded(options: options)
+    /// Pins the macOS pointer to the configured Android edge of the current
+    /// display while suppressed (CGWarpMouseCursorPosition posts no events,
+    /// so there is no feedback loop). Keeps the cursor visually at the edge
+    /// instead of drifting with the deltas forwarded to Android.
+    private func holdPointerAtEdge() {
+        guard screenFrame != .zero, let displayID = currentDisplayID,
+              let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
+        let f = screenFrame
+        let p = currentPosition
+        let hold: CGPoint
+        switch edge {
+        case .left:   hold = CGPoint(x: f.minX + edgeThreshold, y: p.y)
+        case .right:  hold = CGPoint(x: f.maxX - edgeThreshold, y: p.y)
+        case .top:    hold = CGPoint(x: p.x, y: f.maxY - edgeThreshold)
+        case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
-    }
-
-    private func recreateTapIfNeeded(options: CGEventTapOptions) {
-        guard let tap else { return }
-        CFMachPortInvalidate(tap)
-        self.tap = nil
-        if let source = runLoopSource {
-            CFRunLoopSourceInvalidate(source)
-        }
-        runLoopSource = nil
-        var mask: CGEventMask = 0
-        for eventType in Self.capturedEvents {
-            mask |= CGEventMask(1 << eventType.rawValue)
-        }
-        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
-            guard let refcon else { return Unmanaged.passRetained(event) }
-            let capture = Unmanaged<InputCapture>.fromOpaque(refcon).takeUnretainedValue()
-            return capture.handle(proxy: proxy, type: type, event: event)
-        }
-        guard let newTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: options,
-            eventsOfInterest: mask,
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else { return }
-        self.tap = newTap
-        if let runLoop {
-            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, newTap, 0)
-            runLoopSource = source
-            CFRunLoopAddSource(runLoop, source, .commonModes)
-        }
+        CGWarpMouseCursorPosition(hold)
     }
 
     // MARK: - Fail-safe watchdog
