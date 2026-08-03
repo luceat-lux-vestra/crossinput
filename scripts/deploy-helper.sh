@@ -100,10 +100,13 @@ helper_running() {
 # pkill patterns are matched twice (full-name and stdin-file patterns) so a
 # stale tail from a previous start() cannot race a later session (observed on
 # device: 6 orphaned tails interleaved garbage into the helper stream).
+# NOTE: patterns use the [x] bracket trick so pkill/grep never match the
+# remote shell's own command line (which contains the literal pattern text) —
+# otherwise the shell kills itself mid-sequence and some processes survive.
 kill_orphans() {
     adb -s "$DEVICE" shell \
-        "pkill -f 'crossinput-helper.apk' 2>/dev/null || true; pkill -f 'cxi-helper-stdin' 2>/dev/null || true; \
-         ps -A -o PID,ARGS | grep -E 'crossinput-helper|cxi-helper-stdin' | grep -v grep | awk '{print \$1}' | xargs -r kill -9 2>/dev/null || true" || true
+        "pkill -f 'crossinput-[h]elper.apk' 2>/dev/null || true; pkill -f 'cxi-[h]elper-stdin' 2>/dev/null || true; \
+         ps -A -o PID,ARGS | grep -E 'crossinput-[h]elper|cxi-[h]elper-stdin' | grep -v grep | awk '{print \$1}' | xargs kill -9 2>/dev/null || true" || true
     sleep 1
 }
 

@@ -4,14 +4,34 @@ import AndroidBridge
 import InputCapture
 import EdgeSwitch
 import AppSettings
+import Diagnostics
 
 @main
 struct AmpersandApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        MenuBarExtra("Ampersand", systemImage: "cursorarrow.motionlines") {
+        MenuBarExtra {
             AppMenu(model: model)
+        } label: {
+            Image(systemName: "cursorarrow.motionlines")
+                .foregroundStyle(model.statusColor)
+        }
+    }
+}
+
+/// Menu bar icon color reflects state at a glance:
+/// gray idle / orange connecting / red error / green macActive /
+/// blue dexActive / yellow recovering.
+extension AppModel {
+    var statusColor: Color {
+        if state == .dexActive { return .blue }
+        if state == .recovering { return .yellow }
+        switch phase {
+        case .idle: return .gray
+        case .connecting: return .orange
+        case .ready: return .green
+        case .error: return .red
         }
     }
 }
@@ -37,17 +57,22 @@ final class AppModel: ObservableObject {
     nonisolated(unsafe) var connection: ConnectionManager?
     nonisolated let capture: InputCapture
     nonisolated let switchMachine: EdgeSwitchStateMachine
+    nonisolated(unsafe) private var hidDeviceId: UInt32?
+    nonisolated(unsafe) private var hidButtons: UInt8 = 0
+    nonisolated(unsafe) private var moveCount: Int = 0
 
     init() {
         capture = InputCapture()
         switchMachine = EdgeSwitchStateMachine()
         switchMachine.onStateChange = { [weak self] newState in
             Task { @MainActor in
+                Diagnostics.log("edge switch state -> \(newState.rawValue)")
                 self?.state = newState
                 self?.apply(state: newState)
             }
         }
         capture.onScreenEdge = { [weak self] edge in
+            Diagnostics.log("screen edge hit: \(edge)")
             self?.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
@@ -65,15 +90,22 @@ final class AppModel: ObservableObject {
     func connect(serial: String) async {
         self.serial = serial
         phase = .connecting
+        // Tear down any previous connection (repeated Connect clicks must not
+        // leave orphaned helpers on the device).
+        let old = connection
+        connection = nil
+        old?.shutdownAndWait()
         var config = ConnectionManager.Configuration(serial: serial)
         let adbPath = Self.locateAdb()
         if let adbPath { config.adbPath = adbPath }
+        config.stderrHandler = { text in Diagnostics.log("helper: \(text)") }
         let manager = ConnectionManager(configuration: config)
         manager.onEvent = { [weak self] frame in
             self?.handleUnsolicited(frame)
         }
         manager.onDisconnect = { [weak self] in
             Task { @MainActor in
+                self?.hidDeviceId = nil
                 self?.connection = nil
                 self?.switchMachine.connectionLost()
                 if self?.phase == .connecting || self?.phase == .ready {
@@ -82,6 +114,7 @@ final class AppModel: ObservableObject {
             }
         }
         connection = manager
+        switchMachine.activate()
         do {
             try await manager.connect()
             switchMachine.connectionBegan()
@@ -94,13 +127,20 @@ final class AppModel: ObservableObject {
                     select(match)
                 } else if let desktop = list.first(where: { $0.isDesktop }) {
                     select(desktop)
+                } else if let hdmi = list.first(where: { $0.type == 2 }) { // HDMI
+                    select(hdmi)
                 } else if let first = list.first {
                     select(first)
                 }
             }
             switchMachine.connectionReady()
             phase = .ready
+            if enable() {
+                await setupHidDevice()
+            }
         } catch {
+            Diagnostics.log("connect failed: \(error)")
+            switchMachine.connectionLost()
             phase = .error("\(error)")
         }
     }
@@ -115,19 +155,39 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        if let deviceId = hidDeviceId {
+            hidDeviceId = nil
+            let destroyPayload = Messages.destroyHidDevice(deviceId: deviceId)
+            Task { [weak self] in
+                guard let connection = self?.connection else { return }
+                _ = try? await connection.request(.destroyHidDevice, payload: destroyPayload)
+            }
+        }
         connection?.shutdownAndWait()
         connection = nil
         switchMachine.deactivate()
         phase = .idle
     }
 
-    func enable() {
-        _ = capture.start()
+    func enable() -> Bool {
+        guard capture.start() else {
+            Diagnostics.log("capture start failed: accessibility not granted")
+            phase = .error("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
+            return false
+        }
+        Diagnostics.log("capture started; edge switch activated")
         switchMachine.activate()
+        return true
     }
 
     func emergencyReturn() {
         switchMachine.emergencyReturn()
+    }
+
+    func openAccessibilitySettings() {
+        Diagnostics.log("opening Accessibility settings pane")
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
     }
 
     var isDisconnected: Bool {
@@ -150,30 +210,83 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Creates the UHID mouse on the helper and remembers its device id.
+    /// If creation fails, pointer events fall back to the SDK injection path
+    /// (SdkPointerBackend) which still routes hover/click but cannot move the
+    /// DeX cursor sprite — UHID is the verified channel (issue #6 verdict).
+    func setupHidDevice() async {
+        guard let connection else { return }
+        do {
+            let frame = try await connection.request(.createHidDevice,
+                                                      payload: Messages.createHidDevice(descriptor: Self.mouseDescriptor))
+            switch frame.type {
+            case .hidCreated:
+                hidDeviceId = try Messages.decodeHidCreated(frame.payload)
+                Diagnostics.log("UHID mouse created id=\(hidDeviceId ?? 0)")
+            case .hidError:
+                if let err = try? Messages.decodeHidError(frame.payload) {
+                    Diagnostics.log("UHID create failed (code \(err.code)): \(err.message)")
+                }
+                Diagnostics.log("falling back to SDK pointer injection")
+            default:
+                Diagnostics.log("unexpected response \(frame.type) to createHidDevice; falling back to SDK injection")
+            }
+        } catch {
+            Diagnostics.log("createHidDevice failed: \(error); falling back to SDK injection")
+        }
+    }
+
     /// Runs on the capture thread (nonisolated): forward pointer events to the helper.
     nonisolated func onCapturedEvent(_ event: PointerEvent) {
-        if case let .move(dx, dy) = event.kind {
+        switch event.kind {
+        case let .move(dx, dy):
             switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+            moveCount &+= 1
+            if moveCount.isMultiple(of: 200) {
+                Diagnostics.log("captured moves: \(moveCount)")
+            }
+        case let .button(button, down):
+            Diagnostics.log("captured button \(button) \(down ? "down" : "up")")
+        case .scroll:
+            Diagnostics.log("captured scroll")
         }
         send(event: event)
     }
 
+    /// Forward a captured event while the pointer is suppressed (dexActive).
+    /// Uses the UHID mouse when available, else falls back to SDK injection.
     nonisolated func send(event: PointerEvent) {
         guard let connection else { return }
-        switch event.kind {
-        case let .move(dx, dy):
-            try? connection.send(CxiFrame(type: .pointerMoveRel,
-                                          requestId: 1,
-                                          payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
-        case let .button(button, down):
-            try? connection.send(CxiFrame(type: .pointerButton,
-                                          requestId: 1,
-                                          payload: Messages.pointerButton(button: button, down: down)))
-        case let .scroll(horizontal, vertical):
-            try? connection.send(CxiFrame(type: .pointerScroll,
-                                          requestId: 1,
-                                          payload: Messages.pointerScroll(horizontal: horizontal,
-                                                                          vertical: vertical)))
+        if let deviceId = hidDeviceId {
+            switch event.kind {
+            case let .move(dx, dy):
+                let report = Self.hidReport(buttons: hidButtons, dx: dx, dy: dy, wheel: 0)
+                try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                              payload: Messages.hidReport(deviceId: deviceId, report: report)))
+            case let .button(button, down):
+                let bit = Self.hidButtonBit(for: button)
+                if down { hidButtons |= bit } else { hidButtons &= ~bit }
+                let report = Self.hidReport(buttons: hidButtons, dx: 0, dy: 0, wheel: 0)
+                try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                              payload: Messages.hidReport(deviceId: deviceId, report: report)))
+            case let .scroll(_, vertical):
+                let wheel: UInt8 = vertical > 0 ? 1 : (vertical < 0 ? 255 : 0)
+                let report = Self.hidReport(buttons: hidButtons, dx: 0, dy: 0, wheel: wheel)
+                try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                              payload: Messages.hidReport(deviceId: deviceId, report: report)))
+            }
+        } else {
+            switch event.kind {
+            case let .move(dx, dy):
+                try? connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
+                                              payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
+            case let .button(button, down):
+                try? connection.send(CxiFrame(type: .pointerButton, requestId: 1,
+                                              payload: Messages.pointerButton(button: button, down: down)))
+            case let .scroll(horizontal, vertical):
+                try? connection.send(CxiFrame(type: .pointerScroll, requestId: 1,
+                                              payload: Messages.pointerScroll(horizontal: horizontal, vertical: vertical)))
+            }
         }
     }
 
@@ -181,7 +294,7 @@ final class AppModel: ObservableObject {
         switch frame.type {
         case .logEvent:
             if let log = try? Messages.decodeLogEvent(frame.payload) {
-                NSLog("[crossinput:helper] %@", log.message)
+                Diagnostics.log("helper log: \(log.message)")
             }
         case .fatalError:
             if let fatal = try? Messages.decodeFatalError(frame.payload) {
@@ -198,6 +311,36 @@ final class AppModel: ObservableObject {
     private static func locateAdb() -> String? {
         let candidates = ["/usr/local/bin/adb", "/opt/homebrew/bin/adb", "/usr/bin/adb"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    // MARK: - UHID mouse (verified channel for the DeX cursor sprite)
+
+    /// 62-byte mouse descriptor — byte-identical to protocol/fixtures/create-hid.bin.
+    nonisolated static let mouseDescriptor: Data = Data([
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09,
+        0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01,
+        0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30,
+        0x09, 0x31, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+        0xc0, 0xc0])
+
+    /// HID report payload: buttons u8, dx i8, dy i8, wheel u8 (wheel 1=up, 255=down).
+    nonisolated static func hidReport(buttons: UInt8, dx: Int32, dy: Int32, wheel: UInt8) -> Data {
+        var report = Data()
+        report.append(buttons)
+        report.append(UInt8(bitPattern: Int8(clamping: dx)))
+        report.append(UInt8(bitPattern: Int8(clamping: dy)))
+        report.append(wheel)
+        return report
+    }
+
+    /// Protocol button (0=left 1=right 2=middle) -> HID button bit.
+    nonisolated static func hidButtonBit(for button: UInt32) -> UInt8 {
+        switch button {
+        case 0: return 0x01
+        case 1: return 0x02
+        default: return 0x04
+        }
     }
 
     /// Returns the first connected adb device serial, if any.
@@ -239,6 +382,12 @@ private struct AppMenu: View {
                 Task {
                     await model.connect(serial: await AppModel.firstAdbSerial())
                 }
+            }
+            Button("Grant Accessibility…") {
+                model.openAccessibilitySettings()
+            }
+            Button("Enable Edge Switch") {
+                _ = model.enable()
             }
         }
 
