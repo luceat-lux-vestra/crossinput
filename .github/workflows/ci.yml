@@ -7,18 +7,18 @@ on:
 
 jobs:
   macos-app:
-    name: macOS 앱 빌드 + 테스트
+    name: macOS App Build + Test
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Swift 테스트
+      - name: Swift Test
         run: |
           cd apps/macos
           swift build
           swift test
 
   android-helper:
-    name: Android helper 빌드 + 테스트
+    name: Android Helper Build + Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,18 +27,18 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
-      - name: Gradle 테스트
+      - name: Gradle Test
         run: |
           cd android/helper
           chmod +x gradlew
           ./gradlew test assembleDebug --console=plain
 
   markdown:
-    name: 문서 검증
+    name: Documentation Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-      - name: 프로토콜 문서 ↔ fixture 일치 검사
+      - name: Protocol Document Fixture Validation
         run: |
           node protocol/scripts/check-fixtures.mjs
