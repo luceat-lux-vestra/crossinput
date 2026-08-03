@@ -155,7 +155,11 @@ class SdkPointerBackend(
             id = 0
             toolType = MotionEvent.TOOL_TYPE_MOUSE
         }
-        val now = System.currentTimeMillis()
+        // uptimeMillis, not currentTimeMillis: injected events must use the
+        // same clock domain as real input (scrcpy does the same). Epoch-based
+        // eventTime breaks app-side gesture/timer comparisons and caused input
+        // ANRs in Samsung's DeX launcher on device.
+        val now = android.os.SystemClock.uptimeMillis()
         return MotionEvent.obtain(
             now,
             now,
