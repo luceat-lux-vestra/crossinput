@@ -39,6 +39,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     // MARK: - Public transitions
 
     public func activate() {
+        guard state == .disabled else { return }
         transition(to: .disconnected)
     }
 
@@ -48,7 +49,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     public func connectionBegan() {
         switch state {
-        case .disconnected: transition(to: .connecting)
+        case .disconnected, .recovering: transition(to: .connecting)
         case .macActive: transition(to: .connecting)
         default: break
         }
