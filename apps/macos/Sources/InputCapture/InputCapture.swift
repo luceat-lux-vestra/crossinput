@@ -189,7 +189,11 @@ public final class InputCapture: @unchecked Sendable {
              .otherMouseDown, .otherMouseUp:
             if isSuppressing {
                 let button = Self.buttonIndex(for: type)
-                let down = type.rawValue % 2 == 0 // Down events are even
+                let down: Bool
+                switch type {
+                case .leftMouseDown, .rightMouseDown, .otherMouseDown: down = true
+                default: down = false
+                }
                 onPointerEvent?(PointerEvent(.button(button: button, down: down)))
                 return nil
             }
