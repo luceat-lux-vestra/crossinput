@@ -13,16 +13,22 @@ import Darwin // for dlopen/dlsym
 // Symbols not in public tbd — resolve at runtime via dlsym.
 private typealias CGSDefaultConnectionFn = @convention(c) () -> UInt32
 private typealias CGSSetConnectionPropertyFn = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
+private typealias CGAssociateMouseAndMouseCursorPositionFn = @convention(c) (Int32) -> Void
 
 nonisolated(unsafe) private var cgsDefaultConnection: CGSDefaultConnectionFn?
 nonisolated(unsafe) private var cgsSetConnectionProperty: CGSSetConnectionPropertyFn?
+nonisolated(unsafe) private var cgsAssociateMouseAndMouseCursorPosition: CGAssociateMouseAndMouseCursorPositionFn?
 
 private func resolveCGSSymbols() {
-    guard cgsDefaultConnection == nil || cgsSetConnectionProperty == nil else { return }
+    guard cgsDefaultConnection == nil || cgsSetConnectionProperty == nil || cgsAssociateMouseAndMouseCursorPosition == nil else { return }
     let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
     if let h = handle {
         cgsDefaultConnection = unsafeBitCast(dlsym(h, "CGSDefaultConnection"), to: CGSDefaultConnectionFn.self)
         cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
+        cgsAssociateMouseAndMouseCursorPosition = unsafeBitCast(dlsym(h, "CGAssociateMouseAndMouseCursorPosition"), to: CGAssociateMouseAndMouseCursorPositionFn.self)
+        Diagnostics.log("CGS symbols resolved: conn=\(cgsDefaultConnection != nil), setProp=\(cgsSetConnectionProperty != nil), associate=\(cgsAssociateMouseAndMouseCursorPosition != nil)")
+    } else {
+        Diagnostics.log("CGS dlopen failed")
     }
 }
 
@@ -323,7 +329,12 @@ public final class InputCapture: @unchecked Sendable {
         CGWarpMouseCursorPosition(hold)
         // Re-associate mouse-to-cursor so acceleration/velocity tracking
         // continues correctly after the warp (macOS resets it on raw warps).
-        CGAssociateMouseAndMouseCursorPosition(1)
+        if let fn = cgsAssociateMouseAndMouseCursorPosition {
+            fn(1)
+            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition(1) called")
+        } else {
+            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition not resolved")
+        }
         postSyntheticMove(at: hold)
         // Don't re-trigger the edge switch from the pointer sitting on the edge.
         edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
