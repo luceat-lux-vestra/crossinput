@@ -66,7 +66,7 @@ Every message is a single frame; all integers are **little-endian**:
 displayId u32
 type u8          (0=UNKNOWN 1=BUILT_IN 2=HDMI 3=DP 4=VIRTUAL 5=EXTERNAL 6=OVERLAY 7=FLAG_DESKTOP)
 flags u32        (raw Display.FLAG_*)
-state u8         (0=OFF 1=ON 2=DOZE 3=DOZE_SUSPEND 4=ON_SUSPEND 5=UNKNOWN)
+state u8         (AOSP Display.STATE_*: 0=UNKNOWN 1=OFF 2=ON 3=DOZE 4=DOZE_SUSPEND 5=VR 6=ON_SUSPEND)
 width u32        (natural resolution)
 height u32
 densityDpi u32
