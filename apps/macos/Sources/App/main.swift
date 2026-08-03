@@ -81,6 +81,11 @@ final class AppModel: ObservableObject {
         capture.onSuppressionReleased = { [weak self] in
             Task { @MainActor in
                 self?.phase = .ready
+                // Suppression was lifted by the emergency hotkey (⇧⌘X), the
+                // fail-safe watchdog, or the normal return path. If the state
+                // machine is still edgeArmed/dexActive, move it back to
+                // macActive so edge switching works again (no-op otherwise).
+                self?.switchMachine.emergencyReturn()
             }
         }
     }
