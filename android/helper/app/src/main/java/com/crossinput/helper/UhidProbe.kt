@@ -30,7 +30,7 @@ object UhidProbe {
 
     private const val UHID_CREATE2 = 11
     private const val UHID_INPUT2 = 12
-    private const val BUS_VIRTUAL = 6
+    private const val BUS_USB = 3
 
     private fun hd(vararg b: Int) = ByteArray(b.size) { b[it].toByte() }
 
@@ -102,7 +102,7 @@ object UhidProbe {
         val fd = Os.open("/dev/uhid", OsConstants.O_RDWR, 0)
         val vendor = args.getOrNull(2)?.toInt(16) ?: 0
         val product = args.getOrNull(3)?.toInt(16) ?: 0
-        val bus = args.getOrNull(4)?.toInt(16) ?: BUS_VIRTUAL
+        val bus = args.getOrNull(4)?.toInt(16) ?: BUS_USB
         val createPayload = createCreate2Payload("crossinput-probe", descriptor, vendor, product, bus)
         Os.write(fd, createPayload, 0, createPayload.size)
         System.out.println("device created type=$type")
@@ -203,7 +203,8 @@ object UhidProbe {
     private fun writeInput(fd: FileDescriptor, report: ByteArray) {
         val buf = ByteBuffer.allocate(4 + 2 + report.size)
         buf.order(ByteOrder.LITTLE_ENDIAN)
-        buf.putInt(12) // UHID_INPUT2        buf.putShort(report.size.toShort())
+        buf.putInt(UHID_INPUT2)
+        buf.putShort(report.size.toShort())
         buf.put(report)
         Os.write(fd, buf.array(), 0, buf.capacity())
     }
@@ -213,7 +214,7 @@ object UhidProbe {
         descriptor: ByteArray,
         vendor: Int = 0,
         product: Int = 0,
-        bus: Int = BUS_VIRTUAL,
+        bus: Int = BUS_USB,
     ): ByteArray {
         val buf = ByteBuffer.allocate(4 + 128 + 64 + 64 + 2 + 2 + 4 + 4 + 4 + 4 + descriptor.size)
         buf.order(ByteOrder.LITTLE_ENDIAN)
