@@ -54,6 +54,8 @@ public final class InputCapture: @unchecked Sendable {
     private var androidEdgeByDisplay: [CGDirectDisplayID: ScreenEdge] = [:]
     private let edgeThreshold: CGFloat = 2
     private var emergencyHotKey: EventHotKeyRef?
+    /// Prevents an immediate re-trigger after the pointer returns to macOS.
+    private var edgeCooldownUntil: CFTimeInterval = 0
 
     public init() {}
 
@@ -231,6 +233,9 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func detectEdge() {
+        // After a return-to-macOS warp, briefly ignore the edge so the pointer
+        // sitting on the crossing point does not instantly switch back.
+        guard CFAbsoluteTimeGetCurrent() >= edgeCooldownUntil else { return }
         guard screenFrame != .zero, let displayID = currentDisplayID else { return }
         let p = currentPosition
         let f = screenFrame
@@ -264,13 +269,34 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
+        postSyntheticMove(at: hold)
+        // Don't re-trigger the edge switch from the pointer sitting on the edge.
+        edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+    }
+
+    /// macOS drops the first real movement deltas after a warp (the pointer
+    /// "needs a lift and another move" to respond). Posting a synthetic move
+    /// event at the target position re-syncs the input stream.
+    private func postSyntheticMove(at point: CGPoint) {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(mouseEventSource: source,
+                                  mouseType: .mouseMoved,
+                                  mouseCursorPosition: point,
+                                  mouseButton: .left) else { return }
+        event.post(tap: .cghidEventTap)
     }
 
     private func hideCursor() {
+        if let displayID = currentDisplayID {
+            CGDisplayHideCursor(displayID)
+        }
         CGDisplayHideCursor(CGMainDisplayID())
     }
 
     private func showCursor() {
+        if let displayID = currentDisplayID {
+            CGDisplayShowCursor(displayID)
+        }
         CGDisplayShowCursor(CGMainDisplayID())
     }
 
@@ -291,6 +317,11 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
+        // A warp does not re-display the cursor, but keep hiding it in case
+        // macOS re-shows it across displays while we re-pin each move.
+        if let displayID = currentDisplayID {
+            CGDisplayHideCursor(displayID)
+        }
     }
 
     // MARK: - Fail-safe watchdog
