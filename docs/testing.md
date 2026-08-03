@@ -39,7 +39,37 @@ Status: ✅ verified on device (SM-G977N) · ⏳ not yet verified. Full results 
 | 4 | Composite mouse (wheel) | left/right click, drag, vertical/horizontal scroll | ⏳ (click and focus change verified; drag/scroll pending) |
 | 5 | Input persists after app switch | delivered to DeX screen even after focus changes | ✅ (click delivered after focus change, displayId verified) |
 
-## Edge switching stability (Phase 5)
+## Phase 2: CXI helper verification (issue #6)
 
+Drives the Android helper over the binary CXI protocol using
+`scripts/deploy-helper.sh`. Prereqs: DeX active (same setup as Phase 0),
+APK buildable (`scripts/build-android-helper.sh assembleDebug`).
+
+1. Pre-check display state: `adb shell dumpsys display` — the Desktop display must be present (do not assume any display id; AGENTS.md rule 3).
+2. `scripts/deploy-helper.sh start` — build + push + launch `app_process` with FIFO stdin.
+3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
+4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
+5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display.
+6. `scripts/deploy-helper.sh send <frame-hex>` with the create-hid fixture frame (`xxd -p protocol/fixtures/create-hid.bin | tr -d '\n'`) — expect HID_CREATED (0x8004).
+7. `scripts/deploy-helper.sh send <frame-hex>` with the hid-report fixture frame (same command on `protocol/fixtures/hid-report.bin`) — pointer must appear/move on the DeX screen.
+8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
+9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy UHID devices and exit cleanly (B-07).
+
+Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check-fixtures.mjs` keeps them in sync with `protocol/protocol.md`.
+
+### Verification items (Phase 2)
+
+Status: ⏳ on-device verification pending (results recorded in issue #6).
+
+| # | Item | Pass criteria |
+|---|---|---|
+| 1 | HELLO/HELLO_ACK | HELLO_ACK with matching requestId within 2s |
+| 2 | LIST_DISPLAYS/DISPLAY_LIST | All displays reported, Desktop display present with correct size/density |
+| 3 | SELECT_DISPLAY | Unknown id → FATAL_ERROR; known id → DISPLAY_CHANGED echo |
+| 4 | CREATE_HID_DEVICE | HID_CREATED with device id; `/dev/uhid` created (log metadata) |
+| 5 | HID_REPORT | Pointer visible + moves on DeX external display |
+| 6 | SHUTDOWN | Clean exit; UHID devices destroyed; stdout flushed |
+
+## Edge switching stability (Phase 5)
 - Not declared complete until 100 consecutive edge-switch repeat tests pass.
 - For each failure case, verify state machine logs + recovery path.
