@@ -135,6 +135,7 @@ final class AppModel: ObservableObject {
             }
             switchMachine.connectionReady()
             phase = .ready
+            applyEdgeConfig()
             if enable() {
                 await setupHidDevice()
             }
@@ -313,6 +314,43 @@ final class AppModel: ObservableObject {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    // MARK: - Per-display edge configuration
+
+    /// Applies the persisted per-display Android-edge settings to the capture.
+    func applyEdgeConfig() {
+        for screen in NSScreen.screens {
+            let id = Self.displayID(of: screen)
+            let stored = AppSettings.Settings.androidEdge(displayID: id)
+            capture.setAndroidEdge(Self.screenEdge(from: stored), forDisplay: id)
+        }
+    }
+
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID {
+        guard let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return 0 }
+        return CGDirectDisplayID(num.uint32Value)
+    }
+
+    static func screenEdge(from string: String?) -> ScreenEdge? {
+        switch string {
+        case "left": return .left
+        case "right": return .right
+        case "top": return .top
+        case "bottom": return .bottom
+        default: return nil
+        }
+    }
+
+    static func edgeName(_ edge: ScreenEdge?) -> String {
+        switch edge {
+        case .left: return "left"
+        case .right: return "right"
+        case .top: return "top"
+        case .bottom: return "bottom"
+        case nil: return "none"
+        }
+    }
+
     // MARK: - UHID mouse (verified channel for the DeX cursor sprite)
 
     /// 62-byte mouse descriptor — byte-identical to protocol/fixtures/create-hid.bin.
@@ -402,6 +440,31 @@ private struct AppMenu: View {
                               ? "checkmark.circle.fill" : "circle")
                         Text("\(display.name) (\(display.width)×\(display.height))")
                     }
+                }
+            }
+        }
+
+        if !NSScreen.screens.isEmpty {
+            Divider()
+            Text("Android is at…")
+            ForEach(NSScreen.screens, id: \.hashValue) { screen in
+                let displayID = AppModel.displayID(of: screen)
+                let stored = AppSettings.Settings.androidEdge(displayID: displayID)
+                Picker("\(screen.localizedName) (\(Int(screen.frame.width))×\(Int(screen.frame.height)))",
+                       selection: Binding<String>(
+                        get: { stored ?? "none" },
+                        set: { newValue in
+                            let edge = AppModel.screenEdge(from: newValue)
+                            AppSettings.Settings.setAndroidEdge(newValue, displayID: displayID)
+                            model.capture.setAndroidEdge(edge, forDisplay: displayID)
+                            Diagnostics.log("android edge for display \(displayID) = \(newValue)")
+                        }
+                       )) {
+                    Text("None").tag("none")
+                    Text("Left").tag("left")
+                    Text("Right").tag("right")
+                    Text("Top").tag("top")
+                    Text("Bottom").tag("bottom")
                 }
             }
         }
