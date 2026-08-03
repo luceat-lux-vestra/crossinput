@@ -1,9 +1,10 @@
 import Foundation
 import CoreGraphics
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import AppKit
 import Carbon.HIToolbox
 import EdgeSwitch
+import Diagnostics
 
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
@@ -56,8 +57,13 @@ public final class InputCapture: @unchecked Sendable {
 
     /// Installs the event tap and starts the capture run loop.
     /// Returns false if the app lacks Accessibility permission.
+    /// When permission is missing, the system prompt is triggered once so the
+    /// user can grant it (the app should retry start() afterwards).
     public func start() -> Bool {
         guard !AXIsProcessTrusted() else { return startTrusted() }
+        Diagnostics.log("start(): accessibility not granted; prompting")
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
         return false
     }
 
