@@ -29,4 +29,12 @@ android {
             // debug build for app_process execution (release avoids path hardcoding issues)
         }
     }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }
