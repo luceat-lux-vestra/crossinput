@@ -5,6 +5,26 @@ import AppKit
 import Carbon.HIToolbox
 import EdgeSwitch
 import Diagnostics
+import Darwin // for dlopen/dlsym
+
+// CGS (Core Graphics Services) private API for reliable cursor hide/show on
+// modern macOS (CGDisplayHideCursor deprecated/no-op on 14+). Mirrors
+// Deskflow/Synergy's SetsCursorInBackground pattern.
+// Symbols not in public tbd — resolve at runtime via dlsym.
+private typealias CGSDefaultConnectionFn = @convention(c) () -> UInt32
+private typealias CGSSetConnectionPropertyFn = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
+
+nonisolated(unsafe) private var cgsDefaultConnection: CGSDefaultConnectionFn?
+nonisolated(unsafe) private var cgsSetConnectionProperty: CGSSetConnectionPropertyFn?
+
+private func resolveCGSSymbols() {
+    guard cgsDefaultConnection == nil || cgsSetConnectionProperty == nil else { return }
+    let handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+    if let h = handle {
+        cgsDefaultConnection = unsafeBitCast(dlsym(h, "CGSDefaultConnection"), to: CGSDefaultConnectionFn.self)
+        cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
+    }
+}
 
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
@@ -269,6 +289,9 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
+        // Re-associate mouse-to-cursor so acceleration/velocity tracking
+        // continues correctly after the warp (macOS resets it on raw warps).
+        CGAssociateMouseAndMouseCursorPosition(1)
         postSyntheticMove(at: hold)
         // Don't re-trigger the edge switch from the pointer sitting on the edge.
         edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
@@ -287,6 +310,10 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func hideCursor() {
+        resolveCGSSymbols()
+        if let cid = cgsDefaultConnection?(), let setter = cgsSetConnectionProperty {
+            setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+        }
         if let displayID = currentDisplayID {
             CGDisplayHideCursor(displayID)
         }
@@ -294,6 +321,10 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func showCursor() {
+        resolveCGSSymbols()
+        if let cid = cgsDefaultConnection?(), let setter = cgsSetConnectionProperty {
+            setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanFalse)
+        }
         if let displayID = currentDisplayID {
             CGDisplayShowCursor(displayID)
         }
