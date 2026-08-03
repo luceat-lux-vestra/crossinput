@@ -33,6 +33,23 @@ object Messages {
         return HidReport(deviceId, lengthPrefixed(payload, 4))
     }
 
+    fun pointerMoveRel(payload: ByteArray): Pair<Int, Int> {
+        val bb = le(payload, 0)
+        return Pair(bb.int, bb.int)
+    }
+
+    data class PointerButton(val button: Int, val down: Boolean)
+
+    fun pointerButton(payload: ByteArray): PointerButton {
+        val bb = le(payload, 0)
+        return PointerButton(bb.int, bb.get().toInt() != 0)
+    }
+
+    fun pointerScroll(payload: ByteArray): Pair<Float, Float> {
+        val bb = le(payload, 0)
+        return Pair(bb.float, bb.float)
+    }
+
     // ---- Android → Mac (builders) ----
 
     fun helloAck(version: Int): ByteArray =

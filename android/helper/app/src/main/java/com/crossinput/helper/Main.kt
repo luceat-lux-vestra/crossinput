@@ -9,6 +9,7 @@ import com.crossinput.helper.protocol.FrameWriter
 import com.crossinput.helper.protocol.Messages
 import com.crossinput.helper.protocol.Protocol
 import com.crossinput.helper.protocol.ProtocolException
+import com.crossinput.helper.SdkPointerBackend
 import java.io.BufferedOutputStream
 import java.io.FileDescriptor
 import java.io.FileInputStream
@@ -39,7 +40,8 @@ object Main {
         }
         val discovery = DisplayDiscovery(context, writerLock, log)
         val hid = HidDeviceManager(log, context)
-        val controller = Controller(discovery, hid, writerLock, log)
+        val sdkPointer = SdkPointerBackend(log, context)
+        val controller = Controller(discovery, hid, sdkPointer, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
         val stdinThread = Thread {
@@ -90,6 +92,7 @@ object Main {
 class Controller(
     private val discovery: DisplayDiscovery,
     private val hid: HidDeviceManager,
+    private val sdkPointer: SdkPointerBackend,
     private val writerLock: WriterLock,
     private val log: Logger,
 ) {
@@ -107,6 +110,18 @@ class Controller(
             Protocol.TYPE_HID_REPORT -> {
                 val r = Messages.hidReport(frame.payload)
                 hid.sendReport(r.deviceId, r.report)
+            }
+            Protocol.TYPE_POINTER_MOVE_REL -> {
+                val (dx, dy) = Messages.pointerMoveRel(frame.payload)
+                sdkPointer.moveRelative(dx, dy)
+            }
+            Protocol.TYPE_POINTER_BUTTON -> {
+                val btn = Messages.pointerButton(frame.payload)
+                sdkPointer.button(btn.button, btn.down)
+            }
+            Protocol.TYPE_POINTER_SCROLL -> {
+                val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
+                sdkPointer.scroll(horizontal, vertical)
             }
             Protocol.TYPE_PING -> writerLock.withLock {
                 it.write(Protocol.TYPE_PONG, frame.requestId, Messages.pong())
@@ -170,7 +185,20 @@ class Controller(
             }
             return
         }
-        log.info("Main", "selected display id=$displayId")
+        val raw = discovery.display(displayId)
+        if (raw == null) {
+            log.error("Main", "display id=$displayId disappeared between discovery and selection")
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_FATAL_ERROR,
+                    frame.requestId,
+                    Messages.fatalError(3, "display id=$displayId disappeared"),
+                )
+            }
+            return
+        }
+        sdkPointer.selectDisplay(raw)
+        log.info("Main", "selected display id=$displayId (SDK pointer backend)")
         writerLock.withLock {
             it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(display))
         }

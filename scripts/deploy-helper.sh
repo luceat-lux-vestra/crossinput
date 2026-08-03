@@ -20,6 +20,7 @@
 #   scripts/deploy-helper.sh send <hex>       # append one CXI frame to helper stdin
 #   scripts/deploy-helper.sh hello|ping|list  # preset request frames
 #   scripts/deploy-helper.sh select <id>      # SELECT_DISPLAY frame (id = display id)
+#   scripts/deploy-helper.sh pointer <id>     # select display, then move/click/scroll
 #   scripts/deploy-helper.sh dump             # pull captured frames + stderr log
 #   scripts/deploy-helper.sh stop             # SHUTDOWN frame, then clean up processes
 #
@@ -41,6 +42,11 @@ FRAME_HELLO="4358490100010001000000020000000100"
 FRAME_PING="435849010007000600000000000000"
 FRAME_LIST="435849010002000200000000000000"
 FRAME_SHUTDOWN="435849010008000000000000000000"
+# POINTER_* presets (0x0009/0x000A/0x000B; values mirror protocol/fixtures/*.bin)
+FRAME_PTR_MOVE="435849010009000a000000080000000c000000f8ffffff"
+FRAME_PTR_BTN_DOWN="43584901000a000b000000050000000000000001"
+FRAME_PTR_BTN_UP="43584901000a000c000000050000000000000000"
+FRAME_PTR_SCROLL="43584901000b000d00000008000000000000000000803f"
 
 DEVICE="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
 if [ -z "$DEVICE" ]; then
@@ -113,6 +119,20 @@ case "$mode" in
         hex="$(python3 -c 'import struct, sys; print("435849010003000300000004000000" + struct.pack("<I", int(sys.argv[1])).hex())' "$id")"
         send "$hex"
         ;;
+    pointer)
+        id="${2:?pointer requires a display id}"
+        hex="$(python3 -c 'import struct, sys; print("435849010003000300000004000000" + struct.pack("<I", int(sys.argv[1])).hex())' "$id")"
+        send "$hex"
+        sleep 1
+        send "$FRAME_PTR_MOVE"
+        sleep 1
+        send "$FRAME_PTR_BTN_DOWN"
+        sleep 1
+        send "$FRAME_PTR_BTN_UP"
+        sleep 1
+        send "$FRAME_PTR_SCROLL"
+        echo "pointer sequence sent to display $id (move + click + scroll)"
+        ;;
     dump)
         adb -s "$DEVICE" pull "$REMOTE_OUT" /tmp/cxi-helper-stdout.bin >/dev/null
         echo "== stdout frames ($(wc -c </tmp/cxi-helper-stdout.bin) bytes):"
@@ -128,7 +148,7 @@ case "$mode" in
         ;;
     *)
         echo "unknown mode: $mode" >&2
-        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|dump|stop]" >&2
+        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|pointer <id>|dump|stop]" >&2
         exit 1
         ;;
 esac
