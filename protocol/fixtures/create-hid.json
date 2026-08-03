@@ -1,0 +1,5 @@
+{
+  "type": "CREATE_HID_DEVICE",
+  "requestId": 4,
+  "descriptorBase64": "BQEJAqEBCQGhAAUJGQEpAxUAJQGVA3UBgQKVAXUFgQEFAQkwCTEVgSV/dQiVAoEGCTgVgSV/dQiVAYEGwMA="
+}
