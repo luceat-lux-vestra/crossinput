@@ -75,6 +75,27 @@ class SdkPointerBackend(
         log.info("SdkPointerBackend", "selected display $selectedDisplayId (${displayWidth}x$displayHeight)")
     }
 
+    /**
+     * Re-reads the display size when the selected display reports a change
+     * (e.g. the external monitor resolution changed mid-session). Keeps the
+     * clamp bounds in sync so pointer coordinates stay inside the new size.
+     */
+    fun refreshMetrics(displayId: Int) {
+        if (displayId != selectedDisplayId || !initialized) return
+        val display = selectedDisplay ?: return
+        val metrics = android.util.DisplayMetrics()
+        display.getRealMetrics(metrics)
+        if (metrics.widthPixels == displayWidth && metrics.heightPixels == displayHeight) return
+        displayWidth = metrics.widthPixels
+        displayHeight = metrics.heightPixels
+        currentX = currentX.coerceIn(0f, displayWidth - 1f)
+        currentY = currentY.coerceIn(0f, displayHeight - 1f)
+        log.info(
+            "SdkPointerBackend",
+            "display $displayId size changed to ${displayWidth}x$displayHeight; re-clamped cursor",
+        )
+    }
+
     fun moveRelative(dx: Int, dy: Int) {
         if (!initialized || displayWidth == 0) {
             log.warn("SdkPointerBackend", "moveRelative called before display selected")
