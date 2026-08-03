@@ -1,0 +1,19 @@
+{
+  "type": "DISPLAY_LIST",
+  "requestId": 2,
+  "displays": [
+    {
+      "displayId": 2,
+      "type": 7,
+      "flags": 256,
+      "state": 1,
+      "width": 1920,
+      "height": 1080,
+      "densityDpi": 160,
+      "rotation": 0,
+      "name": "Desktop",
+      "uniqueId": "local:2",
+      "layerStack": 2
+    }
+  ]
+}
