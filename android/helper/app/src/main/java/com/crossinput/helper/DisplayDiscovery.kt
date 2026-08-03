@@ -46,6 +46,9 @@ class DisplayDiscovery(
     fun find(displayId: Int): DisplayInfo? = displays().firstOrNull { it.displayId == displayId }
         ?: buildInfo(displayManager.getDisplay(displayId))
 
+    /** Raw [Display] handle for the given id (needed by input backends). */
+    fun display(displayId: Int): Display? = displayManager.getDisplay(displayId)
+
     private fun notifyChanged(displayId: Int) {
         val info = buildInfo(displayManager.getDisplay(displayId)) ?: return
         log.info("DisplayDiscovery", "display changed id=$displayId")

@@ -16,6 +16,10 @@ object Protocol {
     const val TYPE_HID_REPORT: Int = 0x0006
     const val TYPE_PING: Int = 0x0007
     const val TYPE_SHUTDOWN: Int = 0x0008
+    // Semantic pointer messages (SDK injection backend; scrcpy-style)
+    const val TYPE_POINTER_MOVE_REL: Int = 0x0009
+    const val TYPE_POINTER_BUTTON: Int = 0x000A
+    const val TYPE_POINTER_SCROLL: Int = 0x000B
 
     const val TYPE_HELLO_ACK: Int = 0x8001
     const val TYPE_DISPLAY_LIST: Int = 0x8002

@@ -20,6 +20,7 @@
 #   scripts/deploy-helper.sh send <hex>       # append one CXI frame to helper stdin
 #   scripts/deploy-helper.sh hello|ping|list  # preset request frames
 #   scripts/deploy-helper.sh select <id>      # SELECT_DISPLAY frame (id = display id)
+#   scripts/deploy-helper.sh pointer <id>     # select display, then move/click/scroll
 #   scripts/deploy-helper.sh dump             # pull captured frames + stderr log
 #   scripts/deploy-helper.sh stop             # SHUTDOWN frame, then clean up processes
 #
@@ -41,6 +42,19 @@ FRAME_HELLO="4358490100010001000000020000000100"
 FRAME_PING="435849010007000600000000000000"
 FRAME_LIST="435849010002000200000000000000"
 FRAME_SHUTDOWN="435849010008000000000000000000"
+# POINTER_* presets (0x0009/0x000A/0x000B; values mirror protocol/fixtures/*.bin)
+FRAME_PTR_MOVE="435849010009000a000000080000000c000000f8ffffff"
+FRAME_PTR_BTN_DOWN="43584901000a000b000000050000000000000001"
+FRAME_PTR_BTN_UP="43584901000a000c000000050000000000000000"
+FRAME_PTR_SCROLL="43584901000b000d00000008000000000000000000803f"
+# HID_REPORT presets (0x0006; values mirror protocol/fixtures/hid-report.bin):
+# payload = deviceId u32 + reportLen u32 + report bytes (btn u8, dx i8, dy i8, wheel u8)
+# e.g. rel(+60,+40) = 01000000 04000000 003c2800
+FRAME_HID_CREATE="4358490100040004000000420000003e00000005010902a1010901a100050919012903150025019503750181029501750581010501093009311581257f75089502810609381581257f750895018106c0c0"
+FRAME_HID_REL1="435849010006000f0000000c0000000100000004000000003c2800"
+FRAME_HID_REL2="43584901000600100000000c000000010000000400000000643200"
+FRAME_HID_REL3="43584901000600110000000c000000010000000400000000c85000"
+FRAME_HID_REL4="43584901000600120000000c000000010000000400000000f0a000"
 
 DEVICE="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
 if [ -z "$DEVICE" ]; then
@@ -59,6 +73,7 @@ deploy() {
 }
 
 start() {
+    kill_orphans
     deploy
     adb -s "$DEVICE" shell "rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG; touch $REMOTE_IN"
     # Probe-style detached launch (Phase 0 pattern): tail -f holds the helper
@@ -79,6 +94,17 @@ start() {
 
 helper_running() {
     adb -s "$DEVICE" shell "ps -A -o ARGS" | grep -q "crossinput-helper.apk"
+}
+
+# Kill the helper and every (possibly orphaned) tail -f feeding its stdin.
+# pkill patterns are matched twice (full-name and stdin-file patterns) so a
+# stale tail from a previous start() cannot race a later session (observed on
+# device: 6 orphaned tails interleaved garbage into the helper stream).
+kill_orphans() {
+    adb -s "$DEVICE" shell \
+        "pkill -f 'crossinput-helper.apk' 2>/dev/null || true; pkill -f 'cxi-helper-stdin' 2>/dev/null || true; \
+         ps -A -o PID,ARGS | grep -E 'crossinput-helper|cxi-helper-stdin' | grep -v grep | awk '{print \$1}' | xargs -r kill -9 2>/dev/null || true" || true
+    sleep 1
 }
 
 send() {
@@ -113,6 +139,32 @@ case "$mode" in
         hex="$(python3 -c 'import struct, sys; print("435849010003000300000004000000" + struct.pack("<I", int(sys.argv[1])).hex())' "$id")"
         send "$hex"
         ;;
+    pointer)
+        id="${2:?pointer requires a display id}"
+        hex="$(python3 -c 'import struct, sys; print("435849010003000300000004000000" + struct.pack("<I", int(sys.argv[1])).hex())' "$id")"
+        send "$hex"
+        sleep 1
+        send "$FRAME_PTR_MOVE"
+        sleep 1
+        send "$FRAME_PTR_BTN_DOWN"
+        sleep 1
+        send "$FRAME_PTR_BTN_UP"
+        sleep 1
+        send "$FRAME_PTR_SCROLL"
+        echo "pointer sequence sent to display $id (move + click + scroll)"
+        ;;
+    hid)
+        send "$FRAME_HID_CREATE"
+        sleep 1
+        send "$FRAME_HID_REL1"
+        sleep 1
+        send "$FRAME_HID_REL2"
+        sleep 1
+        send "$FRAME_HID_REL3"
+        sleep 1
+        send "$FRAME_HID_REL4"
+        echo "hid sequence sent (create + 4 relative moves)"
+        ;;
     dump)
         adb -s "$DEVICE" pull "$REMOTE_OUT" /tmp/cxi-helper-stdout.bin >/dev/null
         echo "== stdout frames ($(wc -c </tmp/cxi-helper-stdout.bin) bytes):"
@@ -123,12 +175,13 @@ case "$mode" in
     stop)
         send "$FRAME_SHUTDOWN" 2>/dev/null || true
         sleep 2
-        adb -s "$DEVICE" shell "pkill -f 'crossinput-helper.apk' 2>/dev/null || true; pkill -f 'cxi-helper-stdin' 2>/dev/null || true; rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG" || true
+        kill_orphans
+        adb -s "$DEVICE" shell "rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG" || true
         echo "stopped"
         ;;
     *)
         echo "unknown mode: $mode" >&2
-        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|dump|stop]" >&2
+        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|pointer <id>|hid|dump|stop]" >&2
         exit 1
         ;;
 esac
