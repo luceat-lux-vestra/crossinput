@@ -117,6 +117,35 @@ class FixtureTest {
         assertEquals(1, report.deviceId)
         assertArrayEquals(byteArrayOf(0x00, 0x10, 0x00, 0x00), report.report)
     }
+    @Test
+    fun pointerMoveRel() {
+        val frame = fixture("pointer-move-rel")
+        assertEquals(Protocol.TYPE_POINTER_MOVE_REL, frame.type)
+        assertEquals(10, frame.requestId)
+        val (dx, dy) = Messages.pointerMoveRel(frame.payload)
+        assertEquals(12, dx)
+        assertEquals(-8, dy)
+    }
+
+    @Test
+    fun pointerButton() {
+        val frame = fixture("pointer-button")
+        assertEquals(Protocol.TYPE_POINTER_BUTTON, frame.type)
+        assertEquals(11, frame.requestId)
+        val btn = Messages.pointerButton(frame.payload)
+        assertEquals(0, btn.button)
+        assertEquals(true, btn.down)
+    }
+
+    @Test
+    fun pointerScroll() {
+        val frame = fixture("pointer-scroll")
+        assertEquals(Protocol.TYPE_POINTER_SCROLL, frame.type)
+        assertEquals(12, frame.requestId)
+        val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
+        assertEquals(0.0f, horizontal)
+        assertEquals(1.0f, vertical)
+    }
 
     @Test
     fun ping() {

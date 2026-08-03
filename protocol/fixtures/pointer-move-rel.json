@@ -1,0 +1,6 @@
+{
+  "type": "POINTER_MOVE_REL",
+  "requestId": 10,
+  "dx": 12,
+  "dy": -8
+}
