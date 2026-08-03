@@ -26,6 +26,8 @@ class DisplayDiscovery(
     context: Context,
     private val writer: WriterLock,
     private val log: Logger,
+    /** Invoked on display add/change so input backends can refresh cached metrics. */
+    private val onDisplayEvent: ((displayId: Int) -> Unit)? = null,
 ) : DisplayManager.DisplayListener {
 
     private val displayManager =
@@ -52,6 +54,7 @@ class DisplayDiscovery(
     private fun notifyChanged(displayId: Int) {
         val info = buildInfo(displayManager.getDisplay(displayId)) ?: return
         log.info("DisplayDiscovery", "display changed id=$displayId")
+        onDisplayEvent?.invoke(displayId)
         writer.withLock {
             it.write(Protocol.TYPE_DISPLAY_CHANGED, 0, Messages.displayChanged(info))
             it.flush()

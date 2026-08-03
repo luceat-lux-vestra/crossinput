@@ -38,9 +38,9 @@ object Main {
             log.error("Main", "no system context (ActivityThread unavailable); aborting")
             return
         }
-        val discovery = DisplayDiscovery(context, writerLock, log)
-        val hid = HidDeviceManager(log, context)
         val sdkPointer = SdkPointerBackend(log, context)
+        val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
+        val hid = HidDeviceManager(log, context)
         val controller = Controller(discovery, hid, sdkPointer, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
