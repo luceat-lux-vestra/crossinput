@@ -24,19 +24,22 @@ public final class ConnectionManager: @unchecked Sendable {
         public var helperClass: String
         public var requestTimeout: TimeInterval
         public var handshakeTimeout: TimeInterval
+        public var stderrHandler: (@Sendable (String) -> Void)?
 
         public init(adbPath: String = "/usr/local/bin/adb",
                     serial: String,
                     apkPath: String = "/data/local/tmp/crossinput-helper.apk",
                     helperClass: String = "/ com.crossinput.helper.Main",
                     requestTimeout: TimeInterval = 5,
-                    handshakeTimeout: TimeInterval = 10) {
+                    handshakeTimeout: TimeInterval = 10,
+                    stderrHandler: (@Sendable (String) -> Void)? = nil) {
             self.adbPath = adbPath
             self.serial = serial
             self.apkPath = apkPath
             self.helperClass = helperClass
             self.requestTimeout = requestTimeout
             self.handshakeTimeout = handshakeTimeout
+            self.stderrHandler = stderrHandler
         }
     }
 
@@ -77,6 +80,15 @@ public final class ConnectionManager: @unchecked Sendable {
         guard FileManager.default.isExecutableFile(atPath: adb) else {
             throw ConnectionError.adbMissing
         }
+        // Clean up stale helper processes from previous sessions (repeated
+        // Connect clicks left orphans). Bracket pattern avoids killing the
+        // adb shell running THIS command.
+        let cleanup = Process()
+        cleanup.executableURL = URL(fileURLWithPath: adb)
+        cleanup.arguments = ["-s", config.serial, "shell",
+                             "pkill -f 'crossinput-[h]elper.apk' 2>/dev/null || true"]
+        try? cleanup.run()
+        cleanup.waitUntilExit()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: adb)
         proc.arguments = ["-s", config.serial, "shell", "-T",
@@ -101,12 +113,16 @@ public final class ConnectionManager: @unchecked Sendable {
         inputHandle = inputPipe.fileHandleForWriting
         outputHandle = outputPipe.fileHandleForReading
 
-        errorPipe.fileHandleForReading.readabilityHandler = { handle in
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if !data.isEmpty {
                 // Log metadata only (AGENTS.md hard rule 4); stderr is the helper's log.
                 let text = String(decoding: data, as: UTF8.self)
-                NSLog("[crossinput:helper] %@", text.trimmingCharacters(in: .whitespacesAndNewlines))
+                if let handler = self?.config.stderrHandler {
+                    handler(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                } else {
+                    NSLog("[crossinput:helper] %@", text.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
             }
         }
 

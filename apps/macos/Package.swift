@@ -16,7 +16,7 @@ let package = Package(
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
-        .target(name: "InputCapture", dependencies: ["EdgeSwitch"]),
+        .target(name: "InputCapture", dependencies: ["EdgeSwitch", "Diagnostics"]),
         .target(name: "EdgeSwitch", dependencies: ["AndroidBridge"]),
         .target(name: "Diagnostics", dependencies: []),
         .target(name: "AppSettings", dependencies: []),
