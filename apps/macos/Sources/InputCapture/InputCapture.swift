@@ -5,6 +5,35 @@ import AppKit
 import Carbon.HIToolbox
 import EdgeSwitch
 import Diagnostics
+import Darwin // for dlopen/dlsym
+
+// CGS (Core Graphics Services) private API for reliable cursor hide/show on
+// modern macOS (CGDisplayHideCursor deprecated/no-op on 14+). Mirrors
+// Deskflow/Synergy's SetsCursorInBackground pattern.
+// Symbols not in public tbd — resolve at runtime via dlsym.
+private typealias CGSMainConnectionIDFn = @convention(c) () -> UInt32
+private typealias CGSSetConnectionPropertyFn = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
+private typealias CGAssociateMouseAndMouseCursorPositionFn = @convention(c) (Int32) -> Void
+
+nonisolated(unsafe) private var cgsMainConnectionID: CGSMainConnectionIDFn?
+nonisolated(unsafe) private var cgsSetConnectionProperty: CGSSetConnectionPropertyFn?
+nonisolated(unsafe) private var cgsAssociateMouseAndMouseCursorPosition: CGAssociateMouseAndMouseCursorPositionFn?
+
+private func resolveCGSSymbols() {
+        guard cgsMainConnectionID == nil || cgsSetConnectionProperty == nil || cgsAssociateMouseAndMouseCursorPosition == nil else { return }
+        var handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+        if handle == nil {
+            handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+        }
+        if let h = handle {
+            cgsMainConnectionID = unsafeBitCast(dlsym(h, "CGSMainConnectionID"), to: CGSMainConnectionIDFn.self)
+            cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
+            cgsAssociateMouseAndMouseCursorPosition = unsafeBitCast(dlsym(h, "CGAssociateMouseAndMouseCursorPosition"), to: CGAssociateMouseAndMouseCursorPositionFn.self)
+            Diagnostics.log("CGS symbols resolved (handle=\(h)): conn=\(cgsMainConnectionID != nil), setProp=\(cgsSetConnectionProperty != nil), associate=\(cgsAssociateMouseAndMouseCursorPosition != nil)")
+        } else {
+            Diagnostics.log("CGS dlopen failed for both SkyLight and CoreGraphics")
+        }
+    }
 
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
@@ -54,6 +83,8 @@ public final class InputCapture: @unchecked Sendable {
     private var androidEdgeByDisplay: [CGDirectDisplayID: ScreenEdge] = [:]
     private let edgeThreshold: CGFloat = 2
     private var emergencyHotKey: EventHotKeyRef?
+    /// Prevents an immediate re-trigger after the pointer returns to macOS.
+    private var edgeCooldownUntil: CFTimeInterval = 0
 
     public init() {}
 
@@ -133,6 +164,7 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = true
             startWatchdog()
         }
+        hideCursor()
     }
 
     /// Returns to listening mode immediately (fail-safe path).
@@ -145,8 +177,11 @@ public final class InputCapture: @unchecked Sendable {
             return was
         }
         if wasSuppressing {
-            // Physically return the pointer to the user (into the screen).
-            centerPointer()
+            showCursor()
+            // Physically return the pointer to the crossing edge point the user
+            // pushed through, so Android->macOS continues seamlessly instead of
+            // jumping to the screen center.
+            restorePointerAtEdge()
             onSuppressionReleased?()
         }
     }
@@ -226,6 +261,9 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func detectEdge() {
+        // After a return-to-macOS warp, briefly ignore the edge so the pointer
+        // sitting on the crossing point does not instantly switch back.
+        guard CFAbsoluteTimeGetCurrent() >= edgeCooldownUntil else { return }
         guard screenFrame != .zero, let displayID = currentDisplayID else { return }
         let p = currentPosition
         let f = screenFrame
@@ -264,6 +302,85 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
+        // A warp does not re-display the cursor, but keep hiding it in case
+        // macOS re-shows it across displays while we re-pin each move.
+        if let displayID = currentDisplayID {
+            CGDisplayHideCursor(displayID)
+        }
+    }
+
+    /// Physically returns the pointer to the crossing edge point the user
+    /// pushed through, so Android→macOS continues seamlessly instead of
+    /// jumping to the screen center.
+    private func restorePointerAtEdge() {
+        guard screenFrame != .zero, let displayID = currentDisplayID,
+              let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
+            if let screen = NSScreen.main {
+                CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
+            }
+            return
+        }
+        let f = screenFrame
+        let p = currentPosition
+        let hold: CGPoint
+        switch edge {
+        case .left:   hold = CGPoint(x: f.minX + edgeThreshold, y: p.y)
+        case .right:  hold = CGPoint(x: f.maxX - edgeThreshold, y: p.y)
+        case .top:    hold = CGPoint(x: p.x, y: f.maxY - edgeThreshold)
+        case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
+        }
+        CGWarpMouseCursorPosition(hold)
+        // Re-associate mouse-to-cursor so acceleration/velocity tracking
+        // continues correctly after the warp (macOS resets it on raw warps).
+        if let fn = cgsAssociateMouseAndMouseCursorPosition {
+            fn(1)
+            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition(1) called")
+        } else {
+            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition not resolved")
+        }
+        postSyntheticMove(at: hold)
+        // Don't re-trigger the edge switch from the pointer sitting on the edge.
+        edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+    }
+
+    /// macOS drops the first real movement deltas after a warp (the pointer
+    /// "needs a lift and another move" to respond). Posting a synthetic move
+    /// event at the target position re-syncs the input stream.
+    private func postSyntheticMove(at point: CGPoint) {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(mouseEventSource: source,
+                                  mouseType: .mouseMoved,
+                                  mouseCursorPosition: point,
+                                  mouseButton: .left) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func hideCursor() {
+        resolveCGSSymbols()
+        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
+            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+            Diagnostics.log("CGS SetsCursorInBackground(true): cid=\(cid), result=\(result)")
+        } else {
+            Diagnostics.log("CGS hideCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
+        }
+        if let displayID = currentDisplayID {
+            CGDisplayHideCursor(displayID)
+        }
+        CGDisplayHideCursor(CGMainDisplayID())
+    }
+
+    private func showCursor() {
+        resolveCGSSymbols()
+        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
+            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanFalse)
+            Diagnostics.log("CGS SetsCursorInBackground(false): cid=\(cid), result=\(result)")
+        } else {
+            Diagnostics.log("CGS showCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
+        }
+        if let displayID = currentDisplayID {
+            CGDisplayShowCursor(displayID)
+        }
+        CGDisplayShowCursor(CGMainDisplayID())
     }
 
     // MARK: - Fail-safe watchdog
