@@ -43,6 +43,9 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x0006 | HID_REPORT | deviceId u32 + report: u32 length + bytes |
 | 0x0007 | PING | (none) |
 | 0x0008 | SHUTDOWN | (none) |
+| 0x0009 | POINTER_MOVE_REL | dx i32 + dy i32 (relative pointer delta, target display pixels) |
+| 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
+| 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up, positive horizontal = left, Android AXIS_* convention) |
 
 ### Android → Mac
 
@@ -81,11 +84,14 @@ HELLO (req 1)                    │
                                  ├─► HELLO_ACK (req 1)
 LIST_DISPLAYS (req 2)            │
                                  ├─► DISPLAY_LIST (req 2)
-SELECT_DISPLAY (req 3)           │
-                                 ├─► DISPLAY_LIST or DISPLAY_CHANGED (req 3)
-CREATE_HID_DEVICE (req 4)        │
+SELECT_DISPLAY (req 3)           │   (routes subsequent POINTER_* to the
+                                 │    selected display)
+                                 ├─► DISPLAY_CHANGED (req 3)
+CREATE_HID_DEVICE (req 4)        │   (optional UHID backend)
                                  ├─► HID_CREATED (req 4)
-HID_REPORT (req 5..n)            │   (per input)
+HID_REPORT (req 5..n)            │   (per input; UHID backend)
+POINTER_MOVE_REL / BUTTON /      │   (SDK injection backend, preferred:
+SCROLL (req n..m)                │    injectInputEvent with display ID)
 PING (req m)                     │
                                  ├─► PONG (req m)
 SHUTDOWN (req z)                 │
@@ -104,10 +110,19 @@ sequenceDiagram
     Helper-->>Mac: DISPLAY_LIST(displays)
     Mac->>Helper: SELECT_DISPLAY(id)
     Helper-->>Mac: DISPLAY_CHANGED(display)
-    Mac->>Helper: CREATE_HID_DEVICE(descriptor)
-    Helper-->>Mac: HID_CREATED(id)
-    loop input events
-        Mac->>Helper: HID_REPORT(id, report)
+    opt SDK pointer injection (preferred)
+        loop pointer events
+            Mac->>Helper: POINTER_MOVE_REL(dx, dy)
+            Mac->>Helper: POINTER_BUTTON(button, down)
+            Mac->>Helper: POINTER_SCROLL(horizontal, vertical)
+        end
+    end
+    opt UHID backend (optional)
+        Mac->>Helper: CREATE_HID_DEVICE(descriptor)
+        Helper-->>Mac: HID_CREATED(id)
+        loop input events
+            Mac->>Helper: HID_REPORT(id, report)
+        end
     end
 ```
 
