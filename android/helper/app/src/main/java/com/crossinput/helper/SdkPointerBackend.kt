@@ -24,6 +24,8 @@ class SdkPointerBackend(
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
     private var selectedDisplayId: Int = -1
     private var selectedDisplay: Display? = null
+    private var displayWidth: Int = 0
+    private var displayHeight: Int = 0
     private var currentX: Float = 0f
     private var currentY: Float = 0f
     private var initialized = false
@@ -56,24 +58,31 @@ class SdkPointerBackend(
 
         val metrics = android.util.DisplayMetrics()
         display.getRealMetrics(metrics)
-        currentX = metrics.widthPixels / 2f
-        currentY = metrics.heightPixels / 2f
+        displayWidth = metrics.widthPixels
+        displayHeight = metrics.heightPixels
+        currentX = displayWidth / 2f
+        currentY = displayHeight / 2f
 
-        log.info("SdkPointerBackend", "selected display $selectedDisplayId (${metrics.widthPixels}x${metrics.heightPixels})")
+        // Display.state is unreliable on Samsung DeX (reports OFF while the
+        // external screen is rendering), so an OFF state only logs a warning.
+        if (display.state != Display.STATE_ON) {
+            log.warn(
+                "SdkPointerBackend",
+                "display $selectedDisplayId state=${display.state} is not ON; " +
+                    "still selecting it (DeX reports stale OFF states)",
+            )
+        }
+        log.info("SdkPointerBackend", "selected display $selectedDisplayId (${displayWidth}x$displayHeight)")
     }
 
     fun moveRelative(dx: Int, dy: Int) {
-        if (!initialized || selectedDisplay == null) {
+        if (!initialized || displayWidth == 0) {
             log.warn("SdkPointerBackend", "moveRelative called before display selected")
             return
         }
 
-        val display = selectedDisplay!!
-        val metrics = android.util.DisplayMetrics()
-        display.getRealMetrics(metrics)
-
-        currentX = (currentX + dx).coerceIn(0f, metrics.widthPixels - 1f)
-        currentY = (currentY + dy).coerceIn(0f, metrics.heightPixels - 1f)
+        currentX = (currentX + dx).coerceIn(0f, displayWidth - 1f)
+        currentY = (currentY + dy).coerceIn(0f, displayHeight - 1f)
 
         injectMoveEvent()
     }
