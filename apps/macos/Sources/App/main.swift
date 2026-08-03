@@ -122,7 +122,10 @@ final class AppModel: ObservableObject {
     }
 
     func enable() {
-        _ = capture.start()
+        guard capture.start() else {
+            phase = .error("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
+            return
+        }
         switchMachine.activate()
     }
 
