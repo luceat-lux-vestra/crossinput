@@ -43,8 +43,20 @@
 - dex→mac keyboard: custom IME app (our keyboard must be the active IME), Korean via text transport
 - iPad: out of scope (no CGEventTap-equivalent API on iPadOS)
 
+## Open future work items
+
+- **Display list auto-refresh (unreliable, issue #17)** — the macOS app refreshes the display list only via the manual "Refresh Displays" menu action (LIST_DISPLAYS re-issue). A DISPLAY_CHANGED handler exists but auto-sync is NOT declared reliable and must be fixed in a future work item. The reporter cannot enumerate all failure cases, so **all of the following cases must be verified during that work** (do not assume a single root cause):
+  - DeX display hot-plug while the app runs (connect/disconnect HDMI)
+  - DeX display state toggling ON/OFF without removal (helper reports stale OFF states)
+  - Multiple display IDs (0 = phone built-in / DeX desktop / HDMI) with per-display edge config
+  - Wireless-debugging drop (Samsung disables on Wi-Fi drop/sleep) + auto-reconnect — reconnected session must re-fetch the list and restore selection
+  - Stale ConnectionManager callbacks racing a fresh connect
+  - List when DeX is off (only built-in display 0 present) — decide desired behavior (show nothing vs. still show phone screen)
+  - "Refresh Displays" while app is disconnected — currently logged as ignored; confirm expected UX
+
 ## Progress log
 
+- 2026-08-04: display handling work committed (commit 65c4766): DISPLAY_CHANGED live update, manual Refresh Displays, stale-list clearing on connect/disconnect, wireless auto-reconnect; per-display list refresh remains manual for now, auto-update tracked as issue #17
 - 2026-08-03: environment check complete (SM-G977N, Android 12, wireless ADB connected, DeX active — display 0 phone / 2 Desktop / 6 HDMI)
 - 2026-08-03: leap-scrcpy server APK built (`app-debug.apk` 5.8MB), client built (`pnpm build`)
 - 2026-08-03: UHID mouse on-device verification complete — move/click/cursor display (category A)
