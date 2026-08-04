@@ -22,14 +22,22 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 - **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface — the cursor sprite is rendered by Samsung DeX itself
 - **Two injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and SDK input injection (alternative — routes events to windows, scrcpy-style)
 - **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
-- **No installable app**: the helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs
-- **Scope**: v1 is mac → Android one-way, pointer input only. Keyboard is a planned post-v1 extension (Android-side delivery is easy; macOS system-shortcut handling is the open item). Reverse direction (dex → mac) and iPad are roadmap extensions — [ADR-0003](docs/adr/ADR-0003-scope.md)
+- **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
+- **Keyboard**: mac → Android keyboard delivery (both UHID and virtual-injection backends), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
 
 ## Status
 
-Early development. Android pointer injection is verified on device (SM-G977N, Android 12): the UHID virtual mouse moves the DeX cursor sprite 1:1 and delivers clicks (taskbar click confirmed). SDK input injection (scrcpy-style `InputManager.injectInputEvent`) routes events to DeX windows, but on Samsung the cursor sprite is driven only by real kernel input devices (UHID qualifies), so UHID is the primary pointer backend. macOS input capture and app UI are in progress.
+Early development. Pointer + keyboard verified on device (SM-G977N, Android 12): the UHID virtual mouse/keyboard drive the DeX cursor and typing 1:1, system shortcuts are suppressed while captured, and Korean 2-set composes on Android. Distributed as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)). Edge-switch stability hardening remains open.
 
 Progress: [docs/roadmap.md](docs/roadmap.md) · Design: [docs/architecture.md](docs/architecture.md)
+
+## Installation (v0.1.0)
+
+Download `Ampersand-0.1.0.dmg` from the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases), open it, and drag `Ampersand.app` into Applications. The app runs from the menu bar (no Dock icon).
+
+> **First launch (Gatekeeper)**: the app is ad-hoc signed (no Apple Developer ID — see [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)), so on first `open` macOS may refuse with "cannot be opened because the developer cannot be verified". To run it: **right-click (or Control-click) the app in Finder → Open → Open** (confirm once). From then on it launches normally.
+
+Ampersand needs `adb` 37+ (with mDNS wireless debugging support) on `PATH`; install it via Homebrew (`brew install android-platform-tools`) or Android SDK. The one-time phone setup: **Settings → Developer options → Wireless debugging** (pair once; the app then auto-discovers the phone).
 
 ## Requirements
 
