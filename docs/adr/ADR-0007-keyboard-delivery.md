@@ -18,9 +18,13 @@ Two candidate keyboard delivery paths exist:
 1. **UHID keyboard device** (same path as the mouse): helper opens `/dev/uhid`,
    registers a keyboard HID descriptor, and the Mac forwards HID keyboard reports.
    Verified device path (mouse already works on SM-G977N / Android 12).
-2. **Virtual keyboard injection**: Android injects `KeyEvent`s via an
-   AccessibilityService (SDK `injectInputEvent` equivalent). No UHID dependency;
-   the fallback for devices where `/dev/uhid` keyboard support differs.
+2. **Virtual keyboard injection**: the helper constructs `KeyEvent` objects and
+   delivers them through Android's internal `InputManager.injectInputEvent`
+   API (resolved and invoked via reflection). No UHID dependency; the fallback
+   for devices where `/dev/uhid` keyboard support differs or is unavailable.
+   There is **no AccessibilityService and no accessibility permission** — the
+   helper process runs under the shell UID (app_process) and injects directly
+   into the input pipeline.
 
 There is no keyboard message type in the CXI protocol yet (only mouse
 `HID_REPORT` / `POINTER_*`).
@@ -33,6 +37,18 @@ There is no keyboard message type in the CXI protocol yet (only mouse
    keyboard backend and a virtual-keyboard fallback backend. If UHID keyboard
    creation or reporting fails on a device, the helper falls back to the virtual
    backend automatically. A single protocol message set abstracts both backends.
+   **UHID is the preferred backend**; the virtual fallback is engaged only when
+   UHID creation or reporting fails on a device.
+   
+   Virtual-fallback mechanics: the helper process runs via `app_process` under
+   the shell UID; the fallback builds Android `KeyEvent` objects (key code,
+   meta state, action from the CXI `KEY_EVENT` message) and calls the internal
+   `InputManager.injectInputEvent` API resolved through reflection. There is no
+   AccessibilityService. Because the API is internal/non-SDK, availability and
+   behavior may vary by Android version and vendor; resolution failure,
+   rejection, or `SecurityException` must not block the CXI session — the event
+   is dropped and the failure is reported through metadata-only logging and the
+   backends stays clear of stuck keys (pressed-key state is released).
 2. **macOS system-shortcut handling is in scope** of this work. While keyboard is
    captured, system shortcuts must not bubble up to the Mac (Cmd+Tab, Spotlight,
    Cmd+H, etc.). The capture tap intercepts and suppresses these. This is the key
@@ -64,14 +80,16 @@ There is no keyboard message type in the CXI protocol yet (only mouse
   keycode-simple.
 - Negative: protocol + fixtures must be extended (AGENTS.md rule 6) and the
   macOS capture tap gets a second, keyboard-tap mode with suppression logic.
-- Negative: virtual fallback usefulness depends on the accessibility permission
-  on-device; requires on-device verification per device (AGENTS.md rule 2).
+- Negative: the virtual fallback relies on the internal `InputManager` injection
+  API (non-SDK, reflection-based), which may behave differently across Android
+  versions and vendors; it must stay isolated behind feature detection and a
+  fail-safe path (AGENTS.md rule 2 requires on-device verification per device).
 
 ## Validation
 
 - (done) Protocol: keyboard message type (`KEY_EVENT` 0x000C) + fixtures pass `scripts/check-fixtures.mjs` and `swift test`
 - (done) Android: UHID keyboard create + HID report on-device (SM-G977N) — `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`
 - (done) Android: key-state reporting fix verified on-device (no infinite key repeat; issue #21, PR #26)
-- (pending) Android: virtual fallback injects keys via accessibility (per-device, AGENTS.md rule 2) — UHID path verified; fallback not yet exercised on-device
+- (pending) Android: virtual fallback injects keys via the internal `InputManager.injectInputEvent` API (per-device, AGENTS.md rule 2) — UHID path verified; fallback not yet exercised on-device
 - (done) macOS: typing reaches a DeX-focused field; Cmd+Tab / Spotlight do not fire on the Mac while captured (user-confirmed on-device)
 - (done) Korean: 2-set composition produces correct hangul in a DeX field (user-confirmed)

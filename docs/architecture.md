@@ -1,6 +1,6 @@
 # Ampersand Architecture
 
-> Status: draft (v0.1.0 released — pointer + keyboard verified on device; key decisions recorded in docs/adr/)
+> Status: v0.1.0 (pointer + keyboard shipped). On-device verified (SM-G977N, Android 12): UHID mouse, UHID keyboard, system-shortcut suppression, Korean 2-set. The InputManager virtual-injection fallback is implemented but not yet exercised on a physical device (issue #33). Key decisions recorded in docs/adr/
 
 ## Goal
 
@@ -9,17 +9,20 @@ macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mo
 ## System composition
 
 ```
-┌───────────────────────────── macOS (Swift 6) ─────────────────────────────┐
-│ Menu Bar UI  Edge Switch State Machine  CGEventTap (input capture)        ││ Connection Manager ──► adb subprocess (ADB over Wi-Fi)                    │
-│ pointer + keyboard capture · shortcut suppression                          │
-└───────────────────────────────────┬──────────────────────────────────────┘
+┌──────────────────────────────── macOS (Swift 6) ──────────────────────────────┐
+│ ▸ Menu Bar UI                                                                    │
+│ ▸ Edge Switch State Machine (DISABLED … ERROR)                                   │
+│ ▸ CGEventTap — pointer + keyboard capture                                        │
+│ ▸ ConnectionManager ──► adb subprocess (ADB over Wi-Fi, AndroidBridge)           │
+└───────────────────────────────────┬─────────────────────────────────────────────┘
                                     │ ADB stdin/stdout framing (CXI protocol)
-┌───────────────────────────────────▼──────────────────────────────────────┐
-│                        Android helper (Kotlin)                           │
-│  app_process entrypoint  │  display discovery (DisplayManager)           │
-│ UHID create/inject │ display/rotation/state reporting                 │
-│ KeyboardBackend (UHID + virtual-injection fallback)                      │
-└───────────────────────────────────┬──────────────────────────────────────┘
+┌───────────────────────────────────▼─────────────────────────────────────────────┐
+│                            Android helper (Kotlin)                              │
+│ ▸ app_process entrypoint  ▸ display discovery (DisplayManager)                  │
+│ ▸ PointerBackend: UHID virtual mouse (primary)                                  │
+│ ▸ KeyboardBackend: UHID keyboard (primary) + InputManager injection fallback    │
+│ ▸ KeyboardHidMapper: keycode → HID usage / metaState → modifier                 │
+└───────────────────────────────────┬─────────────────────────────────────────────┘
                                     │ UHID (virtual HID device)
                               ┌─────▼─────┐
                               │ DeX screen│ (external display, e.g. 1920x1080)
@@ -50,8 +53,9 @@ macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mo
 
 - **Main**: app_process entry point, stdin/stdout event loop
 - **DisplayDiscovery**: discovers/reports all displays via DisplayManager
-- **HidDeviceManager**: UHID create/destroy/report injection
-- **KeyboardBackend**: UHID keyboard + virtual-injection fallback, key-state (pressed set) reporting
+- **HidDeviceManager**: UHID create/destroy/report injection (virtual mouse + keyboard devices)
+- **SdkPointerBackend**: pointer injection fallback via internal `InputManager.injectInputEvent` (reflection)
+- **KeyboardBackend**: UHID keyboard (primary) + InputManager virtual-injection fallback
 - **KeyboardHidMapper**: Android keycode → HID usage + metaState → modifier mapping
 - **Protocol**: CXI message definitions (Kotlin, golden fixture tests)
 

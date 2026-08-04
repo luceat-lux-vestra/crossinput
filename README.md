@@ -7,7 +7,7 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
 │ pointer + keyboard capture    │   │ UHID virtual mouse+keyboard│
-│ edge switch · shortcut hold   │   │ SDK input injection (alt)  │
+│ edge switch · shortcut hold   │   │ InputManager inj. fallback │
 └───────────┬────────────────────┘   └────────────┬──────────────┘
             │                                     │
             └──► ADB over Wi-Fi (wireless debugging) ► UHID (no root)
@@ -20,14 +20,19 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 - **Edge switching**: push the pointer past the screen edge to switch between macOS and DeX
 - **Works with any pointer device**: trackpad, wired or wireless mouse — captured at the macOS level (CGEventTap), no device-specific setup
 - **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface — the cursor sprite is rendered by Samsung DeX itself
-- **Two injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and SDK input injection (alternative — routes events to windows, scrcpy-style)
+- **Two pointer injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and an InputManager injection fallback via reflection (alternative — routes events to windows, scrcpy-style)
 - **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
 - **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
-- **Keyboard**: mac → Android keyboard delivery (both UHID and virtual-injection backends), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
+- **Keyboard**: mac → Android keyboard delivery — UHID keyboard backend (implemented, verified on SM-G977N / Android 12) plus an InputManager virtual-injection fallback via reflection (implemented, unit/build validated, on-device exercise pending), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
 
 ## Status
 
-Pointer + keyboard verified on device (SM-G977N, Android 12): the UHID virtual mouse/keyboard drive the DeX cursor and typing 1:1, system shortcuts are suppressed while captured, and Korean 2-set composes on Android. Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
+Verified on device (SM-G977N, Android 12):
+- UHID virtual mouse and keyboard drive the DeX cursor and typing 1:1 — verified on device
+- System shortcuts are suppressed while captured, and Korean 2-set composes on Android — verified on device
+- The InputManager virtual-injection fallback is implemented (unit/build validated) but has **not yet been exercised on a physical device** — tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
+
+Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 
 Progress: [docs/roadmap.md](docs/roadmap.md) · Design: [docs/architecture.md](docs/architecture.md)
 
