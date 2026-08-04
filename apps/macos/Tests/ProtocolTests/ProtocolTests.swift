@@ -79,6 +79,24 @@ struct ProtocolTests {
         #expect(encode(frame) == fixture("ping.bin"))
     }
 
+    @Test func keyEventFrameMatchesFixture() {
+        let frame = CxiFrame(type: .keyEvent, requestId: 6,
+                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x1000, action: 0, repeatCount: 0))
+        let bytes = encode(frame)
+        #expect(bytes == fixture("key-event.bin"))
+        #expect(bytes.map { String(format: "%02x", $0) }.joined() ==
+                "43584901000c0006000000060000001d0000100000")
+    }
+
+    @Test func keyEventRoundTrips() throws {
+        let payload = Messages.keyEvent(keyCode: 111, metaState: 0x2000, action: 1, repeatCount: 2)
+        let decoded = try Messages.decodeKeyEvent(payload)
+        #expect(decoded.keyCode == 111)
+        #expect(decoded.metaState == 0x2000)
+        #expect(decoded.action == 1)
+        #expect(decoded.repeatCount == 2)
+    }
+
     // MARK: - Response decoding parity
 
     @Test func helloAckDecodesFromFixture() throws {
