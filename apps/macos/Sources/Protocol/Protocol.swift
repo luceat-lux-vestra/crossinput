@@ -21,6 +21,7 @@ public enum MessageType: UInt16, Sendable {
     case pointerMoveRel = 0x0009
     case pointerButton = 0x000A
     case pointerScroll = 0x000B
+    case keyEvent = 0x000C
     // Android -> Mac
     case helloAck = 0x8001
     case displayList = 0x8002
@@ -172,6 +173,12 @@ public enum Messages {
     public static func pointerScroll(horizontal: Float, vertical: Float) -> Data {
         LE.f32(horizontal) + LE.f32(vertical)
     }
+
+    /// Android KeyEvent semantics: keyCode = KeyEvent.KEYCODE_*, metaState = KeyEvent.META_*.
+    /// action: 0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP. repeatCount: 0 = first press.
+    public static func keyEvent(keyCode: UInt16, metaState: UInt16, action: UInt8, repeatCount: UInt8 = 0) -> Data {
+        LE.u16(keyCode) + LE.u16(metaState) + LE.u8(action) + LE.u8(repeatCount)
+    }
 }
 
 // MARK: - Payload decoders (Android -> Mac)
@@ -253,6 +260,15 @@ public extension Messages {
     static func decodeHelloAck(_ payload: Data) throws -> UInt16 {
         var d = Decoder(payload)
         return try d.u16()
+    }
+
+    static func decodeKeyEvent(_ payload: Data) throws -> (keyCode: UInt16, metaState: UInt16, action: UInt8, repeatCount: UInt8) {
+        var d = Decoder(payload)
+        let keyCode = try d.u16()
+        let metaState = try d.u16()
+        let action = try d.u8()
+        let repeatCount = try d.u8()
+        return (keyCode, metaState, action, repeatCount)
     }
 
     static func decodeDisplay(_ payload: Data) throws -> DisplayInfo {

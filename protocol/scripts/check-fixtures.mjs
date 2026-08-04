@@ -12,6 +12,7 @@ const T = {
   0x0004: "CREATE_HID_DEVICE", 0x0005: "DESTROY_HID_DEVICE", 0x0006: "HID_REPORT",
   0x0007: "PING", 0x0008: "SHUTDOWN",
   0x0009: "POINTER_MOVE_REL", 0x000A: "POINTER_BUTTON", 0x000B: "POINTER_SCROLL",
+  0x000C: "KEY_EVENT",
   0x8001: "HELLO_ACK", 0x8002: "DISPLAY_LIST", 0x8003: "DISPLAY_CHANGED",
   0x8004: "HID_CREATED", 0x8005: "HID_ERROR", 0x8006: "PONG",
   0x8007: "LOG_EVENT", 0x8008: "FATAL_ERROR",
@@ -97,6 +98,8 @@ function decodePayload(type, payload) {
       return { button: u32(payload, 0), down: payload[4] !== 0 };
     case "POINTER_SCROLL":
       return { horizontal: payload.readFloatLE(0), vertical: payload.readFloatLE(4) };
+    case "KEY_EVENT":
+      return { keyCode: u16(payload, 0), metaState: u16(payload, 2), action: payload[4], repeatCount: payload[5] };
     case "CREATE_HID_DEVICE":
       return { descriptorBase64: lengthPrefixed(payload, 0).toString("base64") };
     case "DESTROY_HID_DEVICE":
