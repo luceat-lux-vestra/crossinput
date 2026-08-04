@@ -41,7 +41,8 @@ object Main {
         val sdkPointer = SdkPointerBackend(log, context)
         val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
-        val controller = Controller(discovery, hid, sdkPointer, writerLock, log)
+        val keyboard = KeyboardBackend(log, context, hid)
+        val controller = Controller(discovery, hid, sdkPointer, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
         val stdinThread = Thread {
@@ -59,6 +60,7 @@ object Main {
             } finally {
                 log.info("Main", "stdin closed; shutting down")
                 hid.destroyAll()
+                keyboard.destroy()
                 Looper.myLooper()?.quitSafely()
             }
         }
@@ -68,6 +70,7 @@ object Main {
         Looper.loop()
 
         hid.destroyAll()
+        keyboard.destroy()
         writerLock.withLock { it.flush() }
         System.exit(0)
     }
@@ -93,6 +96,7 @@ class Controller(
     private val discovery: DisplayDiscovery,
     private val hid: HidDeviceManager,
     private val sdkPointer: SdkPointerBackend,
+    private val keyboard: KeyboardBackend,
     private val writerLock: WriterLock,
     private val log: Logger,
 ) {
@@ -122,6 +126,9 @@ class Controller(
             Protocol.TYPE_POINTER_SCROLL -> {
                 val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
                 sdkPointer.scroll(horizontal, vertical)
+            }
+            Protocol.TYPE_KEY_EVENT -> {
+                keyboard.keyEvent(Messages.keyEvent(frame.payload))
             }
             Protocol.TYPE_PING -> writerLock.withLock {
                 it.write(Protocol.TYPE_PONG, frame.requestId, Messages.pong())
