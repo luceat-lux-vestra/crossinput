@@ -16,7 +16,7 @@
 | 5 | Edge switching | macOS↔DeX switching, 100 repeat passes | ⏳ |
 | 6 | Menu bar app + onboarding | settings/status UI + wireless debugging pairing guide | ⏳ |
 | 7 | Recovery & performance | sleep/wake, permission revocation, error recovery | ⏳ |
-| 8 | Distribution | ad-hoc signing + GitHub Releases + Homebrew tap (ADR-0005), adb bundling (ADR-0004) | ⏳ |
+| 8 | Distribution | **v0.1.0 shipped**: `Ampersand-0.1.0.dmg` on GitHub Releases, ad-hoc signed (ADR-0008). Open: Homebrew tap (ADR-0005), adb bundling (ADR-0004), notarization when a Developer ID exists | 🔶 |
 | 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | ⏳ |
 
 ## Phase 0: UHID input verification — done

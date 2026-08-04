@@ -1,0 +1,43 @@
+name: release
+
+# Builds the Ampersand-<ver>.dmg and publishes it to a GitHub Release.
+# Triggered by pushing a version tag (v*), per ADR-0008.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build DMG
+        run: bash scripts/package-macos.sh dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ampersand-dmg
+          path: dist/Ampersand-*.dmg
+          retention-days: 7
+
+      - name: Upload DMG to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG="Ampersand-${VERSION}.dmg"
+          test -f "dist/${DMG}" || { echo "missing ${DMG}" >&2; exit 1; }
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${DMG}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Ampersand ${VERSION}" \
+            --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)." || \
+            gh release upload "${GITHUB_REF_NAME}" "dist/${DMG}" --repo "$GITHUB_REPOSITORY"
