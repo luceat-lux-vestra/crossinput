@@ -274,6 +274,10 @@ public extension Messages {
                            layerStack: layerStack)
     }
 
+    static func decodeDisplayChanged(_ payload: Data) throws -> DisplayInfo {
+        return try decodeDisplay(payload)
+    }
+
     static func decodeDisplayList(_ payload: Data) throws -> [DisplayInfo] {
         var d = Decoder(payload)
         let count = Int(try d.u32())
