@@ -70,4 +70,32 @@ class KeyboardHidMapperTest {
         assertEquals(0x04, report[2].toInt() and 0xFF)
         for (i in 3 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
     }
+
+    @Test
+    fun buildReportMultiKeyLayout() {
+        val report = KeyboardHidMapper.buildReport(0x03, listOf(0x04, 0x1D, 0x28)) // Ctrl+Shift+A+Z+Enter
+        assertEquals(8, report.size)
+        assertEquals(0x03, report[0].toInt() and 0xFF)
+        assertEquals(0x04, report[2].toInt() and 0xFF)
+        assertEquals(0x1D, report[3].toInt() and 0xFF)
+        assertEquals(0x28, report[4].toInt() and 0xFF)
+        for (i in 5 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
+    }
+
+    @Test
+    fun buildReportEmptyReportIsAllZero() {
+        val report = KeyboardHidMapper.buildReport(0, emptyList())
+        assertEquals(8, report.size)
+        for (i in 0 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
+    }
+
+    @Test
+    fun buildReportTruncatesToSixSlots() {
+        val report = KeyboardHidMapper.buildReport(0, (0x04..0x20).toList()) // 29 usages > 6 slots
+        assertEquals(8, report.size)
+        for (i in 0 until KeyboardHidMapper.MAX_KEY_SLOTS) {
+            assertEquals(0x04 + i, report[2 + i].toInt() and 0xFF)
+        }
+        assertEquals(0x04 + KeyboardHidMapper.MAX_KEY_SLOTS - 1, report[7].toInt() and 0xFF)
+    }
 }
