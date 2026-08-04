@@ -3,6 +3,27 @@
 All notable changes to this project follow the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.0] - 2026-08-05
+
+### Added
+
+- macOS menu bar app: pointer capture + edge switching (macOS ↔ DeX via UHID)
+- Pointer input: relative move, buttons, scroll (UHID primary, SDK injection fallback) — verified on device (SM-G977N, Android 12)
+- Keyboard input: UHID keyboard + virtual-injection fallback (ADR-0007), system-shortcut suppression while captured, Korean 2-set via Android IME — verified on device
+- Wireless ADB (mDNS TLS) auto-discovery and reconnect
+- Display handling: live DISPLAY_CHANGED updates, manual Refresh Displays
+- App packaging: `Ampersand.app` menu bar bundle (LSUIElement) + `Ampersand-0.1.0.dmg` (ADR-0008)
+- CI: `ci.yml` (swift/android/fixtures) + `release.yml` (DMG on v* tags)
+- Decisions recorded: ADR-0007 (keyboard delivery), ADR-0008 (v0.1.0 release packaging)
+
+### Changed
+
+- Keyboard delivery protocol: KEY_EVENT metaState u16 → u32 aligned with real Android META_* constants
+
+### Fixed
+
+- UHID keyboard infinite key repeat: report key-state (pressed set) instead of raw key events
+
 ## [Unreleased]
 
 ### Added
