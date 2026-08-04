@@ -7,17 +7,44 @@ import AppSettings
 import Diagnostics
 
 @main
-struct AmpersandApp: App {
+struct Ampersand: App {
     @State private var model = AppModel()
+
+    init() {
+        // Menu bar app: do not show a Dock icon or an app-switcher entry.
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
 
     var body: some Scene {
         MenuBarExtra {
             AppMenu(model: model)
         } label: {
-            Image(systemName: "cursorarrow.motionlines")
+            Image(nsImage: Ampersand.menuBarIcon)
                 .foregroundStyle(model.statusColor)
         }
     }
+}
+
+extension Ampersand {
+    /// Menu bar badge: a monochrome template "&" glyph rendered at runtime.
+    /// Template mode keeps the icon adaptive (light/dark menu bar) while
+    /// `.foregroundStyle(statusColor)` still tints it per connection state.
+    /// Swappable for a designed glyph PNG once a resource bundle exists (Phase 8).
+    static let menuBarIcon: NSImage = {
+        let size = NSSize(width: 18, height: 18)
+        return NSImage(size: size, flipped: false) { rect in
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 18, weight: .heavy),
+                .foregroundColor: NSColor.black,
+            ]
+            let glyph = NSAttributedString(string: "&", attributes: attrs)
+            let bounds = glyph.boundingRect(with: rect.size)
+            let origin = NSPoint(x: rect.midX - bounds.width / 2,
+                                 y: rect.midY - bounds.height / 2)
+            glyph.draw(at: origin)
+            return true
+        }
+    }()
 }
 
 /// Menu bar icon color reflects state at a glance:
