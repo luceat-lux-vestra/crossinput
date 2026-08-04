@@ -27,7 +27,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
-      - name: Static guard: no input payload in logs
+      - name: "Static guard: no input payload in logs"
         run: |
           if rg -n 'keyCode=.*event\.keyCode|keyCode=\$\{|HID report.*payload' android/helper/app/src/main; then
             echo "Forbidden: key/event payload appears in Android helper logging" >&2
