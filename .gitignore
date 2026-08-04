@@ -10,6 +10,7 @@ local.properties
 *.apk
 *.jar
 !android/helper/gradle/wrapper/gradle-wrapper.jar
+/dist/
 
 # Upstream checkout (조사용, 원본은 별도 관리 — THIRD_PARTY_NOTICES.md 참조)
 /leap-scrcpy/

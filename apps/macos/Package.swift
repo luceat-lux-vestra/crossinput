@@ -8,7 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "AmpersandCore", targets: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch"]),
-        .executable(name: "AmpersandApp", targets: ["App"]),
+        .executable(name: "Ampersand", targets: ["App"]),
         .executable(name: "cxi-smoke", targets: ["SmokeMain"])
     ],
     targets: [
