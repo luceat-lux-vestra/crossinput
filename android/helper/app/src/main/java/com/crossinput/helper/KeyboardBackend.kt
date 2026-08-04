@@ -26,6 +26,9 @@ class KeyboardBackend(
     private var uhidDeviceId: Int? = null
     private var uhidBroken = false
 
+    /** HID usages currently pressed (UHID keyboard reports current state, not transitions). */
+    private val pressedUsages = LinkedHashSet<Int>()
+
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
 
     init {
@@ -53,10 +56,13 @@ class KeyboardBackend(
         if (deviceId != null && !uhidBroken) {
             val usage = KeyboardHidMapper.usageOf(event.keyCode)
             if (usage != null) {
+                val isDown = event.action == 0
+                if (isDown) pressedUsages.add(usage) else pressedUsages.remove(usage)
                 val modifier = KeyboardHidMapper.modifierOf(event.metaState)
-                val ok = hid.sendReport(deviceId, KeyboardHidMapper.buildReport(modifier, usage))
-                if (ok) return
+                val report = KeyboardHidMapper.buildReport(modifier, pressedUsages.toList())
+                if (hid.sendReport(deviceId, report)) return
                 uhidBroken = true
+                pressedUsages.clear()
                 log.warn("KeyboardBackend", "UHID report failed; switching to virtual fallback")
             }
             // Unmappable keyCode (e.g. non-US layout keys) → fall through to virtual injection
@@ -88,6 +94,12 @@ class KeyboardBackend(
     }
 
     fun destroy() {
+        if (pressedUsages.isNotEmpty()) {
+            // Release any keys still reported as pressed so the keyboard state
+            // doesn't hang after the device is torn down.
+            uhidDeviceId?.let { hid.sendReport(it, KeyboardHidMapper.buildReport(0, listOf())) }
+            pressedUsages.clear()
+        }
         uhidDeviceId?.let { hid.destroy(it) }
         uhidDeviceId = null
     }
