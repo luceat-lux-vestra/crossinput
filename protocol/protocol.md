@@ -46,6 +46,7 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x0009 | POINTER_MOVE_REL | dx i32 + dy i32 (relative pointer delta, target display pixels) |
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
 | 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up, positive horizontal = left, Android AXIS_* convention) |
+| 0x000C | KEY_EVENT | keyCode u16 + metaState u16 + action u8 + repeatCount u8 (Android KeyEvent semantics, see below) |
 
 ### Android → Mac
 
@@ -75,6 +76,73 @@ name: u32 length + UTF-8 bytes
 uniqueId: u32 length + UTF-8 bytes
 layerStack u32   (always recorded in v1; -1 if unknown)
 ```
+
+## KEY_EVENT semantics (ADR-0007)
+
+`KEY_EVENT` is the single keyboard message covering both Android delivery backends
+(UHID keyboard and virtual-keyboard injection). The Mac sends abstract key events;
+**the helper decides the backend** and reports failures via `HID_ERROR`.
+
+```
+keyCode u16      Android KeyEvent.KEYCODE_* (e.g. 29=KEYCODE_A, 67=KEYCODE_DEL, 111=KEYCODE_ESCAPE)
+metaState u16    Android KeyEvent.META_* bit flags (e.g. 0x1000=Shift, 0x2000=Ctrl, 0x4000=Alt, 0x8000=Meta)
+action u8        0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP
+repeatCount u8   repeat count (0 = first press; key repeats are sent as explicit DOWN events)
+```
+
+Backend selection rules:
+
+1. **UHID keyboard backend** (preferred): the Mac creates the keyboard device with
+   `CREATE_HID_DEVICE` using the standard boot keyboard descriptor (below), then
+   sends `HID_REPORT` built from `KEY_EVENT`. Equivalently, the helper may keep an
+   internal keyCode→HID-usage map and translate `KEY_EVENT` directly — both paths
+   are valid; the descriptor-driven path keeps the Mac in control of the device.
+2. **Virtual injection fallback**: if UHID keyboard creation or reporting fails
+   (or is not available on the device), the helper injects `KeyEvent`s from
+   `KEY_EVENT` directly (no keycode translation needed).
+3. The helper must not silently drop keyboard input: if the selected display
+   cannot receive it, reply `HID_ERROR` (deviceId 0) so the Mac can surface it.
+
+### Standard boot keyboard HID descriptor (for CREATE_HID_DEVICE)
+
+USB HID standard boot keyboard descriptor (as used by Linux uhid examples):
+
+```
+0x05 0x01  Usage Page (Generic Desktop)
+0x09 0x06  Usage (Keyboard)
+0xA1 0x01  Collection (Application)
+0x05 0x07  Usage Page (Keyboard/Keypad)
+0x19 0xE0  Usage Minimum (Keyboard Left Control)
+0x29 0xE7  Usage Maximum (Keyboard Right GUI)
+0x15 0x00  Logical Minimum (0)
+0x25 0x01  Logical Maximum (1)
+0x75 0x01  Report Size (1)
+0x95 0x08  Report Count (8)
+0x81 0x02  Input (Data, Var, Abs) — modifier byte
+0x95 0x01  Report Count (1)
+0x75 0x08  Report Size (8)
+0x81 0x01  Input (Const) — reserved byte
+0x95 0x05  Report Count (5)
+0x75 0x01  Report Size (1)
+0x05 0x08  Usage Page (LEDs)
+0x19 0x01  Usage Minimum (1)
+0x29 0x05  Usage Maximum (5)
+0x91 0x02  Output (Data, Var, Abs) — LED report
+0x95 0x01  Report Count (1)
+0x75 0x03  Report Size (3)
+0x91 0x01  Output (Const) — LED padding
+0x95 0x06  Report Count (6)
+0x75 0x08  Report Size (8)
+0x15 0x00  Logical Minimum (0)
+0x25 0x65  Logical Maximum (101)
+0x05 0x07  Usage Page (Keyboard/Keypad)
+0x19 0x00  Usage Minimum (0)
+0x29 0x65  Usage Maximum (101)
+0x81 0x00  Input (Data, Array) — key array (6 bytes)
+0xC0      End Collection
+```
+
+Bytes: `05 01 09 06 A1 01 05 07 19 E0 29 E7 15 00 25 01 75 01 95 08 81 02 95 01 75 08 81 01 95 05 75 01 05 08 19 01 29 05 91 02 95 01 75 03 91 01 95 06 75 08 15 00 25 65 05 07 19 00 29 65 81 00 C0`
 
 ## Message flow (minimal scenario)
 
