@@ -51,6 +51,22 @@ object KeyboardHidMapper {
     fun buildReport(modifier: Int, usage: Int): ByteArray =
         byteArrayOf(modifier.toByte(), 0, usage.toByte(), 0, 0, 0, 0, 0)
 
+    /**
+     * Builds the 8-byte boot keyboard report for a set of concurrently pressed
+     * keys (boot keyboard = 6 key slots). Emits the current press state, so the
+     * helper tracks down/up and reports the whole set on every transition.
+     */
+    fun buildReport(modifier: Int, usages: List<Int>): ByteArray {
+        val report = ByteArray(8)
+        report[0] = modifier.toByte()
+        val head = usages.take(MAX_KEY_SLOTS)
+        for (i in head.indices) report[2 + i] = head[i].toByte()
+        return report
+    }
+
+    /** Boot keyboard report has 6 key slots (protocol.md). */
+    const val MAX_KEY_SLOTS = 6
+
     private val USAGE: Map<Int, Int> = buildMap {
         // Letters (QWERTY physical positions)
         for (i in 0 until 26) put(KeyEvent.KEYCODE_A + i, 0x04 + i)
