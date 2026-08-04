@@ -20,6 +20,7 @@ let package = Package(
         .target(name: "EdgeSwitch", dependencies: ["AndroidBridge"]),
         .target(name: "Diagnostics", dependencies: []),
         .target(name: "AppSettings", dependencies: []),
-        .testTarget(name: "ProtocolTests", dependencies: ["Protocol"])
+        .testTarget(name: "ProtocolTests", dependencies: ["Protocol"]),
+        .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture"])
     ]
 )

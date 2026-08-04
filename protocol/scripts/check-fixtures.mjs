@@ -99,7 +99,7 @@ function decodePayload(type, payload) {
     case "POINTER_SCROLL":
       return { horizontal: payload.readFloatLE(0), vertical: payload.readFloatLE(4) };
     case "KEY_EVENT":
-      return { keyCode: u16(payload, 0), metaState: u16(payload, 2), action: payload[4], repeatCount: payload[5] };
+      return { keyCode: u16(payload, 0), metaState: payload.readUInt32LE(2), action: payload[6], repeatCount: payload[7] };
     case "CREATE_HID_DEVICE":
       return { descriptorBase64: lengthPrefixed(payload, 0).toString("base64") };
     case "DESTROY_HID_DEVICE":

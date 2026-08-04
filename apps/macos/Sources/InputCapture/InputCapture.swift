@@ -17,6 +17,25 @@ public struct PointerEvent: Sendable {
     public init(_ kind: Kind) { self.kind = kind }
 }
 
+/// A single keyboard transition captured while suppressed (ADR-0007).
+/// Fields carry Android KeyEvent semantics so the app can build KEY_EVENT directly.
+public struct CapturedKeyEvent: Sendable {
+    /// Android KeyEvent.KEYCODE_* (translated from the macOS virtual key code).
+    public let keyCode: Int
+    /// Android KeyEvent.META_* bits.
+    public let metaState: UInt32
+    /// 0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP.
+    public let action: UInt8
+    /// Repeat count (0 = first press).
+    public let repeatCount: UInt8
+    public init(keyCode: Int, metaState: UInt32, action: UInt8, repeatCount: UInt8) {
+        self.keyCode = keyCode
+        self.metaState = metaState
+        self.action = action
+        self.repeatCount = repeatCount
+    }
+}
+
 /// CGEventTap-based input capture.
 ///
 /// Hard rules (AGENTS.md):
@@ -34,6 +53,8 @@ public final class InputCapture: @unchecked Sendable {
 
     /// Called on the capture thread for every pointer event while suppressed.
     public var onPointerEvent: (@Sendable (PointerEvent) -> Void)?
+    /// Called on the capture thread for every keyboard transition while suppressed.
+    public var onKeyEvent: (@Sendable (CapturedKeyEvent) -> Void)?
     /// Called when the pointer reaches a screen edge while listening.
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
     /// Called when suppression is released by the fail-safe (timeout, disconnect, shortcut).
@@ -58,6 +79,10 @@ public final class InputCapture: @unchecked Sendable {
     private var edgeCooldownUntil: CFTimeInterval = 0
     /// Tracks whether cursor is currently hidden to prevent unbalanced hide/show.
     private var isCursorHidden = false
+    /// Android key codes currently down on the device; on release (fail-safe,
+    /// timeout, disconnect) every stuck key is sent UP so the device never
+    /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
+    private var keysDown: Set<Int> = []
 
     public init() {}
 
@@ -151,6 +176,7 @@ public final class InputCapture: @unchecked Sendable {
         }
         if wasSuppressing {
             showCursor()
+            flushStuckKeys()
             // Physically return the pointer to the crossing edge point the user
             // pushed through, so Android->macOS continues seamlessly instead of
             // jumping to the screen center.
@@ -214,8 +240,63 @@ public final class InputCapture: @unchecked Sendable {
                 return nil
             }
             return Unmanaged.passUnretained(event)
+        case .keyDown, .keyUp, .flagsChanged:
+            return handleKeyboard(event: event, type: type)
         default:
             return Unmanaged.passUnretained(event)
+        }
+    }
+
+    /// Handles keyboard events while suppressed. When suppressed, key events are
+    /// consumed (never reach the macOS system) — this is what blocks Cmd+Tab,
+    /// Spotlight, Mission Control, etc. while the user is typing on the Android
+    /// side. The events are forwarded as Android key CODE transitions.
+    /// Non-ANSI keys (media, brightness, etc.) are consumed but not forwarded.
+    /// The event is forwarded with the current modifier state so the Android IME
+    /// can compose (e.g. Korean 2-set does its own mod mapping).
+    ///
+    /// Emergency fail-safe: ⌘⇧X (RegisterEventHotKey) keeps working because hot
+    /// keys are read by the Carbon event dispatcher before/independent of the tap.
+    private func handleKeyboard(event: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
+        guard isSuppressing else { return Unmanaged.passUnretained(event) }
+        let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let metaState = KeyCodeMapper.androidMetaState(ofFlags: event.flags)
+        let keyCode = KeyCodeMapper.androidKeyCode(ofVirtualKey: virtualKey)
+        switch type {
+        case .flagsChanged:
+            // Modifier-only change. Track it in the repeat/down state via its
+            // translated key code if known; otherwise ignore (consume anyway).
+            break
+        case .keyDown:
+            // Auto-repeat arrives as further .keyDown with the autorepeat bit set.
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if let keyCode {
+                keysDown.insert(keyCode)
+                onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
+                                             action: 0, repeatCount: isRepeat ? 1 : 0))
+            }
+        case .keyUp:
+            if let keyCode {
+                keysDown.remove(keyCode)
+                onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
+                                             action: 1, repeatCount: 0))
+            }
+        default:
+            break
+        }
+        return nil // consume: system shortcuts must not fire on macOS
+    }
+
+    /// Fail-safe: if suppression ends (timeout/disconnect/emergency ⌘⇧X) while
+    /// keys were still held, release them on the device so it never gets stuck.
+    private func flushStuckKeys() {
+        let held = keysDown
+        keysDown.removeAll()
+        for keyCode in held {
+            onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: 0, action: 1, repeatCount: 0))
+        }
+        if !held.isEmpty {
+            Diagnostics.log("flushed \(held.count) stuck key(s)")
         }
     }
 
@@ -381,6 +462,7 @@ public final class InputCapture: @unchecked Sendable {
         .rightMouseDown, .rightMouseUp,
         .otherMouseDown, .otherMouseUp,
         .scrollWheel,
+        .keyDown, .keyUp, .flagsChanged,
     ]
 
     private static func buttonIndex(for type: CGEventType) -> UInt32 {

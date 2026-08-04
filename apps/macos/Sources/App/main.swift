@@ -109,6 +109,9 @@ final class AppModel: ObservableObject {
         capture.onPointerEvent = { [weak self] event in
             self?.onCapturedEvent(event)
         }
+        capture.onKeyEvent = { [weak self] keyEvent in
+            self?.onCapturedKeyEvent(keyEvent)
+        }
         capture.onSuppressionReleased = { [weak self] in
             Task { @MainActor in
                 self?.phase = .ready
@@ -453,6 +456,17 @@ final class AppModel: ObservableObject {
 
     /// Forward a captured event while the pointer is suppressed (dexActive).
     /// Uses the UHID mouse when available, else falls back to SDK injection.
+    nonisolated func onCapturedKeyEvent(_ keyEvent: CapturedKeyEvent) {
+        // Dispatched straight to the helper as KEY_EVENT. The Android side
+        // backs it with UHID keyboard or virtual injection (ADR-0007).
+        guard let connection else { return }
+        try? connection.send(CxiFrame(type: .keyEvent, requestId: 1,
+                                      payload: Messages.keyEvent(keyCode: UInt16(keyEvent.keyCode),
+                                                                 metaState: keyEvent.metaState,
+                                                                 action: keyEvent.action,
+                                                                 repeatCount: keyEvent.repeatCount)))
+    }
+
     nonisolated func send(event: PointerEvent) {
         guard let connection else { return }
         if let deviceId = hidDeviceId {
