@@ -25,22 +25,22 @@ class HidDeviceManager(private val log: Logger, private val context: Context) {
 
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
 
-    fun create(descriptor: ByteArray): Result<Int> {
+    fun create(descriptor: ByteArray, name: String = DEFAULT_NAME): Result<Int> {
         val fd = try {
             Os.open("/dev/uhid", OsConstants.O_RDWR, 0)
         } catch (e: ErrnoException) {
             return Result.failure(HidError(1, "open /dev/uhid failed: ${e.message}"))
         }
         try {
-            val payload = create2Payload(DEFAULT_NAME, descriptor)
+            val payload = create2Payload(name, descriptor)
             Os.write(fd, payload, 0, payload.size)
             Thread.sleep(500)
             val id = nextId++
-            // Find the input device ID for our virtual mouse
-            val inputDeviceId = findInputDeviceId("Ampersand Mouse")
+            // Find the input device ID for our virtual device
+            val inputDeviceId = findInputDeviceId(name)
             val device = Device(id, fd, inputDeviceId)
             synchronized(devices) { devices[id] = device }
-            log.info("HidDeviceManager", "device created id=$id inputDeviceId=$inputDeviceId")
+            log.info("HidDeviceManager", "device created id=$id name=$name inputDeviceId=$inputDeviceId")
             return Result.success(id)
         } catch (e: ErrnoException) {
             safeClose(fd)
@@ -59,21 +59,23 @@ class HidDeviceManager(private val log: Logger, private val context: Context) {
         return null
     }
 
-    fun sendReport(deviceId: Int, report: ByteArray) {
+    fun sendReport(deviceId: Int, report: ByteArray): Boolean {
         val device = synchronized(devices) { devices[deviceId] }
         if (device == null) {
             log.warn("HidDeviceManager", "report for unknown device id=$deviceId")
-            return
+            return false
         }
-        try {
+        return try {
             val buf = ByteBuffer.allocate(4 + 2 + report.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(UHID_INPUT2)
             buf.putShort(report.size.toShort())
             buf.put(report)
             val written = Os.write(device.fd, buf.array(), 0, buf.capacity())
             log.info("HidDeviceManager", "report sent id=$deviceId len=${report.size} written=$written")
+            true
         } catch (e: ErrnoException) {
             log.error("HidDeviceManager", "report write failed id=$deviceId: ${e.message}")
+            false
         }
     }
 
