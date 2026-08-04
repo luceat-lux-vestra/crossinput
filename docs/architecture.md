@@ -1,6 +1,6 @@
 # Ampersand Architecture
 
-> Status: draft (v1 in progress — Phase 0 verified on device; key decisions recorded in docs/adr/)
+> Status: draft (v0.1.0 released — pointer + keyboard verified on device; key decisions recorded in docs/adr/)
 
 ## Goal
 
@@ -11,12 +11,14 @@ macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mo
 ```
 ┌───────────────────────────── macOS (Swift 6) ─────────────────────────────┐
 │ Menu Bar UI  Edge Switch State Machine  CGEventTap (input capture)        ││ Connection Manager ──► adb subprocess (ADB over Wi-Fi)                    │
+│ pointer + keyboard capture · shortcut suppression                          │
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ ADB stdin/stdout framing (CXI protocol)
 ┌───────────────────────────────────▼──────────────────────────────────────┐
 │                        Android helper (Kotlin)                           │
 │  app_process entrypoint  │  display discovery (DisplayManager)           │
 │ UHID create/inject │ display/rotation/state reporting                 │
+│ KeyboardBackend (UHID + virtual-injection fallback)                      │
 └───────────────────────────────────┬──────────────────────────────────────┘
                                     │ UHID (virtual HID device)
                               ┌─────▼─────┐
@@ -37,7 +39,7 @@ macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mo
 ## Core components (macOS)
 
 - **App**: menu bar UI, onboarding, status display
-- **InputCapture**: CGEventTap — input suppression, delta preservation, cursor hide/show, edge warp
+- **InputCapture**: CGEventTap — input suppression, pointer delta preservation, cursor hide/show, edge warp, keyboard capture (key events → CXI KEY_EVENT) with system-shortcut suppression + stuck-key fail-safe
 - **EdgeSwitch**: state machine — DISABLED/DISCONNECTED/CONNECTING/MAC_ACTIVE/EDGE_ARMED/DEX_ACTIVE/RECOVERING/ERROR
 - **AndroidBridge**: adb subprocess management, protocol serialization/deserialization
 - **Protocol**: CXI message definitions (Swift, golden fixture tests)
@@ -49,6 +51,8 @@ macOS menu bar app. Pushing your MacBook pointer (trackpad, wired or wireless mo
 - **Main**: app_process entry point, stdin/stdout event loop
 - **DisplayDiscovery**: discovers/reports all displays via DisplayManager
 - **HidDeviceManager**: UHID create/destroy/report injection
+- **KeyboardBackend**: UHID keyboard + virtual-injection fallback, key-state (pressed set) reporting
+- **KeyboardHidMapper**: Android keycode → HID usage + metaState → modifier mapping
 - **Protocol**: CXI message definitions (Kotlin, golden fixture tests)
 
 ## Design decisions

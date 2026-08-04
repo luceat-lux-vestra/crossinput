@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Currently in the technical verification phase; there are no officially supported versions.
+v0.1.0 is the first public release; there are no LTS/stability guarantees yet.
 All reports are welcome until a stable release exists.
 
 ## Reporting a vulnerability

@@ -6,8 +6,8 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
-│ pointer capture · edge switch │   │ UHID virtual mouse (primary)│
-│                               │   │ SDK input injection (alt)   │
+│ pointer + keyboard capture    │   │ UHID virtual mouse+keyboard│
+│ edge switch · shortcut hold   │   │ SDK input injection (alt)  │
 └───────────┬────────────────────┘   └────────────┬──────────────┘
             │                                     │
             └──► ADB over Wi-Fi (wireless debugging) ► UHID (no root)
@@ -27,7 +27,7 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 
 ## Status
 
-Early development. Pointer + keyboard verified on device (SM-G977N, Android 12): the UHID virtual mouse/keyboard drive the DeX cursor and typing 1:1, system shortcuts are suppressed while captured, and Korean 2-set composes on Android. Distributed as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)). Edge-switch stability hardening remains open.
+Pointer + keyboard verified on device (SM-G977N, Android 12): the UHID virtual mouse/keyboard drive the DeX cursor and typing 1:1, system shortcuts are suppressed while captured, and Korean 2-set composes on Android. Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 
 Progress: [docs/roadmap.md](docs/roadmap.md) · Design: [docs/architecture.md](docs/architecture.md)
 

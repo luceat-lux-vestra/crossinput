@@ -55,11 +55,17 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
 9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy UHID devices and exit cleanly (B-07).
 
+Keyboard (Phase 9, ADR-0007 — added to the same helper session):
+
+10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
+11. `scripts/deploy-helper.sh send <key-event-frame-hex>` — key down/up (fixture `protocol/fixtures/key-event.bin`, action byte) must produce exactly one character (no infinite repeat; UHID reports key-state sets).
+12. macOS app while captured: Cmd+Tab / Spotlight must NOT fire on the Mac (system-shortcut suppression); typing reaches the Android IME and Korean 2-set composes.
+
 Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check-fixtures.mjs` keeps them in sync with `protocol/protocol.md`.
 
 ### Verification items (Phase 2)
 
-Status: ⏳ on-device verification pending (results recorded in issue #6).
+Status: ✅ verified on device (SM-G977N, 2026-08). Results recorded in issue [#6](https://github.com/luceat-lux-vestra/crossinput/issues/6) and keyboard work in issue [#21](https://github.com/luceat-lux-vestra/crossinput/issues/21).
 
 | # | Item | Pass criteria |
 |---|---|---|
