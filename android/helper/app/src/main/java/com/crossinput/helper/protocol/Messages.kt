@@ -50,6 +50,14 @@ object Messages {
         return Pair(bb.float, bb.float)
     }
 
+    data class KeyEvent(val keyCode: Int, val metaState: Int, val action: Int, val repeatCount: Int)
+
+    fun keyEvent(payload: ByteArray): KeyEvent {
+        val keyCode = le(payload, 0).short.toInt() and 0xFFFF
+        val metaState = le(payload, 2).short.toInt() and 0xFFFF
+        return KeyEvent(keyCode, metaState, payload[4].toInt() and 0xFF, payload[5].toInt() and 0xFF)
+    }
+
     // ---- Android → Mac (builders) ----
 
     fun helloAck(version: Int): ByteArray =
