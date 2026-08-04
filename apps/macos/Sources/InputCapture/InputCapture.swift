@@ -5,35 +5,6 @@ import AppKit
 import Carbon.HIToolbox
 import EdgeSwitch
 import Diagnostics
-import Darwin // for dlopen/dlsym
-
-// CGS (Core Graphics Services) private API for reliable cursor hide/show on
-// modern macOS (CGDisplayHideCursor deprecated/no-op on 14+). Mirrors
-// Deskflow/Synergy's SetsCursorInBackground pattern.
-// Symbols not in public tbd — resolve at runtime via dlsym.
-private typealias CGSMainConnectionIDFn = @convention(c) () -> UInt32
-private typealias CGSSetConnectionPropertyFn = @convention(c) (UInt32, UInt32, CFString, CFTypeRef) -> Int32
-private typealias CGAssociateMouseAndMouseCursorPositionFn = @convention(c) (Int32) -> Void
-
-nonisolated(unsafe) private var cgsMainConnectionID: CGSMainConnectionIDFn?
-nonisolated(unsafe) private var cgsSetConnectionProperty: CGSSetConnectionPropertyFn?
-nonisolated(unsafe) private var cgsAssociateMouseAndMouseCursorPosition: CGAssociateMouseAndMouseCursorPositionFn?
-
-private func resolveCGSSymbols() {
-        guard cgsMainConnectionID == nil || cgsSetConnectionProperty == nil || cgsAssociateMouseAndMouseCursorPosition == nil else { return }
-        var handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
-        if handle == nil {
-            handle = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
-        }
-        if let h = handle {
-            cgsMainConnectionID = unsafeBitCast(dlsym(h, "CGSMainConnectionID"), to: CGSMainConnectionIDFn.self)
-            cgsSetConnectionProperty = unsafeBitCast(dlsym(h, "CGSSetConnectionProperty"), to: CGSSetConnectionPropertyFn.self)
-            cgsAssociateMouseAndMouseCursorPosition = unsafeBitCast(dlsym(h, "CGAssociateMouseAndMouseCursorPosition"), to: CGAssociateMouseAndMouseCursorPositionFn.self)
-            Diagnostics.log("CGS symbols resolved (handle=\(h)): conn=\(cgsMainConnectionID != nil), setProp=\(cgsSetConnectionProperty != nil), associate=\(cgsAssociateMouseAndMouseCursorPosition != nil)")
-        } else {
-            Diagnostics.log("CGS dlopen failed for both SkyLight and CoreGraphics")
-        }
-    }
 
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
@@ -85,6 +56,8 @@ public final class InputCapture: @unchecked Sendable {
     private var emergencyHotKey: EventHotKeyRef?
     /// Prevents an immediate re-trigger after the pointer returns to macOS.
     private var edgeCooldownUntil: CFTimeInterval = 0
+    /// Tracks whether cursor is currently hidden to prevent unbalanced hide/show.
+    private var isCursorHidden = false
 
     public init() {}
 
@@ -207,8 +180,8 @@ public final class InputCapture: @unchecked Sendable {
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            // Re-enable is automatic when the tap is reset by the system; do not consume.
-            return Unmanaged.passRetained(event)
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
             if isSuppressing {
@@ -219,7 +192,7 @@ public final class InputCapture: @unchecked Sendable {
                 return nil // consume: pointer held at the edge
             }
             detectEdge()
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
             if isSuppressing {
@@ -232,7 +205,7 @@ public final class InputCapture: @unchecked Sendable {
                 onPointerEvent?(PointerEvent(.button(button: button, down: down)))
                 return nil
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         case .scrollWheel:
             if isSuppressing {
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
@@ -240,9 +213,9 @@ public final class InputCapture: @unchecked Sendable {
                 onPointerEvent?(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)))
                 return nil
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         default:
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
     }
 
@@ -302,11 +275,6 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
-        // A warp does not re-display the cursor, but keep hiding it in case
-        // macOS re-shows it across displays while we re-pin each move.
-        if let displayID = currentDisplayID {
-            CGDisplayHideCursor(displayID)
-        }
     }
 
     /// Physically returns the pointer to the crossing edge point the user
@@ -330,14 +298,6 @@ public final class InputCapture: @unchecked Sendable {
         case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
         }
         CGWarpMouseCursorPosition(hold)
-        // Re-associate mouse-to-cursor so acceleration/velocity tracking
-        // continues correctly after the warp (macOS resets it on raw warps).
-        if let fn = cgsAssociateMouseAndMouseCursorPosition {
-            fn(1)
-            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition(1) called")
-        } else {
-            Diagnostics.log("CGAssociateMouseAndMouseCursorPosition not resolved")
-        }
         postSyntheticMove(at: hold)
         // Don't re-trigger the edge switch from the pointer sitting on the edge.
         edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
@@ -356,31 +316,17 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func hideCursor() {
-        resolveCGSSymbols()
-        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
-            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
-            Diagnostics.log("CGS SetsCursorInBackground(true): cid=\(cid), result=\(result)")
-        } else {
-            Diagnostics.log("CGS hideCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
-        }
-        if let displayID = currentDisplayID {
-            CGDisplayHideCursor(displayID)
-        }
+        guard !isCursorHidden else { return }
+        isCursorHidden = true
         CGDisplayHideCursor(CGMainDisplayID())
+        Diagnostics.log("cursor hidden (balanced)")
     }
 
     private func showCursor() {
-        resolveCGSSymbols()
-        if let cid = cgsMainConnectionID?(), let setter = cgsSetConnectionProperty {
-            let result = setter(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanFalse)
-            Diagnostics.log("CGS SetsCursorInBackground(false): cid=\(cid), result=\(result)")
-        } else {
-            Diagnostics.log("CGS showCursor: cid=\(cgsMainConnectionID?() ?? 0), setter=\(cgsSetConnectionProperty != nil)")
-        }
-        if let displayID = currentDisplayID {
-            CGDisplayShowCursor(displayID)
-        }
+        guard isCursorHidden else { return }
+        isCursorHidden = false
         CGDisplayShowCursor(CGMainDisplayID())
+        Diagnostics.log("cursor shown (balanced)")
     }
 
     // MARK: - Fail-safe watchdog

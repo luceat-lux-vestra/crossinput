@@ -52,6 +52,10 @@ final class AppModel: ObservableObject {
     @Published var selectedDisplay: DisplayInfo?
     @Published var serial: String = ""
 
+    /// Last successful serial, kept for auto-reconnect after wireless drops.
+    @Published var lastSerial: String = ""
+    @MainActor private var reconnectTask: Task<Void, Never>?
+
     /// Accessed from the capture thread and the reader queue; ConnectionManager
     /// is internally locked (@unchecked Sendable).
     nonisolated(unsafe) var connection: ConnectionManager?
@@ -95,6 +99,9 @@ final class AppModel: ObservableObject {
     func connect(serial: String) async {
         self.serial = serial
         phase = .connecting
+        // Start clean: any displays from a previous session must not survive.
+        displays = []
+        selectedDisplay = nil
         // Tear down any previous connection (repeated Connect clicks must not
         // leave orphaned helpers on the device).
         let old = connection
@@ -108,14 +115,21 @@ final class AppModel: ObservableObject {
         manager.onEvent = { [weak self] frame in
             self?.handleUnsolicited(frame)
         }
-        manager.onDisconnect = { [weak self] in
+        manager.onDisconnect = { [weak self, weak manager] in
             Task { @MainActor in
-                self?.hidDeviceId = nil
-                self?.connection = nil
-                self?.switchMachine.connectionLost()
-                if self?.phase == .connecting || self?.phase == .ready {
-                    self?.phase = .idle
+                // Ignore callbacks from a stale manager: shutdownAndWait() on a
+                // previous connection fires its termination handler, which must
+                // not nil out the freshly installed one.
+                guard let self, let manager, self.connection === manager else { return }
+                self.hidDeviceId = nil
+                self.connection = nil
+                self.displays = []
+                self.selectedDisplay = nil
+                self.switchMachine.connectionLost()
+                if self.phase == .connecting || self.phase == .ready {
+                    self.phase = .idle
                 }
+                self.scheduleAutoReconnect()
             }
         }
         connection = manager
@@ -127,16 +141,7 @@ final class AppModel: ObservableObject {
             let list = try Messages.decodeDisplayList(listFrame.payload)
             await MainActor.run {
                 displays = list
-                if let override = AppSettings.Settings.displayIdOverride,
-                   let match = list.first(where: { $0.displayId == UInt32(override) }) {
-                    select(match)
-                } else if let desktop = list.first(where: { $0.isDesktop }) {
-                    select(desktop)
-                } else if let hdmi = list.first(where: { $0.type == 2 }) { // HDMI
-                    select(hdmi)
-                } else if let first = list.first {
-                    select(first)
-                }
+                applyAutoSelection(list)
             }
             switchMachine.connectionReady()
             phase = .ready
@@ -161,6 +166,9 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        reconnectTask?.cancel()
+        displays = []
+        selectedDisplay = nil
         if let deviceId = hidDeviceId {
             hidDeviceId = nil
             let destroyPayload = Messages.destroyHidDevice(deviceId: deviceId)
@@ -173,6 +181,163 @@ final class AppModel: ObservableObject {
         connection = nil
         switchMachine.deactivate()
         phase = .idle
+    }
+
+    @MainActor
+    func handleDisplayChanged(_ info: DisplayInfo) {
+        if let idx = displays.firstIndex(where: { $0.displayId == info.displayId }) {
+            displays[idx] = info
+            Diagnostics.log("display updated id=\(info.displayId) name=\(info.name)")
+        } else {
+            displays.append(info)
+            Diagnostics.log("display added id=\(info.displayId) name=\(info.name)")
+        }
+        // If we were on this display and it changed, refresh edge config
+        if selectedDisplay?.displayId == info.displayId {
+            applyEdgeConfig()
+        }
+        // If the new/updated display is a desktop and we have no selection, auto-select
+        if info.isDesktop && selectedDisplay == nil {
+            select(info)
+        }
+    }
+
+    /// Re-issues LIST_DISPLAYS so a display connected while the app is running
+    /// shows up even if DISPLAY_CHANGED was missed by the transport.
+    func refreshDisplays() {
+        guard connection?.isConnected == true else {
+            Diagnostics.log("refreshDisplays ignored: not connected")
+            return
+        }
+        Task {
+            do {
+                let listFrame = try await connection?.request(.listDisplays, payload: Data())
+                guard let list = listFrame.flatMap({ try? Messages.decodeDisplayList($0.payload) }) else {
+                    Diagnostics.log("refreshDisplays: decode failed")
+                    return
+                }
+                await MainActor.run {
+                    displays = list
+                    Diagnostics.log("refreshDisplays: \(list.count) display(s)")
+                    applyEdgeConfig()
+                    if selectedDisplay.flatMap({ sel in list.contains(where: { $0.displayId == sel.displayId }) }) == false {
+                        // Previously selected display disappeared; fall back to desktop.
+                        applyAutoSelection(list)
+                    }
+                }
+            } catch {
+                Diagnostics.log("refreshDisplays failed: \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    private func applyAutoSelection(_ list: [DisplayInfo]) {
+        if let override = AppSettings.Settings.displayIdOverride,
+           let match = list.first(where: { $0.displayId == UInt32(override) }) {
+            select(match)
+        } else if let desktop = list.first(where: { $0.isDesktop }) {
+            select(desktop)
+        } else if let hdmi = list.first(where: { $0.type == 2 }) { // HDMI
+            select(hdmi)
+        } else if let first = list.first {
+            select(first)
+        }
+    }
+
+    /// Wireless debugging on Samsung automatically disables on Wi-Fi drop /
+    /// sleep, so a dropped session is often recoverable by re-issuing
+    /// `adb connect` and reconnecting. Bounded retries; no-op for USB.
+    ///
+    /// Note: the debug port (the `:NNNNN` part) changes whenever the phone
+    /// restarts its wireless-debugging service, so we also rediscover via
+    /// `adb mdns services` and retry on the fresh endpoint.
+    @MainActor
+    private func scheduleAutoReconnect() {
+        lastSerial = serial
+        guard !serial.isEmpty, serial.contains(":") else {
+            Diagnostics.log("auto-reconnect skipped (serial: \(serial.isEmpty ? "none" : "usb"))")
+            return
+        }
+        phase = .idle
+        Diagnostics.log("auto-reconnect scheduled for \(serial)")
+        reconnectTask?.cancel()
+        let target = serial
+        reconnectTask = Task.detached { [weak self] in
+            for attempt in 1...5 {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self else { return }
+                guard await self.isConnectionNil() else { return }
+                // Re-issue adb connect on the remembered endpoint and on any
+                // freshly discovered mDNS endpoint (port may have changed).
+                let endpoints = await Self.discoverWirelessEndpoints(target: target)
+                Diagnostics.log("auto-reconnect attempt \(attempt): endpoints \(endpoints.count)")
+                for endpoint in endpoints {
+                    Self.reconnectAdb(serial: endpoint)
+                }
+                let found = await Self.firstAdbSerial()
+                if !found.isEmpty {
+                    Diagnostics.log("auto-reconnect attempt \(attempt): device \(found)")
+                    await self.connect(serial: found)
+                    if await self.isPhaseReady() { return }
+                } else {
+                    Diagnostics.log("auto-reconnect attempt \(attempt): device still offline")
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func isConnectionNil() -> Bool { connection == nil }
+    @MainActor
+    private func isPhaseReady() -> Bool { phase == .ready }
+
+    nonisolated private static func reconnectAdb(serial: String) {
+        guard serial.contains(":") else { return }
+        let adb = locateAdb() ?? "/usr/local/bin/adb"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adb)
+        process.arguments = ["connect", serial]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            Diagnostics.log("adb connect failed: \(error)")
+        }
+    }
+
+    /// Returns `[ip:port]` candidates: the remembered endpoint first, then any
+    /// `_adb-tls-connect._tcp` mDNS advertisement with a matching IP.
+    nonisolated private static func discoverWirelessEndpoints(target: String) async -> [String] {
+        let adb = locateAdb() ?? "/usr/local/bin/adb"
+        var endpoints: [String] = []
+        if !target.isEmpty { endpoints.append(target) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adb)
+        process.arguments = ["mdns", "services"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+            for line in lines {
+                guard line.contains("_adb-tls-connect._tcp") else { continue }
+                // e.g. "SM-G977N_XXXX._adb-tls-connect._tcp 192.168.0.10:37327"
+                guard let endpoint = line.split(whereSeparator: { $0.isWhitespace }).last else { continue }
+                let s = String(endpoint)
+                guard s.contains(":") else { continue }
+                if s != target, endpoints.contains(s) == false { endpoints.append(s) }
+            }
+        } catch {
+            Diagnostics.log("adb mdns services failed: \(error)")
+        }
+        return endpoints
     }
 
     func enable() -> Bool {
@@ -309,12 +474,21 @@ final class AppModel: ObservableObject {
                     switchMachine.connectionLost()
                 }
             }
+        case .displayChanged:
+            Diagnostics.log("received DISPLAY_CHANGED payload=\(frame.payload.count)B")
+            if let info = try? Messages.decodeDisplayChanged(frame.payload) {
+                Task { @MainActor in
+                    self.handleDisplayChanged(info)
+                }
+            } else {
+                Diagnostics.log("DISPLAY_CHANGED decode failed")
+            }
         default:
             break
         }
     }
 
-    private static func locateAdb() -> String? {
+    nonisolated private static func locateAdb() -> String? {
         let candidates = ["/usr/local/bin/adb", "/opt/homebrew/bin/adb", "/usr/bin/adb"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
@@ -446,6 +620,10 @@ private struct AppMenu: View {
                         Text("\(display.name) (\(display.width)×\(display.height))")
                     }
                 }
+            }
+            Divider()
+            Button("Refresh Displays") {
+                model.refreshDisplays()
             }
         }
 
