@@ -54,8 +54,8 @@ object Messages {
 
     fun keyEvent(payload: ByteArray): KeyEvent {
         val keyCode = le(payload, 0).short.toInt() and 0xFFFF
-        val metaState = le(payload, 2).short.toInt() and 0xFFFF
-        return KeyEvent(keyCode, metaState, payload[4].toInt() and 0xFF, payload[5].toInt() and 0xFF)
+        val metaState = le(payload, 2).int
+        return KeyEvent(keyCode, metaState, payload[6].toInt() and 0xFF, payload[7].toInt() and 0xFF)
     }
 
     // ---- Android → Mac (builders) ----

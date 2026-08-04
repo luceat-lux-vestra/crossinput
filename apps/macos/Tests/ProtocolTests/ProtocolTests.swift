@@ -81,11 +81,11 @@ struct ProtocolTests {
 
     @Test func keyEventFrameMatchesFixture() {
         let frame = CxiFrame(type: .keyEvent, requestId: 6,
-                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x1000, action: 0, repeatCount: 0))
+                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x1, action: 0, repeatCount: 0))
         let bytes = encode(frame)
         #expect(bytes == fixture("key-event.bin"))
         #expect(bytes.map { String(format: "%02x", $0) }.joined() ==
-                "43584901000c0006000000060000001d0000100000")
+                "43584901000c0006000000080000001d00010000000000")
     }
 
     @Test func keyEventRoundTrips() throws {
