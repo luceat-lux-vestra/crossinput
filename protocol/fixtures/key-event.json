@@ -2,7 +2,7 @@
   "type": "KEY_EVENT",
   "requestId": 6,
   "keyCode": 29,
-  "metaState": 4096,
+  "metaState": 1,
   "action": 0,
   "repeatCount": 0
 }

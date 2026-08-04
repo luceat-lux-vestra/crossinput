@@ -201,17 +201,17 @@ class CodecTest {
 
     @Test
     fun keyEventParses() {
-        val payload = byteArrayOf(0x1D, 0x00, 0x00, 0x10, 0x00, 0x00) // keyCode 29, meta 0x1000, down, repeat 0
+        val payload = byteArrayOf(0x1D, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00) // keyCode 29, meta 0x1 (Shift), down, repeat 0
         val parsed = Messages.keyEvent(payload)
         assertEquals(29, parsed.keyCode)
-        assertEquals(0x1000, parsed.metaState)
+        assertEquals(0x1, parsed.metaState)
         assertEquals(0, parsed.action)
         assertEquals(0, parsed.repeatCount)
     }
 
     @Test
     fun keyEventParsesHighBits() {
-        val payload = byteArrayOf(0x6F, 0x00, 0x00, 0x20, 0x01, 0x02) // keyCode 111, meta 0x2000, up, repeat 2
+        val payload = byteArrayOf(0x6F, 0x00, 0x00, 0x20, 0x00, 0x00, 0x01, 0x02) // keyCode 111, meta 0x2000, up, repeat 2
         val parsed = Messages.keyEvent(payload)
         assertEquals(111, parsed.keyCode)
         assertEquals(0x2000, parsed.metaState)

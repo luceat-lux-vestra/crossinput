@@ -176,8 +176,8 @@ public enum Messages {
 
     /// Android KeyEvent semantics: keyCode = KeyEvent.KEYCODE_*, metaState = KeyEvent.META_*.
     /// action: 0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP. repeatCount: 0 = first press.
-    public static func keyEvent(keyCode: UInt16, metaState: UInt16, action: UInt8, repeatCount: UInt8 = 0) -> Data {
-        LE.u16(keyCode) + LE.u16(metaState) + LE.u8(action) + LE.u8(repeatCount)
+    public static func keyEvent(keyCode: UInt16, metaState: UInt32, action: UInt8, repeatCount: UInt8 = 0) -> Data {
+        LE.u16(keyCode) + LE.u32(metaState) + LE.u8(action) + LE.u8(repeatCount)
     }
 }
 
@@ -262,10 +262,10 @@ public extension Messages {
         return try d.u16()
     }
 
-    static func decodeKeyEvent(_ payload: Data) throws -> (keyCode: UInt16, metaState: UInt16, action: UInt8, repeatCount: UInt8) {
+    static func decodeKeyEvent(_ payload: Data) throws -> (keyCode: UInt16, metaState: UInt32, action: UInt8, repeatCount: UInt8) {
         var d = Decoder(payload)
         let keyCode = try d.u16()
-        let metaState = try d.u16()
+        let metaState = try d.u32()
         let action = try d.u8()
         let repeatCount = try d.u8()
         return (keyCode, metaState, action, repeatCount)

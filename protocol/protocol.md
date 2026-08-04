@@ -46,7 +46,7 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x0009 | POINTER_MOVE_REL | dx i32 + dy i32 (relative pointer delta, target display pixels) |
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
 | 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up, positive horizontal = left, Android AXIS_* convention) |
-| 0x000C | KEY_EVENT | keyCode u16 + metaState u16 + action u8 + repeatCount u8 (Android KeyEvent semantics, see below) |
+| 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (Android KeyEvent semantics, see below) |
 
 ### Android → Mac
 
@@ -85,7 +85,9 @@ layerStack u32   (always recorded in v1; -1 if unknown)
 
 ```
 keyCode u16      Android KeyEvent.KEYCODE_* (e.g. 29=KEYCODE_A, 67=KEYCODE_DEL, 111=KEYCODE_ESCAPE)
-metaState u16    Android KeyEvent.META_* bit flags (e.g. 0x1000=Shift, 0x2000=Ctrl, 0x4000=Alt, 0x8000=Meta)
+metaState u32    Android KeyEvent.META_* bit flags (actual Android constants:
+                 0x1=Shift, 0x2=Alt, 0x4=Sym, 0x8=Function, 0x1000=Ctrl, 0x10000=Meta,
+                 plus LEFT/RIGHT-specific bits 0x40/0x80 Shift, 0x10/0x20 Alt, 0x2000/0x4000 Ctrl)
 action u8        0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP
 repeatCount u8   repeat count (0 = first press; key repeats are sent as explicit DOWN events)
 ```
