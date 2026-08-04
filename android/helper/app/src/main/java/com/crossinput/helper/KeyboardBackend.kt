@@ -10,8 +10,8 @@ import java.lang.reflect.Method
 
 /**
  * Keyboard delivery backend (ADR-0007): KEY_EVENT → UHID keyboard (preferred)
- * with automatic fallback to virtual KeyEvent injection via
- * InputManager.injectInputEvent (scrcpy-style SDK injection).
+ * with automatic fallback to virtual KeyEvent injection via the internal
+ * InputManager.injectInputEvent API (no AccessibilityService).
  *
  * The UHID keyboard is created eagerly with the standard boot keyboard
  * descriptor (protocol.md). If creation fails, or a report write fails, the
@@ -45,7 +45,7 @@ class KeyboardBackend(
             },
             onFailure = {
                 uhidBroken = true
-                log.warn("KeyboardBackend", "UHID keyboard unavailable (${it.message}); virtual fallback active")
+                log.warn("KeyboardBackend", "UHID keyboard unavailable (${it.javaClass.simpleName}); virtual fallback active")
             },
         )
     }
@@ -72,7 +72,7 @@ class KeyboardBackend(
 
     private fun injectVirtual(event: Messages.KeyEvent) {
         if (injectInputEventMethod == null) {
-            log.error("KeyboardBackend", "injectInputEvent unavailable; key dropped (keyCode=${event.keyCode})")
+            log.error("KeyboardBackend", "Virtual key injection unavailable; input event dropped")
             return
         }
         val now = SystemClock.uptimeMillis()
@@ -85,11 +85,11 @@ class KeyboardBackend(
         )
         try {
             val result = injectInputEventMethod.invoke(inputManager, keyEvent, INJECT_INPUT_EVENT_MODE_ASYNC) as Boolean
-            if (!result) log.warn("KeyboardBackend", "injectInputEvent returned false (keyCode=${event.keyCode})")
+            if (!result) log.warn("KeyboardBackend", "Virtual key injection was rejected")
         } catch (e: SecurityException) {
-            log.error("KeyboardBackend", "injectInputEvent security exception: ${e.message}")
+            log.error("KeyboardBackend", "Virtual key injection failed: ${e.javaClass.simpleName}")
         } catch (e: Exception) {
-            log.error("KeyboardBackend", "injectInputEvent failed: ${e.javaClass.simpleName}: ${e.message}")
+            log.error("KeyboardBackend", "Virtual key injection failed: ${e.javaClass.simpleName}")
         }
     }
 
