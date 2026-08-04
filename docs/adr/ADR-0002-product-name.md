@@ -16,7 +16,7 @@ The existing name "DeXCursor" (a) confines the product to DeX (Samsung-only), (b
 | Technical identifiers (repo/folder/package/protocol) | **crossinput**, package `com.crossinput.helper`, protocol prefix **CXI** |
 
 - Repo name: `crossinput`
-- Swift package: `Ampersand` (library `AmpersandCore`, executable `AmpersandApp`)
+- Swift package: `Ampersand` (library `AmpersandCore`, executable `Ampersand`, distributed as `Ampersand.app`)
 - Android rootProject: `crossinput-helper`
 
 ## Alternatives
