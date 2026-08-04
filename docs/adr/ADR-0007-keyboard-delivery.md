@@ -69,9 +69,9 @@ There is no keyboard message type in the CXI protocol yet (only mouse
 
 ## Validation
 
-- (pending) Protocol: keyboard message type + fixtures pass `scripts/check-fixtures.mjs` and `swift test`
-- (pending) Android: UHID keyboard create + HID report on-device (SM-G977N)
-- (pending) Android: virtual fallback injects keys via accessibility
-- (pending) macOS: typing reaches DeX-focused field; Cmd+Tab / Spotlight do not
-  fire on the Mac while captured (on-device logcat + screen confirmation)
-- (pending) Korean: 2-set composition produces correct hangul in a DeX field
+- (done) Protocol: keyboard message type (`KEY_EVENT` 0x000C) + fixtures pass `scripts/check-fixtures.mjs` and `swift test`
+- (done) Android: UHID keyboard create + HID report on-device (SM-G977N) — `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`
+- (done) Android: key-state reporting fix verified on-device (no infinite key repeat; issue #21, PR #26)
+- (pending) Android: virtual fallback injects keys via accessibility (per-device, AGENTS.md rule 2) — UHID path verified; fallback not yet exercised on-device
+- (done) macOS: typing reaches a DeX-focused field; Cmd+Tab / Spotlight do not fire on the Mac while captured (user-confirmed on-device)
+- (done) Korean: 2-set composition produces correct hangul in a DeX field (user-confirmed)
