@@ -240,6 +240,19 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .macActive)
     }
 
+    func testFirstNegativeResidualIsNormalized() {
+        // Representative regression (directive test): a large macOS-directed
+        // residual must not leak into the return baseline, so control returns
+        // only after genuine pull-back accumulates past the hysteresis.
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: -1000, dy: 0) // residual -> normalized to 0
+        XCTAssertEqual(machine.state, .dexActive, "first event never returns")
+        machine.pointerMoved(dx: -59, dy: 0) // position -59, above -60
+        XCTAssertEqual(machine.state, .dexActive, "not yet past hysteresis")
+        machine.pointerMoved(dx: -1, dy: 0) // position -60 -> return
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
     func testFirstAndroidDirectedInputIsNormalizedToItsMagnitude() {
         // First event toward Android is acknowledged at its full magnitude
         // (max(0, delta) == delta): a large entry jump creates deep position.
@@ -452,6 +465,44 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .dexActive)
         machine.pointerMoved(dx: -30, dy: 0) // first event after re-entry, normalized to 0
         machine.pointerMoved(dx: -61, dy: 0) // second: -61 past hysteresis
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    // MARK: - Virtual position matches UHID-delivered movement
+
+    // main.swift feeds the state machine with the splitter's deliveredDx/dy
+    // (not the raw Int32), so the virtual position must equal what Android
+    // actually received. These tests prove the machine behaves identically
+    // whether fed raw or per-report values (directive #2 synchronization).
+
+    func testVirtualPositionMatchesDeliveredSumWhenFeedingSplitReports() {
+        // dx=300 -> reports [127, 127, 46]. Feeding each report individually
+        // must accumulate to the same 300 position as one raw call.
+        let raw = HIDReportSplitter.normalizeForHID(dx: 300, dy: 0)
+        XCTAssertEqual(raw.deliveredDx, 300)
+
+        let perReport = makeDexActive(edge: .right)
+        for report in raw.reports {
+            perReport.pointerMoved(dx: CGFloat(report.dx), dy: CGFloat(report.dy))
+        }
+        XCTAssertEqual(perReport.state, .dexActive)
+
+        // Pull back 361 in split form: 300 - 361 = -61 -> past hysteresis.
+        let pull = HIDReportSplitter.normalizeForHID(dx: -361, dy: 0)
+        for report in pull.reports {
+            perReport.pointerMoved(dx: CGFloat(report.dx), dy: CGFloat(report.dy))
+        }
+        XCTAssertEqual(perReport.state, .macActive)
+    }
+
+    func testVirtualPositionMatchesDeliveredWhenFedOncePerEvent() {
+        // One pointerMoved call with the delivered total behaves identically
+        // to per-report feeding (the send(event:) path in main.swift).
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: 300, dy: 0)
+        machine.pointerMoved(dx: -359, dy: 0) // 300 - 359 = -59: not yet
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -2, dy: 0) // -61: past hysteresis
         XCTAssertEqual(machine.state, .macActive)
     }
 }

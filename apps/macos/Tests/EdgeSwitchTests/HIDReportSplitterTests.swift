@@ -49,6 +49,10 @@ final class HIDReportSplitterTests: XCTestCase {
         XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -128, dy: 0).reports.map(\.dx), [-127, -1])
         XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: 254, dy: 0).reports.map(\.dx), [127, 127])
         XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: 255, dy: 0).reports.map(\.dx), [127, 127, 1])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: 256, dy: 0).reports.map(\.dx), [127, 127, 2])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -254, dy: 0).reports.map(\.dx), [-127, -127])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -255, dy: 0).reports.map(\.dx), [-127, -127, -1])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -256, dy: 0).reports.map(\.dx), [-127, -127, -2])
     }
 
     func testZeroMovementProducesNoReports() {
