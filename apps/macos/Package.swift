@@ -22,6 +22,7 @@ let package = Package(
         .target(name: "AppSettings", dependencies: []),
         .testTarget(name: "ProtocolTests", dependencies: ["Protocol"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture"]),
-        .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"])
+        .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
+        .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"])
     ]
 )
