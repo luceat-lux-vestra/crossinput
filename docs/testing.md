@@ -58,7 +58,7 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
-11. Send one key press with the dedicated down/up fixtures — the sequence below must produce exactly one character:
+11. Send one key down/up pair using the dedicated fixtures, then verify as follows (character input is only asserted after the full down/up pair):
     ```sh
     DOWN_HEX="$(xxd -p protocol/fixtures/key-event-down.bin | tr -d '\n')"
     UP_HEX="$(xxd -p protocol/fixtures/key-event-up.bin | tr -d '\n')"
@@ -66,11 +66,11 @@ Keyboard (Phase 9, ADR-0007 — added to the same helper session):
     scripts/deploy-helper.sh send "$DOWN_HEX"
     scripts/deploy-helper.sh send "$UP_HEX"
     ```
-    - Step 1 (`key-event-down.bin`, action 0): key down only — no character is committed and no repeat fires while held.
-    - Step 2 (`key-event-up.bin`, action 1): release — exactly one character is typed.
-    - Step 3. Confirm exactly one character was entered in the focused DeX field (no auto-repeat; UHID reports key-state sets).
-    - Step 4. Confirm no repeated input appears after the key-up.
-    - Step 5. Run `scripts/deploy-helper.sh stop` and confirm no stuck-key state remains on the Android input pipeline after shutdown.
+    - Step 1 (`key-event-down.bin`, action 0): reports the key as pressed.
+    - Step 2 (`key-event-up.bin`, action 1): reports the key as released.
+    - After the complete down/up sequence, confirm that exactly one character was entered in the focused DeX field.
+    - Confirm that no repeated input continues after the key-up report.
+    - Run `scripts/deploy-helper.sh stop` and confirm that no stuck-key state remains after shutdown.
 12. macOS app while captured: Cmd+Tab / Spotlight must NOT fire on the Mac (system-shortcut suppression); typing reaches the Android IME and Korean 2-set composes.
 
 Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check-fixtures.mjs` keeps them in sync with `protocol/protocol.md`.
