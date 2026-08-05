@@ -184,13 +184,74 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     func testFirstMovementPastHysteresisDoesNotReturnButSecondDoes() {
         // The very first event after entering never returns, even if it is
-        // huge and points toward macOS (warp/synthetic leftover). The second
-        // movement is a real user gesture and normal hysteresis applies.
+        // huge and points toward macOS (warp/synthetic leftover), and it is
+        // normalized to max(0, delta) so it leaves no negative baseline. The
+        // second movement is a real user gesture and normal hysteresis applies.
         let machine = makeDexActive(edge: .right)
         machine.pointerMoved(dx: -61, dy: 0)
         XCTAssertEqual(machine.state, .dexActive, "first event never returns (issue #37)")
-        machine.pointerMoved(dx: -1, dy: 0)
+        machine.pointerMoved(dx: -61, dy: 0)
         XCTAssertEqual(machine.state, .macActive, "second event past hysteresis returns")
+    }
+
+    // MARK: - First-event baseline normalization (issue #37)
+
+    // The first movement after entering is warp/synthetic residual: it is
+    // normalized to max(0, delta) — never accumulated as a negative baseline —
+    // and never returns. Movement in the entry direction right after must
+    // never be poisoned by a macOS-directed residual.
+
+    func testFirstMacDirectedResidualDoesNotPoisonNextAndroidDirectedMove() {
+        // Right edge: residual dx=-1000 (toward macOS), then dx=+1 (Android).
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: -1000, dy: 0)
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: 1, dy: 0)
+        XCTAssertEqual(machine.state, .dexActive, "Android-directed move after residual must not return")
+    }
+
+    func testFirstResidualIsExcludedFromReturnBaselineForAllEdges() {
+        // Left edge: residual dx=+1000 (toward macOS), then dx=-1 (Android).
+        let left = makeDexActive(edge: .left)
+        left.pointerMoved(dx: 1000, dy: 0)
+        left.pointerMoved(dx: -1, dy: 0)
+        XCTAssertEqual(left.state, .dexActive)
+
+        // Top edge: residual dy=+1000 (toward macOS = down), then dy=-1 (Android = up).
+        let top = makeDexActive(edge: .top)
+        top.pointerMoved(dx: 0, dy: 1000)
+        top.pointerMoved(dx: 0, dy: -1)
+        XCTAssertEqual(top.state, .dexActive)
+
+        // Bottom edge: residual dy=-1000 (toward macOS = up), then dy=+1 (Android = down).
+        let bottom = makeDexActive(edge: .bottom)
+        bottom.pointerMoved(dx: 0, dy: -1000)
+        bottom.pointerMoved(dx: 0, dy: 1)
+        XCTAssertEqual(bottom.state, .dexActive)
+    }
+
+    func testReturnThresholdCountsOnlyMovementAfterFirstEventNormalization() {
+        // First event is clamped to 0; only subsequent macOS-directed movement
+        // accumulates toward -returnHysteresis.
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: -1000, dy: 0) // normalized to 0
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -61, dy: 0) // -61 <= -60 -> return
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    func testFirstAndroidDirectedInputIsNormalizedToItsMagnitude() {
+        // First event toward Android is acknowledged at its full magnitude
+        // (max(0, delta) == delta): a large entry jump creates deep position.
+        let machine = makeDexActive(edge: .left)
+        machine.pointerMoved(dx: -300, dy: 0) // delta = +300 -> position 300
+        XCTAssertEqual(machine.state, .dexActive)
+        // Pull back 340 total: 300 - 340 = -40 (still above -60, no return).
+        machine.pointerMoved(dx: 40, dy: 0)
+        machine.pointerMoved(dx: 300, dy: 0)
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: 20, dy: 0) // -60 -> return
+        XCTAssertEqual(machine.state, .macActive)
     }
 
     // MARK: - Real trace regression (recorded on device, left edge, 2026-08-05)
@@ -389,8 +450,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
         machine.pointerAtEdge(.right)
         XCTAssertEqual(machine.state, .dexActive)
-        machine.pointerMoved(dx: -30, dy: 0) // first event after re-entry, exempt
-        machine.pointerMoved(dx: -31, dy: 0) // second: total -61 past hysteresis
+        machine.pointerMoved(dx: -30, dy: 0) // first event after re-entry, normalized to 0
+        machine.pointerMoved(dx: -61, dy: 0) // second: -61 past hysteresis
         XCTAssertEqual(machine.state, .macActive)
     }
 }
