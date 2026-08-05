@@ -1,6 +1,22 @@
 import XCTest
 @testable import EdgeSwitch
 
+/// Thread-safe collector for transition callbacks (onStateChange is @Sendable).
+final class TransitionCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [(SwitchState, TransitionReason)] = []
+
+    var transitions: [(SwitchState, TransitionReason)] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ state: SwitchState, _ reason: TransitionReason) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append((state, reason))
+    }
+}
+
 final class EdgeSwitchStateMachineTests: XCTestCase {
     /// Common setup: activate -> connect -> ready -> reach the edge -> dexActive.
     private func makeDexActive(edge: ScreenEdge) -> EdgeSwitchStateMachine {
@@ -143,7 +159,12 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .dexActive)
     }
 
-    // MARK: - First event regression (the original bug)
+    // MARK: - First event rule (issue #37: "first movement after entering is
+    // never treated as a return") — the actual fix for the left-edge
+    // instant-return bug. origin/main and the virtual-position model are
+    // mathematically equivalent for left/right, so this rule (not the delta
+    // math) is what stops warp/synthetic leftover deltas from bouncing the
+    // user out of DeX right after entering.
 
     func testFirstMovementInEntryDirectionNeverReturns() {
         // Regression for: entering Android and immediately seeing a large jump.
@@ -161,10 +182,158 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .dexActive, "tiny wobble toward macOS must not return")
     }
 
-    func testFirstMovementPastHysteresisReturns() {
+    func testFirstMovementPastHysteresisDoesNotReturnButSecondDoes() {
+        // The very first event after entering never returns, even if it is
+        // huge and points toward macOS (warp/synthetic leftover). The second
+        // movement is a real user gesture and normal hysteresis applies.
         let machine = makeDexActive(edge: .right)
         machine.pointerMoved(dx: -61, dy: 0)
-        XCTAssertEqual(machine.state, .macActive, "deliberate immediate return past hysteresis")
+        XCTAssertEqual(machine.state, .dexActive, "first event never returns (issue #37)")
+        machine.pointerMoved(dx: -1, dy: 0)
+        XCTAssertEqual(machine.state, .macActive, "second event past hysteresis returns")
+    }
+
+    // MARK: - Real trace regression (recorded on device, left edge, 2026-08-05)
+    // Movement into Android on the left edge: dx negative. This is the actual
+    // sequence from the on-device session; it must never return while the user
+    // keeps pushing into DeX.
+
+    func testRealLeftEdgeEntryTraceNeverReturns() {
+        let trace: [(dx: CGFloat, dy: CGFloat)] = [
+            (-25, 20), (-18, 18), (-9, 3), (-12, -4), (-30, 15),
+            (-22, 9), (-17, 11), (-40, 2), (-35, -8), (-28, 13),
+            (-19, 5), (-11, -2), (-33, 7), (-26, 16), (-14, 4),
+            (-8, -6), (-21, 12), (-37, 1), (-24, -9), (-15, 8),
+        ]
+        let machine = makeDexActive(edge: .left)
+        for (dx, dy) in trace {
+            machine.pointerMoved(dx: dx, dy: dy)
+        }
+        XCTAssertEqual(machine.state, .dexActive,
+                       "sustained movement toward Android must never return")
+    }
+
+    func testRealLeftEdgeReturnTraceReturnsOnlyAfterCrossingHysteresis() {
+        // Left edge: user pushed 300 into DeX, then pulled back toward macOS
+        // in the recorded event sequence. Return must fire only when the
+        // position crosses -60, not on the first pull-back event.
+        let machine = makeDexActive(edge: .left)
+        machine.pointerMoved(dx: -300, dy: 0) // into Android (first event, exempt), pos +300
+        let pullBack: [(dx: CGFloat, dy: CGFloat)] = [
+            (81, -34), (103, -37), (111, -34), (138, -38),
+        ]
+        var returned = false
+        for (dx, dy) in pullBack {
+            machine.pointerMoved(dx: dx, dy: dy)
+            if machine.state == .macActive { returned = true; break }
+        }
+        // left edge: delta = -dx. 300 - 81 - 103 = 116 (still inside),
+        // -111 -> 5 (still inside), -138 -> -133 (crosses -60, 4th event).
+        XCTAssertTrue(returned, "pull-back past the boundary + hysteresis must return")
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    // MARK: - Equivalence with origin/main (left/right)
+    // origin/main: left delta=dx returns when accumulator >= 60 (dx>0 is back
+    // toward macOS); right delta=-dx returns when accumulator >= 60 (dx<0 is
+    // back toward macOS). The virtual-position model with -returnHysteresis is
+    // mathematically identical for these edges; the traces below must behave
+    // the same under both models.
+
+    func testLeftEdgeEquivalenceWithOriginMain() {
+        let machine = makeDexActive(edge: .left)
+        // PR: position = -Σdx, return at <= -60  ⟺  Σdx >= 60 (main).
+        machine.pointerMoved(dx: -100, dy: 0) // first event: exempt, pos 100
+        machine.pointerMoved(dx: -20, dy: 0)  // pos 120
+        machine.pointerMoved(dx: -40, dy: 0)  // pos 160
+        machine.pointerMoved(dx: 100, dy: 0)  // pos 60; main Σdx=-60 < 60: active
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: 100, dy: 0)  // pos -40; main Σdx=40 < 60: active
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: 20, dy: 0)   // pos -60; main Σdx=60 -> return
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    func testRightEdgeEquivalenceWithOriginMain() {
+        let machine = makeDexActive(edge: .right)
+        // PR: position = Σdx, return at <= -60  ⟺  Σdx <= -60 (main).
+        machine.pointerMoved(dx: 100, dy: 0)  // first event: exempt, pos 100
+        machine.pointerMoved(dx: 20, dy: 0)   // pos 120
+        machine.pointerMoved(dx: 40, dy: 0)   // pos 160
+        machine.pointerMoved(dx: -100, dy: 0) // pos 60; main -Σdx=60: active
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -100, dy: 0) // pos -40; main -Σdx=40: active
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -20, dy: 0)  // pos -60; main -Σdx=60 -> return
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    // MARK: - Transition reasons (root-cause tracing)
+
+    func testBoundaryCrossedReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.pointerMoved(dx: -100, dy: 0)
+        machine.pointerMoved(dx: 160, dy: 0) // pos -60 -> boundary crossed
+        XCTAssertEqual(collector.transitions.map(\.1), [.boundaryCrossed, .boundaryCrossed],
+                       "dexActive -> recovering -> macActive, both boundaryCrossed")
+    }
+
+    func testConnectionLostReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.connectionLost()
+        XCTAssertEqual(collector.transitions.last?.1, .connectionLost)
+        XCTAssertEqual(machine.state, .recovering)
+    }
+
+    func testEmergencyReturnReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.emergencyReturn(reason: .emergencyReturn)
+        XCTAssertEqual(collector.transitions.map(\.1), [.emergencyReturn, .emergencyReturn])
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    func testSuppressionReleasedReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.emergencyReturn(reason: .suppressionReleased)
+        XCTAssertEqual(collector.transitions.map(\.1), [.suppressionReleased, .suppressionReleased])
+    }
+
+    func testWatchdogTimeoutReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.emergencyReturn(reason: .watchdogTimeout)
+        XCTAssertEqual(collector.transitions.map(\.1), [.watchdogTimeout, .watchdogTimeout])
+    }
+
+    func testEdgeEnteredReasonIsReported() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.connectionBegan()
+        machine.connectionReady()
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.pointerAtEdge(.left)
+        XCTAssertEqual(collector.transitions.map(\.1), [.edgeEntered, .edgeEntered],
+                       "macActive -> edgeArmed -> dexActive, both edgeEntered")
+    }
+
+    func testActivationAndConnectionReasonsAreReported() {
+        let machine = EdgeSwitchStateMachine()
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.activate()
+        machine.connectionBegan()
+        machine.connectionReady()
+        XCTAssertEqual(collector.transitions.map(\.1), [.activation, .connectionBegan, .connectionReady])
     }
 
     // MARK: - Fail-safes
@@ -220,9 +389,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
         machine.pointerAtEdge(.right)
         XCTAssertEqual(machine.state, .dexActive)
-        machine.pointerMoved(dx: -30, dy: 0) // before crossing back out
-        XCTAssertEqual(machine.state, .dexActive)
-        machine.pointerMoved(dx: -31, dy: 0) // total -61 past hysteresis
+        machine.pointerMoved(dx: -30, dy: 0) // first event after re-entry, exempt
+        machine.pointerMoved(dx: -31, dy: 0) // second: total -61 past hysteresis
         XCTAssertEqual(machine.state, .macActive)
     }
 }
