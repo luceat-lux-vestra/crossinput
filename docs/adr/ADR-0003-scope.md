@@ -32,4 +32,4 @@ The product's essence is an "input bridge". The primary direction (macOS input â
 ## Validation
 
 - (done) UHID mouse: DeX external display click/move/cursor display on-device verified (SM-G977N)
-- (pending) CXI extension design: reference this ADR when defining extended message types
+- (done) CXI extension: macâ†’Android keyboard message type defined and shipped (`KEY_EVENT`, ADR-0007, PR #23)

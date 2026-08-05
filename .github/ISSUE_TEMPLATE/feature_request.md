@@ -1,15 +1,15 @@
 ---
-name: 기능 요청
-about: 새 기능을 제안합니다
+name: Feature request
+about: Propose a new Ampersand feature
 title: "[FEATURE] "
 labels: enhancement
 ---
 
-## 배경 (왜 필요한가)
+## Background (why it is needed)
 
-## 제안 내용
+## Proposed change
 
-## 대안
+## Alternatives
 
-## 검증 계획
-- [ ] 실기기 검증 절차 포함
+## Verification plan
+- [ ] Includes an on-device verification procedure
