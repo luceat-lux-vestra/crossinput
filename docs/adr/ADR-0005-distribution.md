@@ -29,5 +29,5 @@ A distribution path usable by regular users is needed without an Apple Developer
 
 ## Validation
 
-- (pending) Gatekeeper behavior of an ad-hoc signed app in the CI release pipeline (download → right-click open)
+- (done) Gatekeeper behavior of an ad-hoc signed app shipped via GitHub Releases (v0.1.0) — first launch needs right-click → Open once, then works; see [ADR-0008](ADR-0008-v0.1.0-release-packaging.md) (which supersedes the `.app` zip packaging detail)
 - (pending) Homebrew tap install/upgrade e2e check

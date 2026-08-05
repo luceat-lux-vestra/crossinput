@@ -12,7 +12,7 @@ Rules that agents (and developers) must follow when working on Ampersand.
 6. **Protocol changes require updating fixtures + protocol.md** — changing a protocol message requires updating `protocol/protocol.md` and the golden fixtures in `protocol/fixtures/`.
 7. **Update THIRD_PARTY_NOTICES.md when copying upstream code** — record which files came from which upstream (repo, commit, license).
 8. **No Electron / Node / Python runtime in the final app** — macOS app in Swift, Android helper in Kotlin. (Dev tools excluded — e.g. doc generation.)
-9. **No cloud / root / Knox bypass** — DeX control uses only device-local public APIs (UHID, DisplayManager, etc.).
+9. **No cloud / root / Knox bypass** — DeX control stays device-local (UHID, DisplayManager, etc.). No cloud relay. Internal or non-SDK Android APIs may be used only when the usage is isolated behind an adapter, documented in an ADR, runtime-detected, covered by a safe fallback or clean failure path, and never treated as universally available.
 10. **English for all repository artifacts** — commits, PR titles/descriptions, issues, docs, and code comments are written in English. Korean is only allowed in chat with the user. New documents must be written in English; existing Korean documents are migrated to English as they are updated.
 
 ## Verification criteria
