@@ -62,10 +62,11 @@ public enum TransitionReason: String, Sendable {
 ///
 /// First-event rule (issue #37): the first movement event after entering is
 /// never treated as a return. Warp/synthetic leftover deltas right after
-/// capture starts are not deliberate user movement toward macOS, so they are
-/// accumulated into the position but excluded from the return check. This is
-/// the actual fix for the "left edge instantly returns" bug — the accumulator
-/// math itself was equivalent to origin/main.
+/// capture starts are not deliberate user movement toward macOS, so the first
+/// event is normalized to `max(0, delta)` (never leaves a negative baseline
+/// that would poison later return decisions) and excluded from the return check.
+/// This is the actual fix for the "left edge instantly returns" bug — the
+/// accumulator math itself was equivalent to origin/main.
 public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public private(set) var state: SwitchState = .disabled
     public var onStateChange: (@Sendable (SwitchState, TransitionReason) -> Void)?
@@ -174,9 +175,17 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         guard state == .dexActive else { return }
         let delta = Self.androidDirectedDelta(entryEdge: entryEdge, dx: dx, dy: dy)
         let (position, isFirst) = lock.withLock {
-            virtualAxisPosition += delta
             let first = !hasReceivedFirstMove
             hasReceivedFirstMove = true
+            if first {
+                // The first event after entering is warp/synthetic residual, not
+                // deliberate user movement. It never returns control and never
+                // leaves a negative baseline that would poison later decisions:
+                // clamp to 0 (issue #37).
+                virtualAxisPosition = max(0, delta)
+            } else {
+                virtualAxisPosition += delta
+            }
             return (virtualAxisPosition, first)
         }
         if isDiagnosticsEnabled {
