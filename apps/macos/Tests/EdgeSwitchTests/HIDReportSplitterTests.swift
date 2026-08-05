@@ -71,4 +71,61 @@ final class HIDReportSplitterTests: XCTestCase {
         XCTAssertEqual(result.reports.map(\.dx), [127, 73])
         XCTAssertEqual(result.reports.map(\.dy), [3, 0])
     }
+
+    // MARK: - Extreme values never trap (Int32.min/max)
+
+    func testInt32MaxDoesNotTrap() {
+        // abs(Int32.min/max) would overflow in Int32; Int64 promotion avoids it.
+        let result = HIDReportSplitter.normalizeForHID(dx: Int32.max, dy: 0)
+        XCTAssertEqual(result.reports.count, HIDReportSplitter.maxReportsPerEvent)
+        XCTAssertEqual(result.reports.first, HIDRelativeReport(dx: 127, dy: 0))
+        XCTAssertEqual(result.deliveredDx, 1024 * 127)
+        // Every report is within the descriptor range.
+        for report in result.reports {
+            XCTAssertTrue(report.dx >= -127 && report.dx <= 127)
+            XCTAssertEqual(report.dy, 0)
+        }
+    }
+
+    func testInt32MinDoesNotTrap() {
+        let result = HIDReportSplitter.normalizeForHID(dx: Int32.min, dy: 0)
+        XCTAssertEqual(result.reports.count, HIDReportSplitter.maxReportsPerEvent)
+        XCTAssertEqual(result.reports.first, HIDRelativeReport(dx: -127, dy: 0))
+        XCTAssertEqual(result.deliveredDx, -1024 * 127)
+    }
+
+    func testExtremeValuesAcrossBothAxes() {
+        let result = HIDReportSplitter.normalizeForHID(dx: Int32.max, dy: Int32.min)
+        XCTAssertEqual(result.reports.count, HIDReportSplitter.maxReportsPerEvent)
+        let sumX = result.reports.reduce(Int64(0)) { $0 + Int64($1.dx) }
+        let sumY = result.reports.reduce(Int64(0)) { $0 + Int64($1.dy) }
+        XCTAssertEqual(Int64(result.deliveredDx), sumX, "delivered must equal emitted reports sum")
+        XCTAssertEqual(Int64(result.deliveredDy), sumY)
+        XCTAssertEqual(result.deliveredDx, 1024 * 127)
+        XCTAssertEqual(result.deliveredDy, -1024 * 127)
+    }
+
+    func testSmallNegativeBoundaryValues() {
+        let cases: [Int32] = [-128, -127, 0, 127, 128]
+        for value in cases {
+            let result = HIDReportSplitter.normalizeForHID(dx: value, dy: 0)
+            let sumX = result.reports.reduce(Int64(0)) { $0 + Int64($1.dx) }
+            XCTAssertEqual(Int64(result.deliveredDx), sumX, "dx=\(value)")
+        }
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -128, dy: 0).reports.map(\.dx), [-127, -1])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: -127, dy: 0).reports.map(\.dx), [-127])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: 127, dy: 0).reports.map(\.dx), [127])
+        XCTAssertEqual(HIDReportSplitter.normalizeForHID(dx: 128, dy: 0).reports.map(\.dx), [127, 1])
+    }
+
+    func testDeliveredMatchesEmittedSumWhenCapped() {
+        // A huge dy with ordinary dx: cap bounds total reports, delivered reflects
+        // only the emitted reports (never raw).
+        let result = HIDReportSplitter.normalizeForHID(dx: 10, dy: Int32.max)
+        XCTAssertEqual(result.reports.count, HIDReportSplitter.maxReportsPerEvent)
+        let sumX = result.reports.reduce(Int64(0)) { $0 + Int64($1.dx) }
+        let sumY = result.reports.reduce(Int64(0)) { $0 + Int64($1.dy) }
+        XCTAssertEqual(Int64(result.deliveredDx), sumX)
+        XCTAssertEqual(Int64(result.deliveredDy), sumY)
+    }
 }
