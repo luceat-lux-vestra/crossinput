@@ -36,6 +36,16 @@ public struct CapturedKeyEvent: Sendable {
     }
 }
 
+/// Why suppression ended. Logged (metadata only) so traces distinguish the
+/// intended boundary-crossing return from fail-safe paths — the root-cause
+/// question for the left-edge instant-return bug (issue #37).
+public enum SuppressionReleaseReason: String, Sendable {
+    case normalReturn
+    case watchdogTimeout
+    case emergencyHotkey
+    case captureStopped
+}
+
 /// CGEventTap-based input capture.
 ///
 /// Hard rules (AGENTS.md):
@@ -56,9 +66,10 @@ public final class InputCapture: @unchecked Sendable {
     /// Called on the capture thread for every keyboard transition while suppressed.
     public var onKeyEvent: (@Sendable (CapturedKeyEvent) -> Void)?
     /// Called when the pointer reaches a screen edge while listening.
+    /// 0=left 1=right 2=top 3=bottom (ScreenEdge rawValue).
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
     /// Called when suppression is released by the fail-safe (timeout, disconnect, shortcut).
-    public var onSuppressionReleased: (@Sendable () -> Void)?
+    public var onSuppressionReleased: (@Sendable (SuppressionReleaseReason) -> Void)?
 
     private let tapQueue = DispatchQueue(label: "crossinput.capturertap", qos: .userInteractive)
     private var tap: CFMachPort?
@@ -166,7 +177,7 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     /// Returns to listening mode immediately (fail-safe path).
-    public func release() {
+    public func release(reason: SuppressionReleaseReason = .normalReturn) {
         let wasSuppressing = stateLock.withLock {
             let was = isSuppressing
             isSuppressing = false
@@ -181,7 +192,7 @@ public final class InputCapture: @unchecked Sendable {
             // pushed through, so Android->macOS continues seamlessly instead of
             // jumping to the screen center.
             restorePointerAtEdge()
-            onSuppressionReleased?()
+            onSuppressionReleased?(reason)
         }
     }
 
@@ -418,7 +429,7 @@ public final class InputCapture: @unchecked Sendable {
         timer.schedule(deadline: .now() + Self.suppressionTimeout, repeating: Self.suppressionTimeout)
         timer.setEventHandler { [weak self] in
             // No pointer event for the timeout window: restore macOS control.
-            self?.release()
+            self?.release(reason: .watchdogTimeout)
         }
         watchdog = timer
         timer.resume()
@@ -442,14 +453,14 @@ public final class InputCapture: @unchecked Sendable {
         InstallEventHandler(GetEventDispatcherTarget(), { _, _, userData in
             guard let userData else { return noErr }
             let capture = Unmanaged<InputCapture>.fromOpaque(userData).takeUnretainedValue()
-            capture.release()
+            capture.release(reason: .emergencyHotkey)
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
 
         var hotKeyRef: EventHotKeyRef?
         let keyCode = UInt32(kVK_ANSI_X)
         let modifiers = UInt32(cmdKey | shiftKey)
-        var hotKeyID = EventHotKeyID(signature: OSType(0x414D5058), id: 1) // "AMPX"
+        let hotKeyID = EventHotKeyID(signature: OSType(0x414D5058), id: 1) // "AMPX"
         RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
         emergencyHotKey = hotKeyRef
     }

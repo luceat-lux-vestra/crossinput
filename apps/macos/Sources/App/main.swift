@@ -101,9 +101,9 @@ final class AppModel: ObservableObject {
         if ProcessInfo.processInfo.environment["AMPER_EDGE_DIAG"] == "1" {
             switchMachine.isDiagnosticsEnabled = true
         }
-        switchMachine.onStateChange = { [weak self] newState in
+        switchMachine.onStateChange = { [weak self] newState, reason in
             Task { @MainActor in
-                Diagnostics.log("edge switch state -> \(newState.rawValue)")
+                Diagnostics.log("edge transition \(self?.state.rawValue ?? "?") -> \(newState.rawValue) reason=\(reason.rawValue)")
                 self?.state = newState
                 self?.apply(state: newState)
             }
@@ -118,14 +118,24 @@ final class AppModel: ObservableObject {
         capture.onKeyEvent = { [weak self] keyEvent in
             self?.onCapturedKeyEvent(keyEvent)
         }
-        capture.onSuppressionReleased = { [weak self] in
+        capture.onSuppressionReleased = { [weak self] reason in
             Task { @MainActor in
                 self?.phase = .ready
                 // Suppression was lifted by the emergency hotkey (⇧⌘X), the
                 // fail-safe watchdog, or the normal return path. If the state
                 // machine is still edgeArmed/dexActive, move it back to
                 // macActive so edge switching works again (no-op otherwise).
-                self?.switchMachine.emergencyReturn()
+                // Log the release reason (metadata only) so traces distinguish
+                // the intended return from fail-safe paths (issue #37).
+                let machineReason: TransitionReason
+                switch reason {
+                case .watchdogTimeout: machineReason = .watchdogTimeout
+                case .emergencyHotkey: machineReason = .emergencyReturn
+                case .normalReturn: machineReason = .suppressionReleased
+                case .captureStopped: machineReason = .deactivated
+                }
+                self?.switchMachine.emergencyReturn(reason: machineReason)
+                Diagnostics.log("suppression released reason=\(reason.rawValue)")
             }
         }
     }
@@ -444,10 +454,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Runs on the capture thread (nonisolated): forward pointer events to the helper.
+    /// The state machine is fed inside send(event:) so its virtual position
+    /// always tracks the movement actually delivered to Android (UHID splitting
+    /// must not desync the two — issue #37 root cause analysis).
     nonisolated func onCapturedEvent(_ event: PointerEvent) {
         switch event.kind {
-        case let .move(dx, dy):
-            switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+        case .move:
             moveCount &+= 1
             if moveCount.isMultiple(of: 200) {
                 Diagnostics.log("captured moves: \(moveCount)")
@@ -478,9 +490,19 @@ final class AppModel: ObservableObject {
         if let deviceId = hidDeviceId {
             switch event.kind {
             case let .move(dx, dy):
-                let report = Self.hidReport(buttons: hidButtons, dx: dx, dy: dy, wheel: 0)
-                try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
-                                              payload: Messages.hidReport(deviceId: deviceId, report: report)))
+                // Split into HID-range reports so large deltas are never lost
+                // to Int8 clamping (HIDReportSplitter). The state machine must
+                // see exactly the movement delivered to Android, so it is
+                // fed the delivered deltas, not the raw input.
+                let movement = HIDReportSplitter.normalizeForHID(dx: dx, dy: dy)
+                switchMachine.pointerMoved(dx: CGFloat(movement.deliveredDx),
+                                           dy: CGFloat(movement.deliveredDy))
+                for report in movement.reports {
+                    let payload = Self.hidReport(buttons: hidButtons,
+                                                 dx: Int32(report.dx), dy: Int32(report.dy), wheel: 0)
+                    try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                                  payload: Messages.hidReport(deviceId: deviceId, report: payload)))
+                }
             case let .button(button, down):
                 let bit = Self.hidButtonBit(for: button)
                 if down { hidButtons |= bit } else { hidButtons &= ~bit }
@@ -496,6 +518,8 @@ final class AppModel: ObservableObject {
         } else {
             switch event.kind {
             case let .move(dx, dy):
+                // SDK fallback: full Int32 deltas, delivered unchanged.
+                switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
                 try? connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
                                               payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
             case let .button(button, down):
