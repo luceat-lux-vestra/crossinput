@@ -95,6 +95,12 @@ final class AppModel: ObservableObject {
     init() {
         capture = InputCapture()
         switchMachine = EdgeSwitchStateMachine()
+        // Opt-in diagnostic logging for edge-switch movement (metadata only:
+        // entryEdge, raw dx/dy, axis delta, virtual position, state). Never
+        // logs key codes, clipboard contents, or input payloads.
+        if ProcessInfo.processInfo.environment["AMPER_EDGE_DIAG"] == "1" {
+            switchMachine.isDiagnosticsEnabled = true
+        }
         switchMachine.onStateChange = { [weak self] newState in
             Task { @MainActor in
                 Diagnostics.log("edge switch state -> \(newState.rawValue)")
