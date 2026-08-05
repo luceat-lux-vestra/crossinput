@@ -1,4 +1,5 @@
 import Foundation
+import Diagnostics
 
 public enum SwitchState: String, Sendable {
     case disabled
@@ -11,7 +12,7 @@ public enum SwitchState: String, Sendable {
     case error
 }
 
-public enum ScreenEdge: Sendable, Equatable {
+public enum ScreenEdge: String, Sendable, Equatable {
     case left, right, top, bottom
 }
 
@@ -19,8 +20,16 @@ public enum ScreenEdge: Sendable, Equatable {
 ///
 /// Flow: disabled -> disconnected -> connecting -> macActive; pointer reaches a
 /// screen edge -> edgeArmed -> dexActive (pointer captured by the device); the
-/// pointer returning across the entry edge, the emergency shortcut, or a lost
-/// connection brings control back to macOS.
+/// pointer moving back across the entry edge and beyond the return hysteresis,
+/// the emergency shortcut, or a lost connection brings control back to macOS.
+///
+/// Movement model: while DeX owns the pointer, movement is tracked along a
+/// virtual axis perpendicular to the entry edge. Position 0 is the entry
+/// boundary; positive positions are inside Android/DeX; negative positions are
+/// beyond the boundary toward macOS. macOS only regains control once the
+/// position reaches `-returnHysteresis` — the pointer must actually cross the
+/// boundary it entered through and keep going, so brief wobbles and orthogonal
+/// movement never trigger an accidental return.
 public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public private(set) var state: SwitchState = .disabled
     public var onStateChange: (@Sendable (SwitchState) -> Void)?
@@ -29,10 +38,20 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public private(set) var entryEdge: ScreenEdge = .left
 
     private let lock = NSLock()
-    private var returnAccumulator: CGFloat = 0
 
-    /// Distance the pointer must travel back across the entry edge to return.
-    public var returnThreshold: CGFloat = 60
+    /// Virtual pointer position along the axis perpendicular to the entry edge.
+    /// 0 = entry boundary, positive = inside Android/DeX, negative = beyond the
+    /// boundary toward macOS. Return fires only when position <= -returnHysteresis.
+    private var virtualAxisPosition: CGFloat = 0
+
+    /// Distance the pointer must travel past the entry boundary toward macOS
+    /// before control returns (hysteresis against accidental wobble).
+    public var returnHysteresis: CGFloat = 60
+
+    /// When enabled, `pointerMoved` logs movement metadata only (entryEdge, raw
+    /// dx/dy, axis delta, virtual position, state) — never key codes, clipboard
+    /// contents, or input payloads (AGENTS.md hard rule 4). Off by default.
+    public var isDiagnosticsEnabled = false
 
     public init() {}
 
@@ -44,6 +63,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     public func deactivate() {
+        lock.withLock { virtualAxisPosition = 0 }
         transition(to: .disabled)
     }
 
@@ -65,6 +85,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func connectionLost() {
         switch state {
         case .connecting, .macActive, .edgeArmed, .dexActive, .recovering:
+            lock.withLock { virtualAxisPosition = 0 }
             transition(to: .recovering)
         default: break
         }
@@ -76,30 +97,41 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         case .macActive:
             transition(to: .edgeArmed)
             entryEdge = edge
-            lock.withLock { returnAccumulator = 0 }
+            lock.withLock { virtualAxisPosition = 0 }
             transition(to: .dexActive)
         case .edgeArmed:
             entryEdge = edge
-            lock.withLock { returnAccumulator = 0 }
+            lock.withLock { virtualAxisPosition = 0 }
         default: break
+        }
+    }
+
+    /// Signed movement along the axis perpendicular to the entry edge.
+    /// Positive = deeper into Android/DeX, negative = toward macOS, zero = off-axis.
+    public static func androidDirectedDelta(entryEdge: ScreenEdge, dx: CGFloat, dy: CGFloat) -> CGFloat {
+        switch entryEdge {
+        case .left: return -dx // DeX on the left: moving left goes inside
+        case .right: return dx // DeX on the right: moving right goes inside
+        case .top: return -dy // DeX above: moving up goes inside
+        case .bottom: return dy // DeX below: moving down goes inside
         }
     }
 
     /// Relative pointer movement while DeX owns the pointer.
     public func pointerMoved(dx: CGFloat, dy: CGFloat) {
         guard state == .dexActive else { return }
-        let delta: CGFloat
-        switch entryEdge {
-        case .left: delta = dx // moving right (positive) heads back into the screen
-        case .right: delta = -dx
-        case .top: delta = -dy
-        case .bottom: delta = dy
+        let delta = Self.androidDirectedDelta(entryEdge: entryEdge, dx: dx, dy: dy)
+        let position = lock.withLock {
+            virtualAxisPosition += delta
+            return virtualAxisPosition
         }
-        let accumulator = lock.withLock {
-            returnAccumulator += delta
-            return returnAccumulator
+        if isDiagnosticsEnabled {
+            Diagnostics.log(
+                "edge pointerMoved entry=\(entryEdge.rawValue) state=\(state.rawValue) "
+                    + "dx=\(dx) dy=\(dy) axisDelta=\(delta) virtualPos=\(position)"
+            )
         }
-        if accumulator >= returnThreshold {
+        if position <= -returnHysteresis {
             returnToMacOS()
         }
     }
@@ -114,13 +146,14 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     public func fatal() {
+        lock.withLock { virtualAxisPosition = 0 }
         transition(to: .error)
     }
 
     // MARK: - Internal
 
     private func returnToMacOS() {
-        lock.withLock { returnAccumulator = 0 }
+        lock.withLock { virtualAxisPosition = 0 }
         transition(to: .recovering)
         transition(to: .macActive)
     }
