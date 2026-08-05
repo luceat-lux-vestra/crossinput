@@ -105,7 +105,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 Diagnostics.log("edge transition \(self?.state.rawValue ?? "?") -> \(newState.rawValue) reason=\(reason.rawValue)")
                 self?.state = newState
-                self?.apply(state: newState)
+                self?.apply(state: newState, reason: reason)
             }
         }
         capture.onScreenEdge = { [weak self] edge in
@@ -120,22 +120,31 @@ final class AppModel: ObservableObject {
         }
         capture.onSuppressionReleased = { [weak self] reason in
             Task { @MainActor in
-                self?.phase = .ready
-                // Suppression was lifted by the emergency hotkey (⇧⌘X), the
-                // fail-safe watchdog, or the normal return path. If the state
-                // machine is still edgeArmed/dexActive, move it back to
-                // macActive so edge switching works again (no-op otherwise).
-                // Log the release reason (metadata only) so traces distinguish
-                // the intended return from fail-safe paths (issue #37).
+                // Suppression was lifted. The phase must reflect the actual
+                // cause: a dead connection stays disconnected (idle/reconnect),
+                // a fatal error stays error, and only live-connection releases
+                // (normal return, watchdog, emergency hotkey) become ready.
+                // This mapping is the pure, tested SuppressionPhasePolicy —
+                // never collapse a real cause into a normal return (issue #37).
+                guard let self else { return }
+                let outcome = SuppressionPhasePolicy.nextPhase(after: reason,
+                                                               isConnected: self.connection != nil)
+                switch outcome {
+                case .idle: self.phase = .idle
+                case .ready: self.phase = .ready
+                case .error: self.phase = .error("helper fatal: suppression released after fatal error")
+                }
                 let machineReason: TransitionReason
                 switch reason {
                 case .watchdogTimeout: machineReason = .watchdogTimeout
                 case .emergencyHotkey: machineReason = .emergencyReturn
                 case .normalReturn: machineReason = .suppressionReleased
+                case .connectionLost: machineReason = .connectionLost
                 case .captureStopped: machineReason = .deactivated
+                case .fatalError: machineReason = .fatalError
                 }
-                self?.switchMachine.emergencyReturn(reason: machineReason)
-                Diagnostics.log("suppression released reason=\(reason.rawValue)")
+                self.switchMachine.emergencyReturn(reason: machineReason)
+                Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase)")
             }
         }
     }
@@ -416,12 +425,27 @@ final class AppModel: ObservableObject {
 
     // MARK: - Pointer plumbing
 
-    private     func apply(state: SwitchState) {
+    /// Maps a state-machine transition reason to a suppression release reason so
+    /// the pointer-release path never collapses a real cause into `.normalReturn`.
+    private static func releaseReason(for reason: TransitionReason) -> SuppressionReleaseReason {
+        switch reason {
+        case .connectionLost: return .connectionLost
+        case .watchdogTimeout: return .watchdogTimeout
+        case .fatalError: return .fatalError
+        case .deactivated: return .captureStopped
+        case .emergencyReturn: return .emergencyHotkey
+        case .boundaryCrossed, .suppressionReleased, .edgeEntered,
+             .activation, .connectionBegan, .connectionReady:
+            return .normalReturn
+        }
+    }
+
+    private func apply(state: SwitchState, reason: TransitionReason) {
         switch state {
         case .dexActive:
             capture.suppress()
         case .macActive, .recovering, .disabled, .error:
-            capture.release()
+            capture.release(reason: Self.releaseReason(for: reason))
         default:
             break
         }

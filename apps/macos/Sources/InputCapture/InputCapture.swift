@@ -39,13 +39,6 @@ public struct CapturedKeyEvent: Sendable {
 /// Why suppression ended. Logged (metadata only) so traces distinguish the
 /// intended boundary-crossing return from fail-safe paths — the root-cause
 /// question for the left-edge instant-return bug (issue #37).
-public enum SuppressionReleaseReason: String, Sendable {
-    case normalReturn
-    case watchdogTimeout
-    case emergencyHotkey
-    case captureStopped
-}
-
 /// CGEventTap-based input capture.
 ///
 /// Hard rules (AGENTS.md):
