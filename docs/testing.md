@@ -58,7 +58,19 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
-11. `scripts/deploy-helper.sh send <key-event-frame-hex>` — key down/up (fixture `protocol/fixtures/key-event.bin`, action byte) must produce exactly one character (no infinite repeat; UHID reports key-state sets).
+11. Send one key press with the dedicated down/up fixtures — the sequence below must produce exactly one character:
+    ```sh
+    DOWN_HEX="$(xxd -p protocol/fixtures/key-event-down.bin | tr -d '\n')"
+    UP_HEX="$(xxd -p protocol/fixtures/key-event-up.bin | tr -d '\n')"
+
+    scripts/deploy-helper.sh send "$DOWN_HEX"
+    scripts/deploy-helper.sh send "$UP_HEX"
+    ```
+    - Step 1 (`key-event-down.bin`, action 0): key down only — no character is committed and no repeat fires while held.
+    - Step 2 (`key-event-up.bin`, action 1): release — exactly one character is typed.
+    - Step 3. Confirm exactly one character was entered in the focused DeX field (no auto-repeat; UHID reports key-state sets).
+    - Step 4. Confirm no repeated input appears after the key-up.
+    - Step 5. Run `scripts/deploy-helper.sh stop` and confirm no stuck-key state remains on the Android input pipeline after shutdown.
 12. macOS app while captured: Cmd+Tab / Spotlight must NOT fire on the Mac (system-shortcut suppression); typing reaches the Android IME and Korean 2-set composes.
 
 Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check-fixtures.mjs` keeps them in sync with `protocol/protocol.md`.
@@ -90,7 +102,8 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 2 | LIST_DISPLAYS/DISPLAY_LIST | All displays reported, Desktop display present with correct size/density | ✅ |
 | 3 | SELECT_DISPLAY | Unknown id → FATAL_ERROR; known id → DISPLAY_CHANGED echo | ✅ |
 | 4 | CREATE_HID_DEVICE | HID_CREATED with device id; `/dev/uhid` created (log metadata) | ✅ |
-| 5 | HID_REPORT (pointer) | Pointer visible + moves on DeX external display | ✅ |
+| 5 | HID_REPORT (pointer, UHID) | Pointer visible + moves on DeX external display | ✅ |
+| 5b | InputManager pointer fallback (SdkPointerBackend) | Implemented; UHID pointer path verified on device above. Pointer fallback on-device verification is tracked separately and is pending — no verification claim for the fallback path | ⏳ pending (no on-device record; UHID path verified only) |
 | 6 | UHID keyboard | `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`; single key-down/up yields exactly one character | ✅ |
 | 7 | macOS shortcut suppression | Cmd+Tab / Spotlight do not fire on the Mac while captured | ✅ |
 | 8 | Korean 2-set | Hangul composes in a DeX field via Android IME | ✅ |

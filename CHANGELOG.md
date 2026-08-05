@@ -5,16 +5,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- (empty — redaction fix lands with the key-code logging PR)
+No unreleased changes.
 
 ## [0.1.0] - 2026-08-05
 
 ### Added
 
 - macOS menu bar app: pointer capture + edge switching (macOS ↔ DeX via UHID)
-- Pointer input: relative move, buttons, scroll (UHID primary, InputManager injection fallback) — verified on device (SM-G977N, Android 12)
+- Pointer input: relative move, buttons, scroll (UHID primary — verified on device, SM-G977N / Android 12; InputManager injection fallback implemented, on-device verification pending)
 - Keyboard input: UHID keyboard backend + InputManager virtual-injection fallback (ADR-0007), system-shortcut suppression while captured, Korean 2-set via Android IME. UHID keyboard delivery, shortcut suppression, and Korean 2-set composition were verified on device. The InputManager injection fallback is implemented but has not yet been exercised on a physical device.
 - Wireless ADB (mDNS TLS) auto-discovery and reconnect
 - Display handling: live DISPLAY_CHANGED updates, manual Refresh Displays

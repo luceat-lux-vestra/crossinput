@@ -16,7 +16,8 @@ Ampersand delivers pointer input over a UHID device created by the helper.
 Two candidate keyboard delivery paths exist:
 
 1. **UHID keyboard device** (same path as the mouse): helper opens `/dev/uhid`,
-   registers a keyboard HID descriptor, and the Mac forwards HID keyboard reports.
+   registers a keyboard HID descriptor, and reports pressed-key state (the set of
+   currently held keys) derived from the CXI keyboard message.
    Verified device path (mouse already works on SM-G977N / Android 12).
 2. **Virtual keyboard injection**: the helper constructs `KeyEvent` objects and
    delivers them through Android's internal `InputManager.injectInputEvent`
@@ -26,29 +27,32 @@ Two candidate keyboard delivery paths exist:
    helper process runs under the shell UID (app_process) and injects directly
    into the input pipeline.
 
-There is no keyboard message type in the CXI protocol yet (only mouse
-`HID_REPORT` / `POINTER_*`).
+No CXI keyboard message existed before this work (only mouse `HID_REPORT` /
+`POINTER_*`); the single `KEY_EVENT` message type was introduced with this ADR.
 
 ## Decision
 
-1. **Delivery: both paths are supported via the protocol, with runtime fallback**.
-   The mac→Android protocol gains a keyboard message type (`KEYBOARD_HID_REPORT`/
-   keyboard HID descriptor for UHID), and the Android side implements both a UHID
-   keyboard backend and a virtual-keyboard fallback backend. If UHID keyboard
-   creation or reporting fails on a device, the helper falls back to the virtual
-   backend automatically. A single protocol message set abstracts both backends.
-   **UHID is the preferred backend**; the virtual fallback is engaged only when
-   UHID creation or reporting fails on a device.
-   
-   Virtual-fallback mechanics: the helper process runs via `app_process` under
-   the shell UID; the fallback builds Android `KeyEvent` objects (key code,
-   meta state, action from the CXI `KEY_EVENT` message) and calls the internal
-   `InputManager.injectInputEvent` API resolved through reflection. There is no
-   AccessibilityService. Because the API is internal/non-SDK, availability and
-   behavior may vary by Android version and vendor; resolution failure,
-   rejection, or `SecurityException` must not block the CXI session — the event
-   is dropped and the failure is reported through metadata-only logging and the
-   backends stays clear of stuck keys (pressed-key state is released).
+1. **Delivery: `KEY_EVENT` is the single CXI keyboard abstraction; the backend
+   selection and conversion live in the Android helper.** The mac→Android
+   protocol gains exactly one keyboard message type (`KEY_EVENT` 0x000C, Android
+   KeyEvent semantics), and the Android side implements both a UHID keyboard
+   backend and a virtual-keyboard fallback backend. If UHID keyboard creation
+   or reporting fails on a device, the helper falls back to the virtual backend
+   automatically.
+   **UHID is the primary backend**; the InputManager fallback is engaged only
+   when UHID creation or reporting fails on a device.
+
+   Backend conversion:
+   - UHID backend: converts `KEY_EVENT` into a HID pressed-key-state report
+     (the set of currently held keys) sent over the existing UHID device.
+   - InputManager fallback: converts `KEY_EVENT` into an Android `KeyEvent`
+     and injects it through the internal `InputManager.injectInputEvent` API
+     (resolved through reflection). There is no AccessibilityService. Because
+     the API is internal/non-SDK, availability and behavior may vary by Android
+     version and vendor; resolution failure, rejection, or `SecurityException`
+     must not abort the CXI session — the event is dropped and the failure is
+     reported through metadata-only logging, and the backend releases any
+     pressed-key state to prevent stuck keys.
 2. **macOS system-shortcut handling is in scope** of this work. While keyboard is
    captured, system shortcuts must not bubble up to the Mac (Cmd+Tab, Spotlight,
    Cmd+H, etc.). The capture tap intercepts and suppresses these. This is the key

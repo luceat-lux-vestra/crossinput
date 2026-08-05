@@ -11,7 +11,8 @@
 | 0.5 | Execution method decided (ADR-0006) | v1 = adb push + run confirmed; installed app deferred to v2 | ✅ done |
 | 1 | Repository bootstrap | bootstrap.sh / build-android-helper.sh / swift build + tests / CI green | ✅ done (macOS packaging via `scripts/package-macos.sh` deferred to Phase 8) |
 | 2 | Android helper minimal implementation | display discovery + UHID + CXI protocol | ✅ done |
-| 3 | DeX input routing | UHID input delivered to the DeX external display (leverages Phase 0 findings) | ✅ done (on-device) |
+| — | InputManager pointer fallback (SdkPointerBackend) | implemented; UHID pointer path verified on-device, pointer fallback on-device verification tracked separately | 🔶 implemented; on-device verification pending (not yet exercised on device) |
+| 3 | DeX input routing | UHID input delivered to the DeX external display (leverages Phase 0 findings) | ✅ done (on-device, UHID pointer path) |
 | 4 | CGEventTap prototype | input capture verified against the real Android sink | ✅ done |
 | 5 | Edge switching | macOS↔DeX switching | 🔶 implemented; 100-repeat stability open (see below) |
 | 6 | Menu bar app + onboarding | settings/status UI + wireless debugging pairing guide | ✅ done |

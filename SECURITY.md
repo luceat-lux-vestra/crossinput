@@ -7,8 +7,8 @@ All reports are welcome until a stable release exists.
 
 ## Reporting a vulnerability
 
-- Private vulnerability reporting is not configured yet. Do not include sensitive details (private keys, ADB credentials, clipboard contents) in a public issue; contact the maintainer first through a minimal, non-sensitive issue.
-- Do not post sensitive information (private keys, ADB credentials, clipboard contents) in issues.
+Use GitHub's private vulnerability reporting feature for this repository (Security → Report a vulnerability) to report security issues privately. Do not include credentials, ADB pairing information, clipboard contents, keystrokes, or other sensitive data in public issues.
+
 - Response SLA: first response within 7 days.
 
 ## Security principles (linked to AGENTS.md hard rules)

@@ -28,9 +28,11 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 ## Status
 
 Verified on device (SM-G977N, Android 12):
-- UHID virtual mouse and keyboard drive the DeX cursor and typing 1:1 — verified on device
-- System shortcuts are suppressed while captured, and Korean 2-set composes on Android — verified on device
-- The InputManager virtual-injection fallback is implemented (unit/build validated) but has **not yet been exercised on a physical device** — tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
+- UHID virtual mouse drives the DeX cursor 1:1 (move/click/scroll) — verified on device
+- UHID virtual keyboard types into DeX fields, including Korean 2-set composition — verified on device
+- System shortcuts are suppressed on the Mac while captured — verified on device
+- The InputManager pointer fallback is implemented (unit/build validated); its on-device verification status is tracked separately from the UHID pointer path and has not yet been exercised on a physical device
+- The InputManager virtual-injection keyboard fallback is implemented (unit/build validated) but has **not yet been exercised on a physical device** — tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
 
 Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 
