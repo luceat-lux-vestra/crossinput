@@ -79,13 +79,22 @@ struct ProtocolTests {
         #expect(encode(frame) == fixture("ping.bin"))
     }
 
-    @Test func keyEventFrameMatchesFixture() {
+    @Test func keyEventDownFrameMatchesFixture() {
         let frame = CxiFrame(type: .keyEvent, requestId: 6,
-                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x1, action: 0, repeatCount: 0))
+                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x0, action: 0, repeatCount: 0))
         let bytes = encode(frame)
-        #expect(bytes == fixture("key-event.bin"))
+        #expect(bytes == fixture("key-event-down.bin"))
         #expect(bytes.map { String(format: "%02x", $0) }.joined() ==
-                "43584901000c0006000000080000001d00010000000000")
+                "43584901000c0006000000080000001d00000000000000")
+    }
+
+    @Test func keyEventUpFrameMatchesFixture() {
+        let frame = CxiFrame(type: .keyEvent, requestId: 7,
+                             payload: Messages.keyEvent(keyCode: 29, metaState: 0x0, action: 1, repeatCount: 0))
+        let bytes = encode(frame)
+        #expect(bytes == fixture("key-event-up.bin"))
+        #expect(bytes.map { String(format: "%02x", $0) }.joined() ==
+                "43584901000c0007000000080000001d00000000000100")
     }
 
     @Test func keyEventRoundTrips() throws {
