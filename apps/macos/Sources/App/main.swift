@@ -139,7 +139,7 @@ final class AppModel: ObservableObject {
                 // never collapse a real cause into a normal return (issue #37).
                 guard let self else { return }
                 let outcome = SuppressionPhasePolicy.nextPhase(after: reason,
-                                                               isConnected: self.connection != nil)
+                                                           isConnected: self.connection?.isConnected == true)
                 switch outcome {
                 case .idle: self.phase = .idle
                 case .ready: self.phase = .ready
