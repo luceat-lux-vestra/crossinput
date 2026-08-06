@@ -12,7 +12,7 @@ public enum SwitchState: String, Sendable {
     case error
 }
 
-public enum ScreenEdge: String, Sendable, Equatable {
+public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
     case left, right, top, bottom
 }
 
@@ -300,16 +300,19 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// the state queue, so their callback order on the FIFO callback queue
     /// matches the sequence numbers.
     private func run(_ body: () -> Void) {
-        let transitions = queue.sync { () -> [StateTransition] in
+        queue.sync {
             body()
-            let fired = pendingTransitions
+            let transitions = pendingTransitions
             pendingTransitions = []
-            return fired
-        }
-        guard !transitions.isEmpty else { return }
-        callbackQueue.async { [self] in
-            for transition in transitions {
-                onStateChange?(transition)
+
+            guard !transitions.isEmpty else { return }
+
+            // Enqueue while the state queue is still held.
+            // This guarantees callback enqueue order matches sequence order.
+            callbackQueue.async { [self] in
+                for transition in transitions {
+                    onStateChange?(transition)
+                }
             }
         }
     }
