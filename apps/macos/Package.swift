@@ -12,7 +12,7 @@ let package = Package(
         .executable(name: "cxi-smoke", targets: ["SmokeMain"])
     ],
     targets: [
-        .target(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings"]),
+        .target(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics"]),
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
