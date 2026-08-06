@@ -92,20 +92,31 @@ final class AppModel: ObservableObject {
     nonisolated(unsafe) private var hidButtons: UInt8 = 0
     nonisolated(unsafe) private var moveCount: Int = 0
 
+    /// Monotonic gate for transition side effects. Transitions with a lower
+    /// or equal sequence are stale (their side effects already superseded by
+    /// a newer transition) and must be discarded — an old `.dexActive`
+    /// callback can never re-suppress the capture after a newer
+    /// `.error`/`.recovering` (see TransitionSequenceGate).
+    private var transitionGate = TransitionSequenceGate()
+
     init() {
         capture = InputCapture()
-        switchMachine = EdgeSwitchStateMachine()
         // Opt-in diagnostic logging for edge-switch movement (metadata only:
         // entryEdge, raw dx/dy, axis delta, virtual position, state). Never
         // logs key codes, clipboard contents, or input payloads.
-        if ProcessInfo.processInfo.environment["AMPER_EDGE_DIAG"] == "1" {
-            switchMachine.isDiagnosticsEnabled = true
-        }
-        switchMachine.onStateChange = { [weak self] newState, reason in
+        let diagnosticsEnabled = ProcessInfo.processInfo.environment["AMPER_EDGE_DIAG"] == "1"
+        switchMachine = EdgeSwitchStateMachine(isDiagnosticsEnabled: diagnosticsEnabled)
+        switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
-                Diagnostics.log("edge transition \(self?.state.rawValue ?? "?") -> \(newState.rawValue) reason=\(reason.rawValue)")
-                self?.state = newState
-                self?.apply(state: newState, reason: reason)
+                guard let self else { return }
+                // Stale-transition guard: an older transition callback that
+                // arrives after a newer one must not overwrite newer side
+                // effects (e.g. a past `.dexActive` re-suppressing capture
+                // after a newer `.error` released it).
+                guard self.transitionGate.shouldApply(transition) else { return }
+                Diagnostics.log("edge transition \(transition.from.rawValue) -> \(transition.to.rawValue) reason=\(transition.reason.rawValue) sequence=\(transition.sequence)")
+                self.state = transition.to
+                self.apply(state: transition.to, reason: transition.reason)
             }
         }
         capture.onScreenEdge = { [weak self] edge in

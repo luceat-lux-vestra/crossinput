@@ -34,6 +34,25 @@ public enum TransitionReason: String, Sendable {
     case deactivated
 }
 
+/// A concrete state transition with a monotonically increasing sequence.
+/// Consumers apply transitions in sequence order and discard stale ones
+/// (`sequence` lower than the last applied value) so an old `.dexActive`
+/// callback can never re-suppress the capture after a newer `.error` or
+/// `.recovering` transition was applied.
+public struct StateTransition: Sendable, Equatable {
+    public let sequence: UInt64
+    public let from: SwitchState
+    public let to: SwitchState
+    public let reason: TransitionReason
+
+    public init(sequence: UInt64, from: SwitchState, to: SwitchState, reason: TransitionReason) {
+        self.sequence = sequence
+        self.from = from
+        self.to = to
+        self.reason = reason
+    }
+}
+
 /// Edge Switch state machine.
 ///
 /// Flow: disabled -> disconnected -> connecting -> macActive; pointer reaches a
@@ -70,18 +89,21 @@ public enum TransitionReason: String, Sendable {
 ///
 /// Concurrency: every public mutation is serialized on an internal queue, and
 /// `onStateChange` callbacks are fired outside the queue so a callback that
-/// synchronously re-enters the machine cannot deadlock. Transition reasons are
-/// never dropped: a transition that does not change the state fires nothing,
-/// every real transition fires exactly once.
+/// synchronously re-enters the machine cannot deadlock. Each real transition
+/// is stamped with a monotonic sequence on the queue; consumers must discard
+/// transitions whose sequence is not newer than the last one they applied.
+/// Transition reasons are never dropped: a transition that does not change
+/// the state fires nothing, every real transition fires exactly once.
 public final class EdgeSwitchStateMachine: @unchecked Sendable {
-    public private(set) var state: SwitchState = .disabled
-    public var onStateChange: (@Sendable (SwitchState, TransitionReason) -> Void)?
-
-    /// Edge the pointer used to leave macOS for DeX.
-    public private(set) var entryEdge: ScreenEdge = .left
-
     private let queue = DispatchQueue(label: "crossinput.edge-switch", qos: .userInteractive)
-    private var pendingCallbacks: [(SwitchState, TransitionReason)] = []
+    private let callbackQueue = DispatchQueue(label: "crossinput.edge-switch-callbacks", qos: .userInteractive)
+    private var pendingTransitions: [StateTransition] = []
+    private var sequenceCounter: UInt64 = 0
+
+    // MARK: - Internal storage (mutated only on the serial queue)
+
+    private var stateStorage: SwitchState = .disabled
+    private var entryEdgeStorage: ScreenEdge = .left
 
     /// Virtual pointer position along the axis perpendicular to the entry edge.
     /// 0 = entry boundary, positive = inside Android/DeX, negative = beyond the
@@ -92,22 +114,47 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// The first event never triggers a return (issue #37).
     private var hasReceivedFirstMove = false
 
+    // MARK: - Public configuration (fixed at init, safe to read any time)
+
     /// Distance the pointer must travel past the entry boundary toward macOS
     /// before control returns (hysteresis against accidental wobble).
-    public var returnHysteresis: CGFloat = 60
+    public let returnHysteresis: CGFloat
 
     /// When enabled, `pointerMoved` logs movement metadata only (entryEdge, raw
     /// dx/dy, axis delta, virtual position, state) — never key codes, clipboard
     /// contents, or input payloads (AGENTS.md hard rule 4). Off by default.
-    public var isDiagnosticsEnabled = false
+    public let isDiagnosticsEnabled: Bool
 
-    public init() {}
+    public init(returnHysteresis: CGFloat = 60, isDiagnosticsEnabled: Bool = false) {
+        self.returnHysteresis = returnHysteresis
+        self.isDiagnosticsEnabled = isDiagnosticsEnabled
+    }
+
+    // MARK: - Snapshot accessors (queue-protected immutable reads)
+
+    public var state: SwitchState {
+        queue.sync { stateStorage }
+    }
+
+    /// Edge the pointer used to leave macOS for DeX.
+    public var entryEdge: ScreenEdge {
+        queue.sync { entryEdgeStorage }
+    }
+
+    // MARK: - Transition handler
+    //
+    // Registration is intended to happen before concurrent use begins
+    // (documented contract). The handler receives the full transition —
+    // sequence, from, to, reason — and is invoked outside the machine queue,
+    // so it may re-enter the machine without deadlocking.
+
+    public var onStateChange: (@Sendable (StateTransition) -> Void)?
 
     // MARK: - Public transitions (serialized)
 
     public func activate() {
         run {
-            guard state == .disabled else { return }
+            guard stateStorage == .disabled else { return }
             transition(to: .disconnected, reason: .activation)
         }
     }
@@ -122,7 +169,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     public func connectionBegan() {
         run {
-            switch state {
+            switch stateStorage {
             case .disconnected, .recovering: transition(to: .connecting, reason: .connectionBegan)
             case .macActive: transition(to: .connecting, reason: .connectionBegan)
             default: break
@@ -132,7 +179,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     public func connectionReady() {
         run {
-            switch state {
+            switch stateStorage {
             // .error is terminal (helper fatal): it must never be covered by a
             // readiness transition. Recovery is explicit deactivate -> activate.
             case .connecting, .disconnected: transition(to: .macActive, reason: .connectionReady)
@@ -143,7 +190,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     public func connectionLost() {
         run {
-            switch state {
+            switch stateStorage {
             case .connecting, .macActive, .edgeArmed, .dexActive, .recovering:
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
@@ -156,15 +203,15 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// Pointer reached a screen edge while macOS is active.
     public func pointerAtEdge(_ edge: ScreenEdge) {
         run {
-            switch state {
+            switch stateStorage {
             case .macActive:
                 transition(to: .edgeArmed, reason: .edgeEntered)
-                entryEdge = edge
+                entryEdgeStorage = edge
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
                 transition(to: .dexActive, reason: .edgeEntered)
             case .edgeArmed:
-                entryEdge = edge
+                entryEdgeStorage = edge
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
             default: break
@@ -186,10 +233,17 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// Relative pointer movement while DeX owns the pointer.
     /// Called with the movement actually delivered to Android (deliveredDx/dy
     /// from HIDReportSplitter), never with raw deltas that were dropped.
+    ///
+    /// A zero-zero call is a complete no-op: it neither consumes the
+    /// first-movement exemption nor changes the virtual position, state, or
+    /// transition callbacks.
     public func pointerMoved(dx: CGFloat, dy: CGFloat) {
         run {
-            guard state == .dexActive else { return }
-            let delta = Self.androidDirectedDelta(entryEdge: entryEdge, dx: dx, dy: dy)
+            guard stateStorage == .dexActive else { return }
+            // Zero delivery is not a movement: must not consume the first-event
+            // exemption (a failed/empty send should leave the machine untouched).
+            guard dx != 0 || dy != 0 else { return }
+            let delta = Self.androidDirectedDelta(entryEdge: entryEdgeStorage, dx: dx, dy: dy)
             let first = !hasReceivedFirstMove
             hasReceivedFirstMove = true
             if first {
@@ -204,7 +258,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             let position = virtualAxisPosition
             if isDiagnosticsEnabled {
                 Diagnostics.log(
-                    "edge pointerMoved entry=\(entryEdge.rawValue) state=\(state.rawValue) "
+                    "edge pointerMoved entry=\(entryEdgeStorage.rawValue) state=\(stateStorage.rawValue) "
                         + "dx=\(dx) dy=\(dy) axisDelta=\(delta) virtualPos=\(position) first=\(first)"
                 )
             }
@@ -220,7 +274,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// Emergency return: always works, regardless of connection state.
     public func emergencyReturn(reason: TransitionReason = .emergencyReturn) {
         run {
-            switch state {
+            switch stateStorage {
             case .edgeArmed, .dexActive:
                 returnToMacOS(reason: reason)
             default: break
@@ -238,19 +292,34 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// Serializes `body` on the queue, then fires every callback it queued
-    /// outside the queue. Firing outside avoids deadlock if a callback
-    /// synchronously re-enters the machine (e.g. a test observer).
+    /// Serializes `body` on the queue, then fires every transition callback it
+    /// queued through the callback queue. Firing on a dedicated serial queue
+    /// (a) avoids deadlock when a callback synchronously re-enters the
+    /// machine and (b) guarantees callbacks fire in sequence order even when
+    /// mutations originate from different threads: transitions are stamped on
+    /// the state queue, so their callback order on the FIFO callback queue
+    /// matches the sequence numbers.
     private func run(_ body: () -> Void) {
-        let callbacks = queue.sync { () -> [(SwitchState, TransitionReason)] in
+        let transitions = queue.sync { () -> [StateTransition] in
             body()
-            let fired = pendingCallbacks
-            pendingCallbacks = []
+            let fired = pendingTransitions
+            pendingTransitions = []
             return fired
         }
-        for (newState, reason) in callbacks {
-            onStateChange?(newState, reason)
+        guard !transitions.isEmpty else { return }
+        callbackQueue.async { [self] in
+            for transition in transitions {
+                onStateChange?(transition)
+            }
         }
+    }
+
+    /// Blocks until every transition callback scheduled so far has been
+    /// delivered. Test-only hook (and usable from shutdown paths): because
+    /// callbacks are fired asynchronously on the serial callback queue, a
+    /// `sync {}` on that queue returns only after all prior work completed.
+    public func flushCallbacks() {
+        callbackQueue.sync {}
     }
 
     private func returnToMacOS(reason: TransitionReason) {
@@ -261,8 +330,14 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     private func transition(to newState: SwitchState, reason: TransitionReason) {
-        guard newState != state else { return }
-        state = newState
-        pendingCallbacks.append((newState, reason))
+        guard newState != stateStorage else { return }
+        sequenceCounter &+= 1
+        pendingTransitions.append(StateTransition(
+            sequence: sequenceCounter,
+            from: stateStorage,
+            to: newState,
+            reason: reason
+        ))
+        stateStorage = newState
     }
 }
