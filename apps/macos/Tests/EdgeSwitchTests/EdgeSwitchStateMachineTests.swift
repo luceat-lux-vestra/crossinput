@@ -505,4 +505,99 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.pointerMoved(dx: -2, dy: 0) // -61: past hysteresis
         XCTAssertEqual(machine.state, .macActive)
     }
+
+    // MARK: - Fatal error survives suppression release
+
+    func testFatalStateIsPreservedThroughEmergencyReturn() {
+        // helper fatal -> .error. A subsequent suppression release calls
+        // emergencyReturn(), which must NOT move the machine out of .error
+        // (the app phase stays .error via SuppressionPhasePolicy).
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0, $1) }
+        machine.fatal()
+        XCTAssertEqual(machine.state, .error)
+        XCTAssertEqual(collector.transitions.map(\.1).last, .fatalError)
+
+        machine.emergencyReturn(reason: .fatalError)
+        XCTAssertEqual(machine.state, .error, "fatal error must not be covered by a release")
+    }
+
+    func testFatalThenConnectionReadyCannotReviveFromError() {
+        let machine = makeDexActive(edge: .left)
+        machine.fatal()
+        machine.connectionReady()
+        XCTAssertEqual(machine.state, .error, "error is terminal until explicit deactivate")
+        machine.deactivate() // explicit recovery path: deactivate -> activate
+        XCTAssertEqual(machine.state, .disabled)
+        machine.activate()
+        XCTAssertEqual(machine.state, .disconnected)
+    }
+
+    // MARK: - Send failure: only delivered movement is credited
+
+    func testFailedSendIsNotCreditedToVirtualPosition() {
+        // UHID path: a failed report send stops crediting. Feed the delivered
+        // totals the way main.swift now does: full credit only when every
+        // report was written. A zero credit must leave position untouched.
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: 0, dy: 0) // failed send credits nothing
+        XCTAssertEqual(machine.state, .dexActive)
+        // After the failure, a later successful -61 must still cross the
+        // hysteresis (position was never advanced by the failed event).
+        machine.pointerMoved(dx: -61, dy: 0)
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    func testPartialDeliveryCreditsOnlySentReports() {
+        // dx=300 -> [127,127,46]. If the third report fails, the machine is
+        // credited 254, not 300 — pull-back must cross from 254, not 300.
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: 127, dy: 0)
+        machine.pointerMoved(dx: 127, dy: 0)
+        machine.pointerMoved(dx: 0, dy: 0) // failed third report: no credit
+        // Position is 254; -313 -> -59 (not yet), -2 -> -61 (return).
+        machine.pointerMoved(dx: -313, dy: 0)
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -2, dy: 0)
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    // MARK: - Concurrent transitions stay consistent
+
+    func testConcurrentEmergencyReturnAndPointerMovement() {
+        let machine = makeDexActive(edge: .left)
+        let expectations = (0..<8).map { _ in expectation(description: "worker") }
+        DispatchQueue.concurrentPerform(iterations: 8) { i in
+            if i.isMultiple(of: 2) {
+                machine.emergencyReturn(reason: .emergencyReturn)
+            } else {
+                machine.pointerMoved(dx: -500, dy: 0)
+            }
+            expectations[i].fulfill()
+        }
+        wait(for: expectations, timeout: 5)
+        // Serialized queue: the final state is one of the valid outcomes,
+        // never a torn intermediate (e.g. .edgeArmed from a concurrent entry).
+        XCTAssertTrue(machine.state == .macActive || machine.state == .dexActive)
+    }
+
+    func testConcurrentConnectionLostAndPointerAtEdge() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.connectionBegan()
+        machine.connectionReady()
+        DispatchQueue.concurrentPerform(iterations: 10) { i in
+            if i.isMultiple(of: 2) {
+                machine.connectionLost()
+            } else {
+                machine.pointerAtEdge(.left)
+            }
+        }
+        // Either .recovering (if connectionLost won) or a valid edge-armed
+        // chain from macActive — never a state that the serialized transitions
+        // cannot produce.
+        XCTAssertTrue([.recovering, .edgeArmed, .dexActive, .connecting].contains(machine.state),
+                      "unexpected state after concurrent transitions: \(machine.state.rawValue)")
+    }
 }
