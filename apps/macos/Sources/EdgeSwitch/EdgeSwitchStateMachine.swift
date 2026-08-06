@@ -61,12 +61,18 @@ public enum TransitionReason: String, Sendable {
 /// equivalence table in the ADR.
 ///
 /// First-event rule (issue #37): the first movement event after entering is
-/// never treated as a return. Warp/synthetic leftover deltas right after
-/// capture starts are not deliberate user movement toward macOS, so the first
-/// event is normalized to `max(0, delta)` (never leaves a negative baseline
-/// that would poison later return decisions) and excluded from the return check.
-/// This is the actual fix for the "left edge instantly returns" bug — the
-/// accumulator math itself was equivalent to origin/main.
+/// never treated as a return and is normalized to `max(0, delta)` — warp/
+/// synthetic leftover deltas right after capture starts are not deliberate
+/// user movement toward macOS, and they must not leave a negative baseline
+/// that poisons later decisions. This is the actual fix for the "left edge
+/// instantly returns" bug — the accumulator math itself was equivalent to
+/// origin/main.
+///
+/// Concurrency: every public mutation is serialized on an internal queue, and
+/// `onStateChange` callbacks are fired outside the queue so a callback that
+/// synchronously re-enters the machine cannot deadlock. Transition reasons are
+/// never dropped: a transition that does not change the state fires nothing,
+/// every real transition fires exactly once.
 public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public private(set) var state: SwitchState = .disabled
     public var onStateChange: (@Sendable (SwitchState, TransitionReason) -> Void)?
@@ -74,7 +80,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// Edge the pointer used to leave macOS for DeX.
     public private(set) var entryEdge: ScreenEdge = .left
 
-    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "crossinput.edge-switch", qos: .userInteractive)
+    private var pendingCallbacks: [(SwitchState, TransitionReason)] = []
 
     /// Virtual pointer position along the axis perpendicular to the entry edge.
     /// 0 = entry boundary, positive = inside Android/DeX, negative = beyond the
@@ -96,66 +103,72 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     public init() {}
 
-    // MARK: - Public transitions
+    // MARK: - Public transitions (serialized)
 
     public func activate() {
-        guard state == .disabled else { return }
-        transition(to: .disconnected, reason: .activation)
+        run {
+            guard state == .disabled else { return }
+            transition(to: .disconnected, reason: .activation)
+        }
     }
 
     public func deactivate() {
-        lock.withLock {
+        run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
+            transition(to: .disabled, reason: .deactivated)
         }
-        transition(to: .disabled, reason: .deactivated)
     }
 
     public func connectionBegan() {
-        switch state {
-        case .disconnected, .recovering: transition(to: .connecting, reason: .connectionBegan)
-        case .macActive: transition(to: .connecting, reason: .connectionBegan)
-        default: break
+        run {
+            switch state {
+            case .disconnected, .recovering: transition(to: .connecting, reason: .connectionBegan)
+            case .macActive: transition(to: .connecting, reason: .connectionBegan)
+            default: break
+            }
         }
     }
 
     public func connectionReady() {
-        switch state {
-        case .connecting, .disconnected, .error: transition(to: .macActive, reason: .connectionReady)
-        default: break
+        run {
+            switch state {
+            // .error is terminal (helper fatal): it must never be covered by a
+            // readiness transition. Recovery is explicit deactivate -> activate.
+            case .connecting, .disconnected: transition(to: .macActive, reason: .connectionReady)
+            default: break
+            }
         }
     }
 
     public func connectionLost() {
-        switch state {
-        case .connecting, .macActive, .edgeArmed, .dexActive, .recovering:
-            lock.withLock {
+        run {
+            switch state {
+            case .connecting, .macActive, .edgeArmed, .dexActive, .recovering:
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
+                transition(to: .recovering, reason: .connectionLost)
+            default: break
             }
-            transition(to: .recovering, reason: .connectionLost)
-        default: break
         }
     }
 
     /// Pointer reached a screen edge while macOS is active.
     public func pointerAtEdge(_ edge: ScreenEdge) {
-        switch state {
-        case .macActive:
-            transition(to: .edgeArmed, reason: .edgeEntered)
-            entryEdge = edge
-            lock.withLock {
+        run {
+            switch state {
+            case .macActive:
+                transition(to: .edgeArmed, reason: .edgeEntered)
+                entryEdge = edge
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
-            }
-            transition(to: .dexActive, reason: .edgeEntered)
-        case .edgeArmed:
-            entryEdge = edge
-            lock.withLock {
+                transition(to: .dexActive, reason: .edgeEntered)
+            case .edgeArmed:
+                entryEdge = edge
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
+            default: break
             }
-        default: break
         }
     }
 
@@ -171,10 +184,12 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     /// Relative pointer movement while DeX owns the pointer.
+    /// Called with the movement actually delivered to Android (deliveredDx/dy
+    /// from HIDReportSplitter), never with raw deltas that were dropped.
     public func pointerMoved(dx: CGFloat, dy: CGFloat) {
-        guard state == .dexActive else { return }
-        let delta = Self.androidDirectedDelta(entryEdge: entryEdge, dx: dx, dy: dy)
-        let (position, isFirst) = lock.withLock {
+        run {
+            guard state == .dexActive else { return }
+            let delta = Self.androidDirectedDelta(entryEdge: entryEdge, dx: dx, dy: dy)
             let first = !hasReceivedFirstMove
             hasReceivedFirstMove = true
             if first {
@@ -186,46 +201,61 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             } else {
                 virtualAxisPosition += delta
             }
-            return (virtualAxisPosition, first)
-        }
-        if isDiagnosticsEnabled {
-            Diagnostics.log(
-                "edge pointerMoved entry=\(entryEdge.rawValue) state=\(state.rawValue) "
-                    + "dx=\(dx) dy=\(dy) axisDelta=\(delta) virtualPos=\(position) first=\(isFirst)"
-            )
-        }
-        // The first event after entering never returns (issue #37); leftover
-        // warp/synthetic deltas must not bounce the user out of DeX.
-        guard !isFirst else { return }
-        if position <= -returnHysteresis {
-            returnToMacOS(reason: .boundaryCrossed)
+            let position = virtualAxisPosition
+            if isDiagnosticsEnabled {
+                Diagnostics.log(
+                    "edge pointerMoved entry=\(entryEdge.rawValue) state=\(state.rawValue) "
+                        + "dx=\(dx) dy=\(dy) axisDelta=\(delta) virtualPos=\(position) first=\(first)"
+                )
+            }
+            // The first event after entering never returns (issue #37); leftover
+            // warp/synthetic deltas must not bounce the user out of DeX.
+            guard !first else { return }
+            if position <= -returnHysteresis {
+                returnToMacOS(reason: .boundaryCrossed)
+            }
         }
     }
 
     /// Emergency return: always works, regardless of connection state.
     public func emergencyReturn(reason: TransitionReason = .emergencyReturn) {
-        switch state {
-        case .edgeArmed, .dexActive:
-            returnToMacOS(reason: reason)
-        default: break
+        run {
+            switch state {
+            case .edgeArmed, .dexActive:
+                returnToMacOS(reason: reason)
+            default: break
+            }
         }
     }
 
     public func fatal() {
-        lock.withLock {
+        run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
+            transition(to: .error, reason: .fatalError)
         }
-        transition(to: .error, reason: .fatalError)
     }
 
     // MARK: - Internal
 
-    private func returnToMacOS(reason: TransitionReason) {
-        lock.withLock {
-            virtualAxisPosition = 0
-            hasReceivedFirstMove = false
+    /// Serializes `body` on the queue, then fires every callback it queued
+    /// outside the queue. Firing outside avoids deadlock if a callback
+    /// synchronously re-enters the machine (e.g. a test observer).
+    private func run(_ body: () -> Void) {
+        let callbacks = queue.sync { () -> [(SwitchState, TransitionReason)] in
+            body()
+            let fired = pendingCallbacks
+            pendingCallbacks = []
+            return fired
         }
+        for (newState, reason) in callbacks {
+            onStateChange?(newState, reason)
+        }
+    }
+
+    private func returnToMacOS(reason: TransitionReason) {
+        virtualAxisPosition = 0
+        hasReceivedFirstMove = false
         transition(to: .recovering, reason: reason)
         transition(to: .macActive, reason: reason)
     }
@@ -233,6 +263,6 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private func transition(to newState: SwitchState, reason: TransitionReason) {
         guard newState != state else { return }
         state = newState
-        onStateChange?(newState, reason)
+        pendingCallbacks.append((newState, reason))
     }
 }
