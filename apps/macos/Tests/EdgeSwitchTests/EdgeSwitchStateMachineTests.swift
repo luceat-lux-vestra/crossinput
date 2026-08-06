@@ -756,4 +756,79 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.pointerMoved(dx: -500, dy: 0)
         XCTAssertEqual(machine.state, .recovering, "pointer must stay released")
     }
+
+// MARK: - Callback enqueue order preservation (directive 2)
+
+/// Thread-safe collector for transition sequences.
+final class SequenceCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [UInt64] = []
+
+    var sequences: [UInt64] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ sequence: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(sequence)
+    }
+}
+
+/// Creates a state machine in .macActive state, ready for edge entry.
+private func makeMacActive() -> EdgeSwitchStateMachine {
+    let machine = EdgeSwitchStateMachine()
+    machine.activate()
+    machine.connectionBegan()
+    machine.connectionReady()
+    machine.flushCallbacks() // drain setup callbacks
+    return machine
+}
+
+func testConcurrentMutationsEnqueueCallbacksInSequenceOrder() {
+    let machine = makeMacActive()
+    let collector = SequenceCollector()
+
+    machine.onStateChange = { transition in
+        collector.append(transition.sequence)
+    }
+
+    let iterations = 50
+    let group = DispatchGroup()
+    let queue = DispatchQueue.global()
+
+    // Each iteration: pointerAtEdge (edgeArmed -> dexActive) then emergencyReturn (recovering -> macActive)
+    // This cycle returns the machine to .macActive, allowing the next iteration to fire.
+    for _ in 0..<iterations {
+        group.enter()
+        DispatchQueue.global().async {
+            let edge = ScreenEdge.allCases.randomElement()!
+            machine.pointerAtEdge(edge)      // macActive -> edgeArmed -> dexActive (seq+1, seq+2)
+            machine.pointerMoved(dx: -100, dy: 0) // dexActive -> recovering -> macActive (seq+3, seq+4) via return
+            group.leave()
+        }
+    }
+
+    group.wait()
+    machine.flushCallbacks()
+
+    let sequences = collector.sequences
+
+    // Each successful iteration fires: edgeEntered, edgeEntered (dexActive), boundaryCrossed, boundaryCrossed (macActive) = 4 transitions
+    // But some iterations may race and not all fire if state changed; we just verify sequence order of what did fire.
+    XCTAssertGreaterThan(sequences.count, 0, "at least some transitions should have fired")
+
+    // Sequences must be strictly increasing in the order they were enqueued
+    for i in 1..<sequences.count {
+        XCTAssertLessThan(
+            sequences[i - 1],
+            sequences[i],
+            "callback sequence inversion at index \(i): \(sequences[i - 1]) -> \(sequences[i])"
+        )
+    }
+
+    // No duplicate sequences
+    let uniqueCount = Set(sequences).count
+    XCTAssertEqual(uniqueCount, sequences.count, "duplicate sequences detected")
+}
 }
