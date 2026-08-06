@@ -4,16 +4,21 @@ import XCTest
 /// Thread-safe collector for transition callbacks (onStateChange is @Sendable).
 final class TransitionCollector: @unchecked Sendable {
     private let lock = NSLock()
-    private var storage: [(SwitchState, TransitionReason)] = []
+    private var storage: [StateTransition] = []
 
-    var transitions: [(SwitchState, TransitionReason)] {
+    var transitions: [StateTransition] {
         lock.lock(); defer { lock.unlock() }
         return storage
     }
 
-    func append(_ state: SwitchState, _ reason: TransitionReason) {
+    var reasons: [TransitionReason] {
         lock.lock(); defer { lock.unlock() }
-        storage.append((state, reason))
+        return storage.map(\.reason)
+    }
+
+    func append(_ transition: StateTransition) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(transition)
     }
 }
 
@@ -27,6 +32,9 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .macActive)
         machine.pointerAtEdge(edge)
         XCTAssertEqual(machine.state, .dexActive)
+        // Drain async callbacks scheduled before a test installs its own
+        // onStateChange; otherwise those transitions leak into the collector.
+        machine.flushCallbacks()
         return machine
     }
 
@@ -347,45 +355,50 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     func testBoundaryCrossedReasonIsReported() {
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.pointerMoved(dx: -100, dy: 0)
         machine.pointerMoved(dx: 160, dy: 0) // pos -60 -> boundary crossed
-        XCTAssertEqual(collector.transitions.map(\.1), [.boundaryCrossed, .boundaryCrossed],
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.boundaryCrossed, .boundaryCrossed],
                        "dexActive -> recovering -> macActive, both boundaryCrossed")
     }
 
     func testConnectionLostReasonIsReported() {
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.connectionLost()
-        XCTAssertEqual(collector.transitions.last?.1, .connectionLost)
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons.last, .connectionLost)
         XCTAssertEqual(machine.state, .recovering)
     }
 
     func testEmergencyReturnReasonIsReported() {
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .emergencyReturn)
-        XCTAssertEqual(collector.transitions.map(\.1), [.emergencyReturn, .emergencyReturn])
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.emergencyReturn, .emergencyReturn])
         XCTAssertEqual(machine.state, .macActive)
     }
 
     func testSuppressionReleasedReasonIsReported() {
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .suppressionReleased)
-        XCTAssertEqual(collector.transitions.map(\.1), [.suppressionReleased, .suppressionReleased])
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.suppressionReleased, .suppressionReleased])
     }
 
     func testWatchdogTimeoutReasonIsReported() {
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .watchdogTimeout)
-        XCTAssertEqual(collector.transitions.map(\.1), [.watchdogTimeout, .watchdogTimeout])
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.watchdogTimeout, .watchdogTimeout])
     }
 
     func testEdgeEnteredReasonIsReported() {
@@ -393,21 +406,25 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.activate()
         machine.connectionBegan()
         machine.connectionReady()
+        // Drain pre-registration callbacks so only the entry transitions land.
+        machine.flushCallbacks()
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.pointerAtEdge(.left)
-        XCTAssertEqual(collector.transitions.map(\.1), [.edgeEntered, .edgeEntered],
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.edgeEntered, .edgeEntered],
                        "macActive -> edgeArmed -> dexActive, both edgeEntered")
     }
 
     func testActivationAndConnectionReasonsAreReported() {
         let machine = EdgeSwitchStateMachine()
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.activate()
         machine.connectionBegan()
         machine.connectionReady()
-        XCTAssertEqual(collector.transitions.map(\.1), [.activation, .connectionBegan, .connectionReady])
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.activation, .connectionBegan, .connectionReady])
     }
 
     // MARK: - Fail-safes
@@ -514,10 +531,11 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // (the app phase stays .error via SuppressionPhasePolicy).
         let machine = makeDexActive(edge: .left)
         let collector = TransitionCollector()
-        machine.onStateChange = { collector.append($0, $1) }
+        machine.onStateChange = { collector.append($0) }
         machine.fatal()
+        machine.flushCallbacks()
         XCTAssertEqual(machine.state, .error)
-        XCTAssertEqual(collector.transitions.map(\.1).last, .fatalError)
+        XCTAssertEqual(collector.reasons.last, .fatalError)
 
         machine.emergencyReturn(reason: .fatalError)
         XCTAssertEqual(machine.state, .error, "fatal error must not be covered by a release")
@@ -537,25 +555,29 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     // MARK: - Send failure: only delivered movement is credited
 
     func testFailedSendIsNotCreditedToVirtualPosition() {
-        // UHID path: a failed report send stops crediting. Feed the delivered
-        // totals the way main.swift now does: full credit only when every
-        // report was written. A zero credit must leave position untouched.
+        // UHID path: a fully failed send delivers (0,0) and must be a complete
+        // no-op — it neither credits position nor consumes the first-event
+        // exemption. A later successful -61 is then the FIRST real movement,
+        // so it is normalized to 0 and does not return; the following -61 is
+        // the one that crosses the hysteresis.
         let machine = makeDexActive(edge: .right)
-        machine.pointerMoved(dx: 0, dy: 0) // failed send credits nothing
+        machine.pointerMoved(dx: 0, dy: 0) // failed send: no-op
         XCTAssertEqual(machine.state, .dexActive)
-        // After the failure, a later successful -61 must still cross the
-        // hysteresis (position was never advanced by the failed event).
-        machine.pointerMoved(dx: -61, dy: 0)
+        machine.pointerMoved(dx: -61, dy: 0) // first real movement: normalized to 0
+        XCTAssertEqual(machine.state, .dexActive, "zero delivery must not consume the first-move exemption")
+        machine.pointerMoved(dx: -61, dy: 0) // second: -61 -> return
         XCTAssertEqual(machine.state, .macActive)
     }
 
     func testPartialDeliveryCreditsOnlySentReports() {
         // dx=300 -> [127,127,46]. If the third report fails, the machine is
         // credited 254, not 300 — pull-back must cross from 254, not 300.
+        // Failed reports are simply not fed to the machine (never a (0,0)
+        // placeholder call, which is now a no-op).
         let machine = makeDexActive(edge: .right)
         machine.pointerMoved(dx: 127, dy: 0)
         machine.pointerMoved(dx: 127, dy: 0)
-        machine.pointerMoved(dx: 0, dy: 0) // failed third report: no credit
+        // Third report failed: no pointerMoved call at all.
         // Position is 254; -313 -> -59 (not yet), -2 -> -61 (return).
         machine.pointerMoved(dx: -313, dy: 0)
         XCTAssertEqual(machine.state, .dexActive)
@@ -599,5 +621,139 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // cannot produce.
         XCTAssertTrue([.recovering, .edgeArmed, .dexActive, .connecting].contains(machine.state),
                       "unexpected state after concurrent transitions: \(machine.state.rawValue)")
+    }
+
+    // MARK: - Zero delivery never consumes the first-movement exemption (directive 3.1)
+
+    func testZeroDeliveredMovementDoesNotConsumeFirstMovementExemption() {
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: 0, dy: 0) // no-op: must not touch hasReceivedFirstMove
+        XCTAssertEqual(machine.state, .dexActive)
+        machine.pointerMoved(dx: -1000, dy: 0) // FIRST real movement: normalized to 0
+        XCTAssertEqual(machine.state, .dexActive, "-1000 is the first real event and must be normalized")
+        machine.pointerMoved(dx: -61, dy: 0) // second real: crosses hysteresis
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    // MARK: - Deterministic callback-order inversion (directive 3.2)
+
+    func testConcurrentMutationsPreserveTransitionApplicationOrder() {
+        // Pause the VERY FIRST callback (edgeArmed) while the state machine
+        // has already finished mutating to .dexActive; run fatal() from
+        // another queue; then unblock. The observed logical order must be
+        // edgeArmed -> dexActive -> error, never edgeArmed -> error -> dexActive.
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.connectionBegan()
+        machine.connectionReady()
+        // Drain activation/connection callbacks before registering the
+        // blocking handler (directive 3.2: deterministic callback inversion).
+        machine.flushCallbacks()
+
+        let gate = DispatchSemaphore(value: 0)
+        let collector = TransitionCollector()
+        machine.onStateChange = { transition in
+            collector.append(transition)
+            if transition.to == .edgeArmed {
+                gate.wait() // block the first callback until the test releases it
+            }
+        }
+
+        // Start pointerAtEdge on a background thread: it mutates to .dexActive
+        // and begins firing; the first callback blocks on the gate.
+        let entryDone = expectation(description: "entry-finished")
+        DispatchQueue.global(qos: .userInitiated).async {
+            machine.pointerAtEdge(.left)
+            entryDone.fulfill()
+        }
+
+        // Wait until the edgeArmed callback is observed (blocked), then let
+        // a second thread run fatal() while the first callback is paused.
+        let edgeObserved = expectation(description: "edge-armed-observed")
+        DispatchQueue.global(qos: .utility).async {
+            while !collector.transitions.contains(where: { $0.to == .edgeArmed }) {
+                usleep(1_000)
+            }
+            edgeObserved.fulfill()
+        }
+        wait(for: [edgeObserved], timeout: 5)
+
+        let fatalDone = expectation(description: "fatal-done")
+        DispatchQueue.global(qos: .userInitiated).async {
+            machine.fatal()
+            fatalDone.fulfill()
+        }
+        // Give fatal() a chance to enter the queue while the first callback
+        // is still blocked.
+        wait(for: [fatalDone], timeout: 5)
+
+        gate.signal() // release the paused first callback
+
+        // Wait for the fatal callback to land too.
+        let fatalObserved = expectation(description: "fatal-observed")
+        DispatchQueue.global(qos: .utility).async {
+            while !collector.reasons.contains(.fatalError) {
+                usleep(1_000)
+            }
+            fatalObserved.fulfill()
+        }
+        wait(for: [fatalObserved, entryDone], timeout: 5)
+
+        XCTAssertEqual(machine.state, .error)
+        // Logical order must be preserved: every transition with a lower
+        // sequence is applied before one with a higher sequence.
+        let sequences = collector.transitions.map(\.sequence)
+        XCTAssertEqual(sequences, sequences.sorted(), "callbacks must fire in sequence order")
+        let toStates = collector.transitions.map(\.to)
+        if toStates.contains(.dexActive) {
+            let dexIndex = toStates.firstIndex(of: .dexActive)!
+            let errIndex = toStates.firstIndex(of: .error)!
+            XCTAssertLessThan(dexIndex, errIndex,
+                              "edgeArmed -> dexActive -> error order violated: \(toStates)")
+        }
+    }
+
+    // MARK: - Stale-transition gate (directive 3.3)
+
+    func testStaleSequenceIsDiscardedByGate() {
+        var gate = TransitionSequenceGate()
+        let error = StateTransition(sequence: 11, from: .recovering, to: .error, reason: .fatalError)
+        let staleDex = StateTransition(sequence: 10, from: .edgeArmed, to: .dexActive, reason: .edgeEntered)
+
+        XCTAssertTrue(gate.shouldApply(error))
+        XCTAssertEqual(gate.lastAppliedSequence, 11)
+
+        XCTAssertFalse(gate.shouldApply(staleDex), "lower sequence must be discarded")
+        XCTAssertEqual(gate.lastAppliedSequence, 11, "gate must stay on the newer sequence")
+    }
+
+    func testGateRejectsEqualSequenceDuplicate() {
+        var gate = TransitionSequenceGate()
+        let t = StateTransition(sequence: 5, from: .macActive, to: .dexActive, reason: .edgeEntered)
+        XCTAssertTrue(gate.shouldApply(t))
+        XCTAssertFalse(gate.shouldApply(t), "identical sequence is a duplicate, not newer")
+        XCTAssertEqual(gate.lastAppliedSequence, 5)
+    }
+
+    // MARK: - Fatal / connection loss can never be re-suppressed (directive 3.4)
+
+    func testFatalInterleavedWithEntryNeverReentersDexActive() {
+        let machine = makeDexActive(edge: .left)
+        machine.fatal()
+        XCTAssertEqual(machine.state, .error)
+        machine.pointerAtEdge(.left) // parked entry attempt after fatal
+        XCTAssertEqual(machine.state, .error, "entry must not revive .error")
+        machine.pointerMoved(dx: -500, dy: 0)
+        XCTAssertEqual(machine.state, .error, "movement must not suppress after fatal")
+    }
+
+    func testConnectionLostInterleavedWithEntryNeverReentersDexActive() {
+        let machine = makeDexActive(edge: .left)
+        machine.connectionLost()
+        XCTAssertEqual(machine.state, .recovering)
+        machine.pointerAtEdge(.left)
+        XCTAssertEqual(machine.state, .recovering, "entry must not revive a lost connection")
+        machine.pointerMoved(dx: -500, dy: 0)
+        XCTAssertEqual(machine.state, .recovering, "pointer must stay released")
     }
 }
