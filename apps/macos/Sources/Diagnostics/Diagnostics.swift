@@ -1,3 +1,4 @@
+@preconcurrency import Dispatch
 import Foundation
 
 /// Diagnostics/logging utilities.
@@ -50,7 +51,7 @@ public enum Diagnostics {
         return timer
     }()
 
-        nonisolated(unsafe) private static var hasStarted: Bool = false
+    nonisolated(unsafe) private static var hasStarted: Bool = false
 
     public static func log(_ message: String) {
         // Start the periodic flush on first use (cheap, idempotent).
