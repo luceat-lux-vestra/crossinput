@@ -516,17 +516,28 @@ final class AppModel: ObservableObject {
             case let .move(dx, dy):
                 // Split into HID-range reports so large deltas are never lost
                 // to Int8 clamping (HIDReportSplitter). The state machine must
-                // see exactly the movement delivered to Android, so it is
-                // fed the delivered deltas, not the raw input.
+                // see exactly the movement delivered to Android — and only
+                // movement that was actually written to the helper: if a send
+                // throws (stream closed, broken pipe), the failed reports are
+                // skipped and only the delivered part is credited, so the
+                // virtual position never outruns the device (issue #37).
                 let movement = HIDReportSplitter.normalizeForHID(dx: dx, dy: dy)
-                switchMachine.pointerMoved(dx: CGFloat(movement.deliveredDx),
-                                           dy: CGFloat(movement.deliveredDy))
+                var sentDx: Int32 = 0
+                var sentDy: Int32 = 0
                 for report in movement.reports {
                     let payload = Self.hidReport(buttons: hidButtons,
                                                  dx: Int32(report.dx), dy: Int32(report.dy), wheel: 0)
-                    try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
-                                                  payload: Messages.hidReport(deviceId: deviceId, report: payload)))
+                    do {
+                        try connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                                     payload: Messages.hidReport(deviceId: deviceId, report: payload)))
+                        sentDx += Int32(report.dx)
+                        sentDy += Int32(report.dy)
+                    } catch {
+                        Diagnostics.log("hid report send failed, crediting \(sentDx),\(sentDy): \(error)")
+                        break
+                    }
                 }
+                switchMachine.pointerMoved(dx: CGFloat(sentDx), dy: CGFloat(sentDy))
             case let .button(button, down):
                 let bit = Self.hidButtonBit(for: button)
                 if down { hidButtons |= bit } else { hidButtons &= ~bit }
@@ -542,10 +553,16 @@ final class AppModel: ObservableObject {
         } else {
             switch event.kind {
             case let .move(dx, dy):
-                // SDK fallback: full Int32 deltas, delivered unchanged.
-                switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
-                try? connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
-                                              payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
+                // SDK fallback: full Int32 deltas, delivered unchanged. The
+                // state machine is credited only when the frame was actually
+                // written to the helper.
+                do {
+                    try connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
+                                                 payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
+                    switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+                } catch {
+                    Diagnostics.log("pointerMoveRel send failed, movement not credited: \(error)")
+                }
             case let .button(button, down):
                 try? connection.send(CxiFrame(type: .pointerButton, requestId: 1,
                                               payload: Messages.pointerButton(button: button, down: down)))
@@ -566,7 +583,10 @@ final class AppModel: ObservableObject {
             if let fatal = try? Messages.decodeFatalError(frame.payload) {
                 Task { @MainActor in
                     phase = .error("helper fatal \(fatal.code): \(fatal.message)")
-                    switchMachine.connectionLost()
+                    // fatal() (not connectionLost()) keeps the machine in .error,
+                    // so the subsequent suppression release cannot collapse the
+                    // fatal cause into an idle/ready phase (SuppressionPhasePolicy).
+                    switchMachine.fatal()
                 }
             }
         case .displayChanged:
