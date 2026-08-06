@@ -548,7 +548,13 @@ final class AppModel: ObservableObject {
                         break
                     }
                 }
-                switchMachine.pointerMoved(dx: CGFloat(sentDx), dy: CGFloat(sentDy))
+                // A zero-zero delivered movement (no reports were generated,
+                // or every send failed) is not a real delivery: the state
+                // machine is not called at all, so the first-movement
+                // exemption and the virtual position stay untouched.
+                if sentDx != 0 || sentDy != 0 {
+                    switchMachine.pointerMoved(dx: CGFloat(sentDx), dy: CGFloat(sentDy))
+                }
             case let .button(button, down):
                 let bit = Self.hidButtonBit(for: button)
                 if down { hidButtons |= bit } else { hidButtons &= ~bit }
