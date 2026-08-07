@@ -98,6 +98,9 @@ final class AppModel: ObservableObject {
     /// callback can never re-suppress the capture after a newer
     /// `.error`/`.recovering` (see TransitionSequenceGate).
     private var transitionGate = TransitionSequenceGate()
+    /// Current suppression generation, set when suppression starts.
+    /// Used to discard stale onSuppressionReleased callbacks.
+    private var currentSuppressionGeneration: UInt64 = 0
 
     init() {
         capture = InputCapture()
@@ -129,7 +132,7 @@ final class AppModel: ObservableObject {
         capture.onKeyEvent = { [weak self] keyEvent in
             self?.onCapturedKeyEvent(keyEvent)
         }
-        capture.onSuppressionReleased = { [weak self] reason in
+capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
                 // Suppression was lifted. The phase must reflect the actual
                 // cause: a dead connection stays disconnected (idle/reconnect),
@@ -137,9 +140,14 @@ final class AppModel: ObservableObject {
                 // (normal return, watchdog, emergency hotkey) become ready.
                 // This mapping is the pure, tested SuppressionPhasePolicy —
                 // never collapse a real cause into a normal return (issue #37).
+                // Stale suppression-release callbacks (older generation) are discarded.
                 guard let self else { return }
+                guard generation == self.currentSuppressionGeneration else {
+                    Diagnostics.log("suppression released: discarding stale callback (gen \(generation), current \(self.currentSuppressionGeneration))")
+                    return
+                }
                 let outcome = SuppressionPhasePolicy.nextPhase(after: reason,
-                                                           isConnected: self.connection?.isConnected == true)
+                                                               isConnected: self.connection?.isConnected == true)
                 switch outcome {
                 case .idle: self.phase = .idle
                 case .ready: self.phase = .ready
@@ -155,7 +163,7 @@ final class AppModel: ObservableObject {
                 case .fatalError: machineReason = .fatalError
                 }
                 self.switchMachine.emergencyReturn(reason: machineReason)
-                Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase)")
+                Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase) gen=\(generation)")
             }
         }
     }
@@ -199,7 +207,14 @@ final class AppModel: ObservableObject {
             }
         }
         connection = manager
-        switchMachine.activate()
+        // If the state machine is in a terminal .error state (from a prior fatal),
+        // explicitly recover through the documented lifecycle: deactivate -> activate.
+        if switchMachine.state == .error {
+            switchMachine.deactivate()
+            switchMachine.activate()
+        } else {
+            switchMachine.activate()
+        }
         do {
             try await manager.connect()
             switchMachine.connectionBegan()
@@ -210,7 +225,7 @@ final class AppModel: ObservableObject {
                 applyAutoSelection(list)
             }
             switchMachine.connectionReady()
-            phase = .ready
+            // phase is set via onStateChange callback when state reaches .macActive
             applyEdgeConfig()
             if enable() {
                 await setupHidDevice()
@@ -454,7 +469,9 @@ final class AppModel: ObservableObject {
     private func apply(state: SwitchState, reason: TransitionReason) {
         switch state {
         case .dexActive:
-            capture.suppress()
+            if let gen = capture.suppress() {
+                currentSuppressionGeneration = gen
+            }
         case .macActive, .recovering, .disabled, .error:
             capture.release(reason: Self.releaseReason(for: reason))
         default:

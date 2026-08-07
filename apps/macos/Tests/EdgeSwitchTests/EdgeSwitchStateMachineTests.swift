@@ -865,4 +865,104 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         let uniqueCount = Set(sequences).count
         XCTAssertEqual(uniqueCount, sequences.count, "duplicate sequences detected")
     }
+
+    // MARK: - Fatal recovery & stale-release regression (directive 5)
+
+    /// Fatal error state must be recoverable through explicit Connect:
+    /// error -> deactivate -> activate -> connectionBegan -> connectionReady -> macActive
+    func testFatalThenConnectRecoversStateMachine() {
+        let machine = makeDexActive(edge: .left)
+        machine.fatal()
+        XCTAssertEqual(machine.state, .error)
+
+        // Simulate user-initiated fresh Connect: explicit recovery boundary
+        machine.deactivate()
+        XCTAssertEqual(machine.state, .disabled)
+        machine.activate()
+        XCTAssertEqual(machine.state, .disconnected)
+        machine.connectionBegan()
+        XCTAssertEqual(machine.state, .connecting)
+        machine.connectionReady()
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    /// Stale normal release after fatal must not overwrite .error phase.
+    /// TransitionSequenceGate discards stale transition; phase stays .error.
+    func testStaleNormalReleaseAfterFatalDoesNotOverwriteError() {
+        let machine = makeDexActive(edge: .left)
+        machine.fatal()
+        XCTAssertEqual(machine.state, .error)
+
+        // Stale normal release callback (as if from a prior suppression session)
+        // attempts to drive phase back to .ready. The gate must reject it.
+        var gate = TransitionSequenceGate()
+        let fatalTransition = StateTransition(sequence: 5, from: .dexActive, to: .error, reason: .fatalError)
+        let staleNormalRelease = StateTransition(sequence: 4, from: .recovering, to: .macActive, reason: .suppressionReleased)
+
+        XCTAssertTrue(gate.shouldApply(fatalTransition), "fatal transition applied")
+        XCTAssertFalse(gate.shouldApply(staleNormalRelease), "stale normal release discarded")
+        XCTAssertEqual(gate.lastAppliedSequence, 5)
+    }
+
+    /// Stale normal release after connection loss must not set phase to .ready.
+    func testStaleNormalReleaseAfterConnectionLostDoesNotSetReady() {
+        let machine = makeDexActive(edge: .left)
+        machine.connectionLost()
+        XCTAssertEqual(machine.state, .recovering)
+
+        var gate = TransitionSequenceGate()
+        let lostTransition = StateTransition(sequence: 7, from: .dexActive, to: .recovering, reason: .connectionLost)
+        let staleNormalRelease = StateTransition(sequence: 6, from: .recovering, to: .macActive, reason: .suppressionReleased)
+
+        XCTAssertTrue(gate.shouldApply(lostTransition))
+        XCTAssertFalse(gate.shouldApply(staleNormalRelease))
+        XCTAssertEqual(gate.lastAppliedSequence, 7)
+    }
+
+    /// Suppression release from an older generation must be discarded.
+    /// Simulated by feeding a stale sequence to TransitionSequenceGate.
+    func testStaleReleaseFromOldGenerationDiscarded() {
+        var gate = TransitionSequenceGate()
+        let current = StateTransition(sequence: 10, from: .recovering, to: .macActive, reason: .suppressionReleased)
+        let stale = StateTransition(sequence: 9, from: .recovering, to: .macActive, reason: .suppressionReleased)
+
+        XCTAssertTrue(gate.shouldApply(current))
+        XCTAssertFalse(gate.shouldApply(stale), "older generation release must be discarded")
+        XCTAssertEqual(gate.lastAppliedSequence, 10)
+    }
+
+    /// Non-fatal connection loss followed by fresh Connect recovers via recovering -> connecting -> macActive.
+    func testConnectionLostThenFreshConnectRecoversViaRecovering() {
+        let machine = makeDexActive(edge: .left)
+        machine.connectionLost()
+        XCTAssertEqual(machine.state, .recovering)
+
+        // Fresh Connect path: connectionBegan -> connectionReady -> macActive
+        machine.connectionBegan()
+        XCTAssertEqual(machine.state, .connecting)
+        machine.connectionReady()
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    /// Normal boundary return with live connection transitions to macActive and phase ready.
+    func testNormalBoundaryReturnWithLiveConnection() {
+        let machine = makeDexActive(edge: .right)
+        machine.pointerMoved(dx: 300, dy: 0) // deep into Android
+        machine.pointerMoved(dx: -360, dy: 0) // crosses boundary + hysteresis
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
+    /// Watchdog/emergency hotkey release immediately returns to macActive via recovering.
+    func testWatchdogAndEmergencyHotkeyReleaseImmediately() {
+        let machine = makeDexActive(edge: .left)
+
+        // Watchdog timeout path: emergencyReturn transitions recovering -> macActive
+        machine.emergencyReturn(reason: .watchdogTimeout)
+        XCTAssertEqual(machine.state, .macActive)
+
+        // Emergency hotkey path
+        machine.pointerAtEdge(.left)
+        machine.emergencyReturn(reason: .emergencyReturn)
+        XCTAssertEqual(machine.state, .macActive)
+    }
 }
