@@ -92,14 +92,34 @@ final class AppModel: ObservableObject {
     nonisolated(unsafe) private var hidButtons: UInt8 = 0
     nonisolated(unsafe) private var moveCount: Int = 0
 
+    /// Monotonic gate for transition side effects. Transitions with a lower
+    /// or equal sequence are stale (their side effects already superseded by
+    /// a newer transition) and must be discarded — an old `.dexActive`
+    /// callback can never re-suppress the capture after a newer
+    /// `.error`/`.recovering` (see TransitionSequenceGate).
+    private var transitionGate = TransitionSequenceGate()
+    /// Current suppression generation, set when suppression starts.
+    /// Used to discard stale onSuppressionReleased callbacks.
+    private var currentSuppressionGeneration: UInt64 = 0
+
     init() {
         capture = InputCapture()
-        switchMachine = EdgeSwitchStateMachine()
-        switchMachine.onStateChange = { [weak self] newState in
+        // Opt-in diagnostic logging for edge-switch movement (metadata only:
+        // entryEdge, raw dx/dy, axis delta, virtual position, state). Never
+        // logs key codes, clipboard contents, or input payloads.
+        let diagnosticsEnabled = ProcessInfo.processInfo.environment["AMPER_EDGE_DIAG"] == "1"
+        switchMachine = EdgeSwitchStateMachine(isDiagnosticsEnabled: diagnosticsEnabled)
+        switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
-                Diagnostics.log("edge switch state -> \(newState.rawValue)")
-                self?.state = newState
-                self?.apply(state: newState)
+                guard let self else { return }
+                // Stale-transition guard: an older transition callback that
+                // arrives after a newer one must not overwrite newer side
+                // effects (e.g. a past `.dexActive` re-suppressing capture
+                // after a newer `.error` released it).
+                guard self.transitionGate.shouldApply(transition) else { return }
+                Diagnostics.log("edge transition \(transition.from.rawValue) -> \(transition.to.rawValue) reason=\(transition.reason.rawValue) sequence=\(transition.sequence)")
+                self.state = transition.to
+                self.apply(state: transition.to, reason: transition.reason)
             }
         }
         capture.onScreenEdge = { [weak self] edge in
@@ -112,14 +132,38 @@ final class AppModel: ObservableObject {
         capture.onKeyEvent = { [weak self] keyEvent in
             self?.onCapturedKeyEvent(keyEvent)
         }
-        capture.onSuppressionReleased = { [weak self] in
+capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
-                self?.phase = .ready
-                // Suppression was lifted by the emergency hotkey (⇧⌘X), the
-                // fail-safe watchdog, or the normal return path. If the state
-                // machine is still edgeArmed/dexActive, move it back to
-                // macActive so edge switching works again (no-op otherwise).
-                self?.switchMachine.emergencyReturn()
+                // Suppression was lifted. The phase must reflect the actual
+                // cause: a dead connection stays disconnected (idle/reconnect),
+                // a fatal error stays error, and only live-connection releases
+                // (normal return, watchdog, emergency hotkey) become ready.
+                // This mapping is the pure, tested SuppressionPhasePolicy —
+                // never collapse a real cause into a normal return (issue #37).
+                // Stale suppression-release callbacks (older generation) are discarded.
+                guard let self else { return }
+                guard generation == self.currentSuppressionGeneration else {
+                    Diagnostics.log("suppression released: discarding stale callback (gen \(generation), current \(self.currentSuppressionGeneration))")
+                    return
+                }
+                let outcome = SuppressionPhasePolicy.nextPhase(after: reason,
+                                                               isConnected: self.connection?.isConnected == true)
+                switch outcome {
+                case .idle: self.phase = .idle
+                case .ready: self.phase = .ready
+                case .error: self.phase = .error("helper fatal: suppression released after fatal error")
+                }
+                let machineReason: TransitionReason
+                switch reason {
+                case .watchdogTimeout: machineReason = .watchdogTimeout
+                case .emergencyHotkey: machineReason = .emergencyReturn
+                case .normalReturn: machineReason = .suppressionReleased
+                case .connectionLost: machineReason = .connectionLost
+                case .captureStopped: machineReason = .deactivated
+                case .fatalError: machineReason = .fatalError
+                }
+                self.switchMachine.emergencyReturn(reason: machineReason)
+                Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase) gen=\(generation)")
             }
         }
     }
@@ -163,7 +207,14 @@ final class AppModel: ObservableObject {
             }
         }
         connection = manager
-        switchMachine.activate()
+        // If the state machine is in a terminal .error state (from a prior fatal),
+        // explicitly recover through the documented lifecycle: deactivate -> activate.
+        if switchMachine.state == .error {
+            switchMachine.deactivate()
+            switchMachine.activate()
+        } else {
+            switchMachine.activate()
+        }
         do {
             try await manager.connect()
             switchMachine.connectionBegan()
@@ -174,7 +225,7 @@ final class AppModel: ObservableObject {
                 applyAutoSelection(list)
             }
             switchMachine.connectionReady()
-            phase = .ready
+            // phase is set via onStateChange callback when state reaches .macActive
             applyEdgeConfig()
             if enable() {
                 await setupHidDevice()
@@ -400,12 +451,29 @@ final class AppModel: ObservableObject {
 
     // MARK: - Pointer plumbing
 
-    private     func apply(state: SwitchState) {
+    /// Maps a state-machine transition reason to a suppression release reason so
+    /// the pointer-release path never collapses a real cause into `.normalReturn`.
+    private static func releaseReason(for reason: TransitionReason) -> SuppressionReleaseReason {
+        switch reason {
+        case .connectionLost: return .connectionLost
+        case .watchdogTimeout: return .watchdogTimeout
+        case .fatalError: return .fatalError
+        case .deactivated: return .captureStopped
+        case .emergencyReturn: return .emergencyHotkey
+        case .boundaryCrossed, .suppressionReleased, .edgeEntered,
+             .activation, .connectionBegan, .connectionReady:
+            return .normalReturn
+        }
+    }
+
+    private func apply(state: SwitchState, reason: TransitionReason) {
         switch state {
         case .dexActive:
-            capture.suppress()
+            if let gen = capture.suppress() {
+                currentSuppressionGeneration = gen
+            }
         case .macActive, .recovering, .disabled, .error:
-            capture.release()
+            capture.release(reason: Self.releaseReason(for: reason))
         default:
             break
         }
@@ -438,10 +506,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Runs on the capture thread (nonisolated): forward pointer events to the helper.
+    /// The state machine is fed inside send(event:) so its virtual position
+    /// always tracks the movement actually delivered to Android (UHID splitting
+    /// must not desync the two — issue #37 root cause analysis).
     nonisolated func onCapturedEvent(_ event: PointerEvent) {
         switch event.kind {
-        case let .move(dx, dy):
-            switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+        case .move:
             moveCount &+= 1
             if moveCount.isMultiple(of: 200) {
                 Diagnostics.log("captured moves: \(moveCount)")
@@ -472,9 +542,36 @@ final class AppModel: ObservableObject {
         if let deviceId = hidDeviceId {
             switch event.kind {
             case let .move(dx, dy):
-                let report = Self.hidReport(buttons: hidButtons, dx: dx, dy: dy, wheel: 0)
-                try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
-                                              payload: Messages.hidReport(deviceId: deviceId, report: report)))
+                // Split into HID-range reports so large deltas are never lost
+                // to Int8 clamping (HIDReportSplitter). The state machine must
+                // see exactly the movement delivered to Android — and only
+                // movement that was actually written to the helper: if a send
+                // throws (stream closed, broken pipe), the failed reports are
+                // skipped and only the delivered part is credited, so the
+                // virtual position never outruns the device (issue #37).
+                let movement = HIDReportSplitter.normalizeForHID(dx: dx, dy: dy)
+                var sentDx: Int32 = 0
+                var sentDy: Int32 = 0
+                for report in movement.reports {
+                    let payload = Self.hidReport(buttons: hidButtons,
+                                                 dx: Int32(report.dx), dy: Int32(report.dy), wheel: 0)
+                    do {
+                        try connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                                     payload: Messages.hidReport(deviceId: deviceId, report: payload)))
+                        sentDx += Int32(report.dx)
+                        sentDy += Int32(report.dy)
+                    } catch {
+                        Diagnostics.log("hid report send failed, crediting \(sentDx),\(sentDy): \(error)")
+                        break
+                    }
+                }
+                // A zero-zero delivered movement (no reports were generated,
+                // or every send failed) is not a real delivery: the state
+                // machine is not called at all, so the first-movement
+                // exemption and the virtual position stay untouched.
+                if sentDx != 0 || sentDy != 0 {
+                    switchMachine.pointerMoved(dx: CGFloat(sentDx), dy: CGFloat(sentDy))
+                }
             case let .button(button, down):
                 let bit = Self.hidButtonBit(for: button)
                 if down { hidButtons |= bit } else { hidButtons &= ~bit }
@@ -490,8 +587,16 @@ final class AppModel: ObservableObject {
         } else {
             switch event.kind {
             case let .move(dx, dy):
-                try? connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
-                                              payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
+                // SDK fallback: full Int32 deltas, delivered unchanged. The
+                // state machine is credited only when the frame was actually
+                // written to the helper.
+                do {
+                    try connection.send(CxiFrame(type: .pointerMoveRel, requestId: 1,
+                                                 payload: Messages.pointerMoveRel(dx: dx, dy: dy)))
+                    switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+                } catch {
+                    Diagnostics.log("pointerMoveRel send failed, movement not credited: \(error)")
+                }
             case let .button(button, down):
                 try? connection.send(CxiFrame(type: .pointerButton, requestId: 1,
                                               payload: Messages.pointerButton(button: button, down: down)))
@@ -512,7 +617,10 @@ final class AppModel: ObservableObject {
             if let fatal = try? Messages.decodeFatalError(frame.payload) {
                 Task { @MainActor in
                     phase = .error("helper fatal \(fatal.code): \(fatal.message)")
-                    switchMachine.connectionLost()
+                    // fatal() (not connectionLost()) keeps the machine in .error,
+                    // so the subsequent suppression release cannot collapse the
+                    // fatal cause into an idle/ready phase (SuppressionPhasePolicy).
+                    switchMachine.fatal()
                 }
             }
         case .displayChanged:
