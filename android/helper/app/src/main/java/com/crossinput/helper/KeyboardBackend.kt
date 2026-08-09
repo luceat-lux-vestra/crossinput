@@ -17,14 +17,21 @@ import java.lang.reflect.Method
  * descriptor (protocol.md). If creation fails, or a report write fails, the
  * backend switches to virtual injection for the rest of the session and logs
  * the switch (metadata only — no key payloads, AGENTS.md rule 4).
+ *
+ * Test-only deterministic override via KeyboardBackendMode:
+ * - AUTO: UHID preferred, fallback to InputManager on failure (production default)
+ * - UHID: Force UHID; failure is logged and reported, no silent fallback
+ * - INPUT_MANAGER: Force InputManager virtual injection; failure is logged and reported, no silent fallback
  */
 class KeyboardBackend(
     private val log: Logger,
     private val context: Context,
     private val hid: HidDeviceManager,
+    private val mode: KeyboardBackendMode = KeyboardBackendMode.AUTO,
 ) {
     private var uhidDeviceId: Int? = null
     private var uhidBroken = false
+    private var inputManagerUnavailable = false
 
     /** HID usages currently pressed (UHID keyboard reports current state, not transitions). */
     private val pressedUsages = LinkedHashSet<Int>()
@@ -32,7 +39,25 @@ class KeyboardBackend(
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
 
     init {
-        tryCreateUhid()
+        when (mode) {
+            KeyboardBackendMode.AUTO -> {
+                log.info("KeyboardBackend", "keyboard backend selected backend=uhid mode=auto")
+                tryCreateUhid()
+            }
+            KeyboardBackendMode.UHID -> {
+                log.info("KeyboardBackend", "keyboard backend selected backend=uhid mode=forced")
+                tryCreateUhid()
+                if (uhidBroken) {
+                    log.error("KeyboardBackend", "UHID keyboard creation failed in forced UHID mode; keyboard unavailable")
+                }
+            }
+            KeyboardBackendMode.INPUT_MANAGER -> {
+                log.info("KeyboardBackend", "keyboard backend selected backend=input-manager mode=forced")
+                // In forced InputManager mode, don't create UHID at all
+                uhidBroken = true
+                checkInputManagerAvailable()
+            }
+        }
     }
 
     private fun tryCreateUhid() {
@@ -50,29 +75,75 @@ class KeyboardBackend(
         )
     }
 
-    /** Sends one key transition. Falls back to virtual injection on any UHID failure. */
-    fun keyEvent(event: Messages.KeyEvent) {
-        val deviceId = uhidDeviceId
-        if (deviceId != null && !uhidBroken) {
-            val usage = KeyboardHidMapper.usageOf(event.keyCode)
-            if (usage != null) {
-                val isDown = event.action == 0
-                if (isDown) pressedUsages.add(usage) else pressedUsages.remove(usage)
-                val modifier = KeyboardHidMapper.modifierOf(event.metaState)
-                val report = KeyboardHidMapper.buildReport(modifier, pressedUsages.toList())
-                if (hid.sendReport(deviceId, report)) return
-                uhidBroken = true
-                pressedUsages.clear()
-                log.warn("KeyboardBackend", "UHID report failed; switching to virtual fallback")
-            }
-            // Unmappable keyCode (e.g. non-US layout keys) → fall through to virtual injection
+    private fun checkInputManagerAvailable() {
+        if (injectInputEventMethod == null) {
+            inputManagerUnavailable = true
+            log.error("KeyboardBackend", "InputManager virtual injection unavailable (reflection lookup failed); keyboard unavailable")
         }
-        injectVirtual(event)
+    }
+
+    /** Sends one key transition. Backend selection is determined by mode. */
+    fun keyEvent(event: Messages.KeyEvent) {
+        when (mode) {
+            KeyboardBackendMode.AUTO -> {
+                // AUTO: try UHID first, fall back to virtual on any failure
+                val deviceId = uhidDeviceId
+                if (deviceId != null && !uhidBroken) {
+                    val usage = KeyboardHidMapper.usageOf(event.keyCode)
+                    if (usage != null) {
+                        val isDown = event.action == 0
+                        if (isDown) pressedUsages.add(usage) else pressedUsages.remove(usage)
+                        val modifier = KeyboardHidMapper.modifierOf(event.metaState)
+                        val report = KeyboardHidMapper.buildReport(modifier, pressedUsages.toList())
+                        if (hid.sendReport(deviceId, report)) return
+                        uhidBroken = true
+                        pressedUsages.clear()
+                        log.warn("KeyboardBackend", "UHID report failed; switching to virtual fallback")
+                    }
+                    // Unmappable keyCode (e.g. non-US layout keys) → fall through to virtual injection
+                }
+                injectVirtual(event)
+            }
+            KeyboardBackendMode.UHID -> {
+                // UHID forced: only use UHID, fail safely if unavailable
+                val deviceId = uhidDeviceId
+                if (deviceId != null && !uhidBroken) {
+                    val usage = KeyboardHidMapper.usageOf(event.keyCode)
+                    if (usage != null) {
+                        val isDown = event.action == 0
+                        if (isDown) pressedUsages.add(usage) else pressedUsages.remove(usage)
+                        val modifier = KeyboardHidMapper.modifierOf(event.metaState)
+                        val report = KeyboardHidMapper.buildReport(modifier, pressedUsages.toList())
+                        if (hid.sendReport(deviceId, report)) return
+                        uhidBroken = true
+                        pressedUsages.clear()
+                        log.error("KeyboardBackend", "UHID report failed in forced UHID mode; key event dropped")
+                        return
+                    }
+                    // Unmappable keyCode → drop (no fallback in forced mode)
+                    log.warn("KeyboardBackend", "KeyCode not mappable to HID usage in forced UHID mode; key event dropped")
+                    return
+                }
+                // UHID unavailable
+                log.error("KeyboardBackend", "UHID keyboard unavailable in forced UHID mode; key event dropped")
+            }
+            KeyboardBackendMode.INPUT_MANAGER -> {
+                // INPUT_MANAGER forced: only use virtual injection
+                if (inputManagerUnavailable) {
+                    log.error("KeyboardBackend", "InputManager virtual injection unavailable in forced InputManager mode; key event dropped")
+                    return
+                }
+                injectVirtual(event)
+            }
+        }
     }
 
     private fun injectVirtual(event: Messages.KeyEvent) {
         if (injectInputEventMethod == null) {
-            log.error("KeyboardBackend", "Virtual key injection unavailable; input event dropped")
+            if (!inputManagerUnavailable) {
+                inputManagerUnavailable = true
+                log.error("KeyboardBackend", "Virtual key injection unavailable; input event dropped")
+            }
             return
         }
         val now = SystemClock.uptimeMillis()

@@ -78,9 +78,8 @@ Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check
 ### Virtual-injection fallback verification (Status: Pending on-device)
 
 The InputManager virtual-injection fallback is implemented but has **not yet
-been exercised on a physical device** (issue #33). When a test-only backend
-override exists, run this procedure (until then, the override itself is tracked
-in issue #33):
+been exercised on a physical device** (issue #33). A test-only backend
+override now exists (`--keyboard-backend=input-manager`). To run the verification:
 
 1. Force the fallback backend via the test-only override; helper log must show the fallback engaged.
 2. Select a focused text field on the DeX display.
@@ -89,8 +88,22 @@ in issue #33):
 5. Confirm no repeated input after release, and that shutdown leaves no stuck key state.
 6. Attach logcat/screen evidence; confirm the logs contain metadata only (no key codes or payloads; hard rule 4).
 
-A forced-selection switch does not exist yet — a test-only override has been
-filed as part of issue #33; do not invent ad-hoc commands for this.
+Launch the helper with the override (manual):
+```sh
+adb shell app_process -cp /data/local/tmp/crossinput-helper.apk / com.crossinput.helper.Main --keyboard-backend=input-manager
+```
+
+Or via deploy-helper.sh (environment variable):
+```sh
+KEYBOARD_BACKEND=input-manager scripts/deploy-helper.sh start
+```
+The log must show: `keyboard backend selected backend=input-manager mode=forced`
+
+Automated tests for backend selection are in `KeyboardBackendTest.kt` and cover:
+- Default AUTO mode (UHID preferred with automatic fallback)
+- Forced UHID mode (never falls back to virtual)
+- Forced InputManager mode (never uses UHID)
+- Failure scenarios (InputManager unavailable, SecurityException, etc.)
 
 ### Verification items (Phase 2)
 

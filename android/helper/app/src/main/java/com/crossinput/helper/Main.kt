@@ -33,6 +33,8 @@ object Main {
         val writerLock = WriterLock(writer)
         val log = Logger(writerLock)
 
+        val mode = parseKeyboardBackendMode(args, log)
+
         val context = systemContext()
         if (context == null) {
             log.error("Main", "no system context (ActivityThread unavailable); aborting")
@@ -41,7 +43,7 @@ object Main {
         val sdkPointer = SdkPointerBackend(log, context)
         val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
-        val keyboard = KeyboardBackend(log, context, hid)
+        val keyboard = KeyboardBackend(log, context, hid, mode)
         val controller = Controller(discovery, hid, sdkPointer, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
@@ -76,6 +78,40 @@ object Main {
     }
 
     /**
+     * Parses the --keyboard-backend command-line argument.
+     * Default: auto (UHID preferred, fallback to InputManager on failure).
+     * Values: auto | uhid | input-manager
+     */
+    private fun parseKeyboardBackendMode(args: Array<out String>, log: Logger): KeyboardBackendMode {
+        var mode = KeyboardBackendMode.AUTO
+        var i = 0
+        while (i < args.size) {
+            val arg = args[i]
+            if (arg == "--keyboard-backend") {
+                i++
+                if (i >= args.size) {
+                    log.error("Main", "--keyboard-backend requires a value (auto|uhid|input-manager)")
+                    System.exit(1)
+                }
+                val value = args[i].lowercase()
+                mode = when (value) {
+                    "auto" -> KeyboardBackendMode.AUTO
+                    "uhid" -> KeyboardBackendMode.UHID
+                    "input-manager" -> KeyboardBackendMode.INPUT_MANAGER
+                    else -> {
+                        log.error("Main", "invalid --keyboard-backend value: $value (expected auto|uhid|input-manager)")
+                        System.exit(1)
+                        KeyboardBackendMode.AUTO // unreachable
+                    }
+                }
+            }
+            i++
+        }
+        log.info("Main", "keyboard backend mode=$mode")
+        return mode
+    }
+
+    /**
      * ActivityThread is not in the public SDK; obtain the system context via
      * reflection (app_process shell execution, as proven by scrcpy).
      */
@@ -89,6 +125,16 @@ object Main {
             null
         }
     }
+}
+
+/**
+ * Keyboard backend selection mode.
+ * Test-only deterministic override; not a user-facing preference.
+ */
+enum class KeyboardBackendMode {
+    AUTO,           // UHID preferred, fallback to InputManager on failure (production default)
+    UHID,           // Force UHID; fail safely if unavailable
+    INPUT_MANAGER   // Force InputManager virtual injection; fail safely if unavailable
 }
 
 /** Frame dispatch. All writes go through [WriterLock]. */
@@ -180,8 +226,8 @@ class Controller(
 
     private fun handleSelectDisplay(frame: Frame) {
         val displayId = Messages.selectDisplayId(frame.payload)
-        val display = discovery.find(displayId)
-        if (display == null) {
+        val displayInfo = discovery.find(displayId)
+        if (displayInfo == null) {
             log.error("Main", "unknown display id=$displayId")
             writerLock.withLock {
                 it.write(
@@ -207,7 +253,7 @@ class Controller(
         sdkPointer.selectDisplay(raw)
         log.info("Main", "selected display id=$displayId (SDK pointer backend)")
         writerLock.withLock {
-            it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(display))
+            it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(displayInfo))
         }
     }
 

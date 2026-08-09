@@ -27,13 +27,15 @@
 # Canonical frame bytes for fixtures live in protocol/fixtures/*.bin
 # (e.g. `xxd -p protocol/fixtures/create-hid.bin | tr -d '\n'`).
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 REMOTE_APK="/data/local/tmp/crossinput-helper.apk"
 REMOTE_IN="/data/local/tmp/cxi-helper-stdin"
 REMOTE_OUT="/data/local/tmp/cxi-helper-stdout.bin"
 REMOTE_LOG="/data/local/tmp/cxi-helper.log"
+
+# Keyboard backend override (test-only): auto|uhid|input-manager
+KEYBOARD_BACKEND="${KEYBOARD_BACKEND:-auto}"
 
 # CXI frame presets (15-byte little-endian header; AGENTS.md rule 6 — keep in
 # sync with protocol/protocol.md). Header: "CXI" + version u16 + type u16 +
@@ -71,7 +73,6 @@ deploy() {
     adb -s "$DEVICE" push "$APK" "$REMOTE_APK" >/dev/null
     echo "deployed: $REMOTE_APK"
 }
-
 start() {
     kill_orphans
     deploy
@@ -79,8 +80,10 @@ start() {
     # Probe-style detached launch (Phase 0 pattern): tail -f holds the helper
     # stdin open and streams appended bytes; nohup keeps it alive after the
     # adb session ends. tail dies with SIGPIPE when the helper exits.
+    # Pass --keyboard-backend override for test-only deterministic selection
+    local kb_arg="--keyboard-backend=$KEYBOARD_BACKEND"
     adb -s "$DEVICE" shell \
-        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
+        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
     sleep 2
     if ! helper_running; then
         echo "helper failed to start — stderr log:" >&2
@@ -89,8 +92,8 @@ start() {
     fi
     echo "device: $DEVICE"
     echo "helper running (stdin <- tail -f $REMOTE_IN; stdout -> $REMOTE_OUT, stderr -> $REMOTE_LOG)"
+    echo "keyboard backend: $KEYBOARD_BACKEND"
     echo "next: scripts/deploy-helper.sh list"
-}
 
 helper_running() {
     adb -s "$DEVICE" shell "ps -A -o ARGS" | grep -q "crossinput-helper.apk"
@@ -188,3 +191,4 @@ case "$mode" in
         exit 1
         ;;
 esac
+

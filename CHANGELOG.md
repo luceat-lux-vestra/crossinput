@@ -5,7 +5,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- Test-only deterministic keyboard backend override: `--keyboard-backend=uhid|input-manager|auto` argument for the Android helper; enables forced selection of UHID or InputManager virtual-injection backend for testing; production default remains AUTO (UHID preferred with automatic fallback)
+- Metadata-only logging for keyboard backend selection: `keyboard backend selected backend=uhid|input-manager mode=auto|forced`
+- Unit tests for KeyboardBackend backend selection, forced mode semantics, and HID mapper behavior
+
+### Changed
+
+- KeyboardBackend now honors forced backend selection: forced UHID never falls back to virtual injection; forced InputManager never uses UHID; failures in forced modes are logged and reported safely without silent fallback
 
 ## [0.1.0] - 2026-08-05
 

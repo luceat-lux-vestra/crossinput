@@ -18,7 +18,7 @@
 | 6 | Menu bar app + onboarding | settings/status UI + wireless debugging pairing guide | ✅ done |
 | 7 | Recovery & performance | sleep/wake, permission revocation, error recovery | 🔶 auto-reconnect done; sleep/wake edge cases open |
 | 8 | Distribution | **v0.1.0 shipped**: `Ampersand-0.1.0.dmg` on GitHub Releases, ad-hoc signed (ADR-0008). Open: Homebrew tap (ADR-0005), adb bundling (ADR-0004), notarization when a Developer ID exists | ✅ v0.1.0 shipped 🔶 |
-| 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | 🔶 UHID path verified on-device; InputManager fallback on-device verification pending |
+| 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | 🔶 UHID path verified on-device; InputManager fallback on-device verification pending; test-only override + unit tests done |
 
 ## Phase 9: Keyboard extension — partially done
 
@@ -29,7 +29,8 @@ Completion criteria split (per ADR-0007):
 - **macOS system-shortcut suppression while captured** — done, verified on device (PR #25)
 - **Korean 2-set composition via Android IME** — done, verified on device
 - **InputManager virtual-injection fallback** — implemented, unit/build validated, **on-device verification pending** (issue #33)
-
+- **Test-only deterministic backend override** — `--keyboard-backend=uhid|input-manager|auto` implemented; enables forced backend selection for testing; production default remains AUTO
+- **Automated backend-selection tests** — `KeyboardBackendTest.kt` covers default AUTO, forced UHID, forced InputManager, and failure scenarios
 ## Phase 0: UHID input verification — done
 
 **Result: category A — UHID relative mouse fully controls the DeX external display.** (SM-G977N, Android 12)
