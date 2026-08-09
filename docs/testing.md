@@ -111,5 +111,51 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 10 | InputManager virtual-injection fallback | Fallback engaged (forced), single char + modifier, no repeat, no stuck keys, shutdown clean | ⏳ pending (issue #33) |
 
 ## Edge switching stability (Phase 5)
+
 - Not declared complete until 100 consecutive edge-switch repeat tests pass.
 - For each failure case, verify state machine logs + recovery path.
+
+### A/B comparison protocol (origin/main vs fix branch, issue #37 / PR #38)
+
+Goal: prove the left-edge immediate-return defect is reproduced on `origin/main`
+and not on the fix branch, under identical conditions. If both branches behave
+identically, the root cause is not yet found — do not claim otherwise.
+
+1. **Same conditions for both branches**: same Mac, same physical mouse, same
+   Android device, same DeX display, same configured edge(s), same TCC grants
+   (Accessibility + Input Monitoring; re-grant after every re-sign — the grant
+   is per-signature), same installed bundle path, same helper APK.
+2. **Clean build per branch** (no shared build cache):
+   ```sh
+   git worktree add /tmp/amper-ab origin/main
+   cd /tmp/amper-ab/apps/macos && swift build -c release
+   cp .build/release/Ampersand /Applications/Ampersand.app/Contents/MacOS/Ampersand
+   codesign --force --deep --sign - /Applications/Ampersand.app
+   killall Ampersand; open /Applications/Ampersand.app
+   ```
+   Repeat the same steps on the fix branch.
+3. **Capture a real trace**: with `launchctl setenv AMPER_EDGE_DIAG 1`, reproduce
+   the failing maneuver; collect the first 20–50 pointer-move events
+   (`entryEdge=left`, per-event raw dx/dy, axis delta, position, state). Log
+   metadata only (hard rule 4).
+4. **Feed the same trace to both**: run the captured trace through the unit-test
+   fixture on each branch and compare the state transitions. Accept:
+   - origin/main: reproduces immediate return (failure)
+   - fix branch: stays `dexActive` while moving into Android; returns only past
+     the boundary + hysteresis
+   Identical behavior on both branches ⇒ root cause not found; stop and
+   investigate before continuing.
+5. **Record the transition reason** for every return:
+   `edge transition <from> -> <to> reason=<cause>`. The left-edge return must
+   be `reason=boundaryCrossed` (never watchdog/connection/suppression paths).
+
+### Four-direction trace collection (top/bottom sign validation)
+
+For each edge (left, right, top, bottom) capture diag.log excerpts covering:
+(1) movement toward Android, (2) movement inside Android, (3) pull-back toward
+macOS, (4) reaching the boundary, (5) crossing the hysteresis threshold,
+(6) `macActive` transition with reason. Validate the invariant on all four
+edges: `axisDelta > 0` while moving into Android, `axisDelta < 0` while
+pulling back toward macOS. The top/bottom directions were inverted in
+origin/main (returning while moving *into* Android); the fix branch must show
+the invariant holds everywhere.
