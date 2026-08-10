@@ -14,6 +14,7 @@ import java.io.BufferedOutputStream
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Android helper entry point (Phase 2).
@@ -27,6 +28,8 @@ object Main {
     @JvmStatic
     fun main(vararg args: String) {
         Looper.prepare()
+        val mainLooper = Looper.myLooper()
+            ?: error("main looper unavailable after Looper.prepare()")
 
         val stdout = BufferedOutputStream(FileOutputStream(FileDescriptor.out), 8192)
         val writer = FrameWriter(stdout)
@@ -49,6 +52,12 @@ object Main {
         val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
         val keyboard = KeyboardBackend(log, context, hid, mode)
+        val lifecycle = MainShutdownLifecycle(
+            requestMainLoopQuit = { mainLooper.quitSafely() },
+            destroyKeyboard = keyboard::destroy,
+            destroyHid = hid::destroyAll,
+            flush = { writerLock.withLock { it.flush() } },
+        )
         val controller = Controller(discovery, hid, sdkPointer, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
@@ -66,9 +75,7 @@ object Main {
                 log.error("Main", "stdin thread crashed: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
                 log.info("Main", "stdin closed; shutting down")
-                hid.destroyAll()
-                keyboard.destroy()
-                Looper.myLooper()?.quitSafely()
+                lifecycle.requestQuit()
             }
         }
         stdinThread.name = "cxi-stdin"
@@ -76,9 +83,7 @@ object Main {
 
         Looper.loop()
 
-        hid.destroyAll()
-        keyboard.destroy()
-        writerLock.withLock { it.flush() }
+        lifecycle.cleanupOnce()
         System.exit(0)
     }
 
@@ -94,6 +99,38 @@ object Main {
         } catch (t: Throwable) {
             System.err.println("[Main] system context unavailable: ${t.javaClass.simpleName}: ${t.message}")
             null
+        }
+    }
+}
+
+/**
+ * Coordinates the two-thread shutdown boundary without owning Android
+ * framework objects. The stdin worker requests main-loop termination; only the
+ * main thread performs cleanup after [Looper.loop] returns.
+ */
+class MainShutdownLifecycle(
+    private val requestMainLoopQuit: () -> Unit,
+    private val destroyKeyboard: () -> Unit,
+    private val destroyHid: () -> Unit,
+    private val flush: () -> Unit,
+) {
+    private val quitRequested = AtomicBoolean(false)
+    private val cleanupStarted = AtomicBoolean(false)
+
+    fun requestQuit() {
+        if (quitRequested.compareAndSet(false, true)) requestMainLoopQuit()
+    }
+
+    fun cleanupOnce() {
+        if (!cleanupStarted.compareAndSet(false, true)) return
+        try {
+            destroyKeyboard()
+        } finally {
+            try {
+                destroyHid()
+            } finally {
+                flush()
+            }
         }
     }
 }

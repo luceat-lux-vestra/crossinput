@@ -73,7 +73,7 @@ Completion criteria split (per ADR-0007):
 
 - 2026-08-05: **v0.1.0 released** — `Ampersand-0.1.0.dmg` on GitHub Releases (PR #28): ad-hoc signed + DMG packaging (ADR-0008), `release.yml` CI publishing on v* tags, README install docs, CHANGELOG.
 - 2026-08-05: keyboard extension primary path complete (ADR-0007, Phase 9) — UHID keyboard (PR #23–#26), macOS system-shortcut suppression, Korean 2-set; infinite key-repeat fixed on the UHID path (key-state reporting); verified on device (SM-G977N). InputManager virtual-injection fallback implemented but not yet exercised on a physical device (issue #33)
-- 2026-08-10: InputManager virtual-injection keyboard fallback verified on SM-G977N / Android 12 (PR #40): forced backend selection, single key delivery, modifier delivery, no repeat after release, metadata-only logging, and clean shutdown passed; failure-path safety remains covered by unit tests.
+- 2026-08-10: InputManager virtual-injection keyboard fallback verified on SM-G977N / Android 12 (PR #40): forced backend selection, single key delivery, modifier delivery, no repeat after release, metadata-only logging, held-key synthetic release during SHUTDOWN, and graceful process-exit detection passed; failure-path safety remains covered by unit tests.
 - 2026-08-04: display handling work committed (commit 65c4766): DISPLAY_CHANGED live update, manual Refresh Displays, stale-list clearing on connect/disconnect, wireless auto-reconnect; per-display list refresh remains manual for now, auto-update tracked as issue #17
 - 2026-08-03: environment check complete (SM-G977N, Android 12, wireless ADB connected, DeX active — display 0 phone / 2 Desktop / 6 HDMI)
 - 2026-08-03: leap-scrcpy server APK built (`app-debug.apk` 5.8MB), client built (`pnpm build`)

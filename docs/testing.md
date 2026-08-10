@@ -87,16 +87,25 @@ fallback deterministically:
 3. Send a single key down/up pair — exactly one character must appear (no repeat, no stuck key).
 4. Repeat with a modifier combination (e.g. Shift+letter).
 5. Confirm no repeated input after release, and that shutdown leaves no stuck key state.
-6. Attach logcat/screen evidence; confirm the logs contain metadata only (no key codes or payloads; hard rule 4).
+6. Repeat the test with only the key-down fixture, omit the key-up fixture, and
+   send SHUTDOWN; the helper must synthesize the release and the focused field
+   must not repeat after shutdown.
+7. Confirm `scripts/deploy-helper.sh stop` reports graceful completion only
+   after the actual helper process exits; force cleanup is permitted only after
+   that success decision or after a bounded timeout with preserved diagnostics.
+8. Attach logcat/screen evidence; confirm the logs contain metadata only (no key codes or payloads; hard rule 4).
 
 Verification result (2026-08-10): the forced-backend marker was present; a
 single key down/up pair produced exactly one character in the focused DeX
 search field; a modifier combination produced exactly one additional
 character; the field was unchanged after a delayed capture; and shutdown left
-no helper or stdin-feeder process running. The captured helper log contained
-backend, display, and protocol metadata only. API-unavailable and
-`SecurityException` fail-safe behavior remains covered by the Android unit
-tests, which passed in the same build.
+no helper or stdin-feeder process running. A held-key run sent only DOWN before
+SHUTDOWN; the field remained unchanged after shutdown and a delayed capture,
+and the stop command returned success after graceful `app_process` exit. The
+captured helper log contained backend, display, and protocol metadata only.
+API-unavailable, rejected-injection, and `SecurityException` fail-safe
+behavior remains covered by the Android unit tests, which passed in the same
+build.
 
 Launch the helper with the override (manual). Both spellings are accepted:
 ```sh

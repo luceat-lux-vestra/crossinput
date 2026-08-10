@@ -11,12 +11,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Metadata-only logging for keyboard backend selection: `keyboard backend selected backend=uhid|input-manager mode=auto|forced`, reporting the backend that actually came up
 - Unit tests for keyboard backend selection, forced-mode semantics, failure paths, metadata-only logging, and override parsing
 - CI guard: shell scripts are syntax-checked (`bash -n`)
-- Physical-device verification of the forced InputManager keyboard fallback on SM-G977N / Android 12; single key delivery, modifier delivery, release behavior, and clean shutdown passed
+- Physical-device verification of the forced InputManager keyboard fallback on SM-G977N / Android 12; single key delivery, modifier delivery, release behavior, held-key synthetic release during SHUTDOWN, and graceful process termination passed
 
 ### Changed
 
 - KeyboardBackend now honors forced backend selection: forced UHID never falls back to virtual injection; forced InputManager never uses UHID; failures in forced modes are logged and reported safely without silent fallback
 - Virtual key injection moved behind a `VirtualKeyInjector` seam so the fallback path is testable off-device, and a `SecurityException` from the hidden API is now logged by its own class name instead of `InvocationTargetException`
+- Helper shutdown now captures the main looper before starting the stdin worker, performs keyboard cleanup before HID cleanup on the main thread, and releases accepted virtual key-down events before teardown; the deploy helper waits for the actual `app_process` to exit before orphan cleanup
 
 ## [0.1.0] - 2026-08-05
 

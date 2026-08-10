@@ -102,6 +102,9 @@ class KeyboardBackend(
     /** HID usages currently pressed (UHID keyboard reports current state, not transitions). */
     private val pressedUsages = LinkedHashSet<Int>()
 
+    /** Accepted virtual key-down events awaiting an accepted key-up. */
+    private val pressedVirtualKeys = LinkedHashMap<Int, Messages.KeyEvent>()
+
     init {
         when (mode) {
             KeyboardBackendMode.AUTO -> {
@@ -190,7 +193,14 @@ class KeyboardBackend(
             return
         }
         try {
-            if (!injector.inject(event)) log.warn(TAG, "virtual key injection was rejected")
+            if (!injector.inject(event)) {
+                log.warn(TAG, "virtual key injection was rejected")
+                return
+            }
+            when (event.action) {
+                0 -> pressedVirtualKeys[event.keyCode] = event
+                1 -> pressedVirtualKeys.remove(event.keyCode)
+            }
         } catch (t: Throwable) {
             // Fail safe: the session stays alive, the event is dropped, and only
             // the exception class name is logged (AGENTS.md rule 4).
@@ -198,7 +208,17 @@ class KeyboardBackend(
         }
     }
 
+    private fun releaseVirtualKeys() {
+        // Snapshot the values: successful synthetic UPs remove entries from the
+        // live map, while rejected/exceptional UPs intentionally remain held so
+        // a later idempotent destroy can retry them.
+        for (held in pressedVirtualKeys.values.toList()) {
+            injectVirtual(Messages.KeyEvent(held.keyCode, held.metaState, 1, 0))
+        }
+    }
+
     fun destroy() {
+        releaseVirtualKeys()
         if (pressedUsages.isNotEmpty()) {
             // Release any keys still reported as pressed so the keyboard state
             // doesn't hang after the device is torn down.

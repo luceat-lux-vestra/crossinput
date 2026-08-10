@@ -48,6 +48,20 @@ class KeyboardBackendTest {
         }
     }
 
+    private class FailFirstReleaseInjector : VirtualKeyInjector {
+        override val available: Boolean = true
+        val events = mutableListOf<Messages.KeyEvent>()
+        private var releaseAttempts = 0
+
+        override fun inject(event: Messages.KeyEvent): Boolean {
+            events += event
+            if (event.action == 1 && releaseAttempts++ == 0) {
+                throw SecurityException("release rejected")
+            }
+            return true
+        }
+    }
+
     private fun backend(
         mode: KeyboardBackendMode,
         injector: VirtualKeyInjector = FakeInjector(),
@@ -124,6 +138,17 @@ class KeyboardBackendTest {
     }
 
     @Test
+    fun autoFallbackReleasesAcceptedVirtualDownOnDestroy() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.AUTO, injector, uhidId = null)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.destroy()
+
+        assertEquals(listOf(0, 1), injector.events.map { it.action })
+    }
+
+    @Test
     fun autoRoutesUnmappableKeyCodesToVirtualInjection() {
         val injector = FakeInjector()
         val backend = backend(KeyboardBackendMode.AUTO, injector)
@@ -183,6 +208,52 @@ class KeyboardBackendTest {
         verify(hid, never()).sendReport(any(), any())
         assertEquals(listOf(0, 1), injector.events.map { it.action }) // exactly one down, one up
         assertTrue(logged().contains("keyboard backend selected backend=input-manager mode=forced"))
+    }
+
+    @Test
+    fun forcedInputManagerDestroySynthesizesOneUpForAcceptedDown() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.destroy()
+
+        assertEquals(listOf(0, 1), injector.events.map { it.action })
+    }
+
+    @Test
+    fun acceptedVirtualUpPreventsDuplicateUpDuringDestroy() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+        backend.destroy()
+
+        assertEquals(listOf(0, 1), injector.events.map { it.action })
+    }
+
+    @Test
+    fun failedVirtualCleanupUpDoesNotAbortRemainingKeysAndCanBeRetried() {
+        val injector = FailFirstReleaseInjector()
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.keyEvent(down(KeyEvent.KEYCODE_B))
+        backend.destroy()
+
+        // The first UP fails, but the second held key is still attempted.
+        assertEquals(listOf(0, 0, 1, 1), injector.events.map { it.action })
+        assertTrue(logged().any { it.contains("SecurityException") })
+        for (message in logged()) {
+            assertFalse(message.contains("keyCode"))
+            assertFalse(message.contains("metaState"))
+            assertFalse(message.contains("payload"))
+        }
+
+        // The failed key remains held and is retried by an idempotent destroy.
+        backend.destroy()
+        assertEquals(listOf(0, 0, 1, 1, 1), injector.events.map { it.action })
     }
 
     @Test
