@@ -1,0 +1,4 @@
+[Main] keyboard backend mode=input-manager
+[KeyboardBackend] keyboard backend selected backend=input-manager mode=forced
+[Main] shutdown requested
+[Main] stdin closed; shutting down

@@ -5,6 +5,10 @@ Device: Samsung Galaxy S10 5G (SM-G977N), Android 12 / API 31
 Issue: #33
 Pull request: #40
 
+Code commit: `1a9f5c8`
+
+CI: [run #77](https://github.com/luceat-lux-vestra/crossinput/actions/runs/31396421980) — all checks green
+
 ## Scope
 
 Verify the Android helper's test-only forced `input-manager` backend on a
@@ -49,6 +53,10 @@ held key when SHUTDOWN arrives without a key-up message.
 - InputManager API-unavailable, rejected-injection, and `SecurityException`
   fail-safe behavior passed in the Android unit tests in the same build. These
   failure branches were not artificially triggered on the physical device.
+
+Attached held-key evidence is preserved in
+[`docs/research/evidence/inputmanager-held-key-2026-08-10/`](evidence/inputmanager-held-key-2026-08-10/):
+three whole-image screen captures and the ADB-pulled helper stop log.
 
 ## Reproduction commands
 

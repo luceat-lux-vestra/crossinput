@@ -105,7 +105,8 @@ and the stop command returned success after graceful `app_process` exit. The
 captured helper log contained backend, display, and protocol metadata only.
 API-unavailable, rejected-injection, and `SecurityException` fail-safe
 behavior remains covered by the Android unit tests, which passed in the same
-build.
+build. Screen and ADB-pulled log evidence is preserved in
+[`docs/research/evidence/inputmanager-held-key-2026-08-10/`](research/evidence/inputmanager-held-key-2026-08-10/).
 
 Launch the helper with the override (manual). Both spellings are accepted:
 ```sh
