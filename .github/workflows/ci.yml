@@ -50,3 +50,14 @@ jobs:
       - name: Protocol Document Fixture Validation
         run: |
           node protocol/scripts/check-fixtures.mjs
+
+  scripts:
+    name: Shell Script Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The on-device drivers are not exercised by any other job; an unbalanced
+      # brace here only surfaces at verification time on a real device.
+      - name: "bash -n"
+        run: |
+          find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n

@@ -14,6 +14,7 @@ import java.io.BufferedOutputStream
 import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Android helper entry point (Phase 2).
@@ -27,11 +28,20 @@ object Main {
     @JvmStatic
     fun main(vararg args: String) {
         Looper.prepare()
+        val mainLooper = Looper.myLooper()
+            ?: error("main looper unavailable after Looper.prepare()")
 
         val stdout = BufferedOutputStream(FileOutputStream(FileDescriptor.out), 8192)
         val writer = FrameWriter(stdout)
         val writerLock = WriterLock(writer)
         val log = Logger(writerLock)
+
+        val mode = KeyboardBackendMode.fromArgs(args).getOrElse {
+            log.error("Main", it.message ?: "invalid ${KeyboardBackendMode.FLAG} argument")
+            System.exit(2)
+            return
+        }
+        log.info("Main", "keyboard backend mode=${mode.token}")
 
         val context = systemContext()
         if (context == null) {
@@ -41,7 +51,13 @@ object Main {
         val sdkPointer = SdkPointerBackend(log, context)
         val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
-        val keyboard = KeyboardBackend(log, context, hid)
+        val keyboard = KeyboardBackend(log, context, hid, mode)
+        val lifecycle = MainShutdownLifecycle(
+            requestMainLoopQuit = { mainLooper.quitSafely() },
+            destroyKeyboard = keyboard::destroy,
+            destroyHid = hid::destroyAll,
+            flush = { writerLock.withLock { it.flush() } },
+        )
         val controller = Controller(discovery, hid, sdkPointer, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
@@ -59,9 +75,7 @@ object Main {
                 log.error("Main", "stdin thread crashed: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
                 log.info("Main", "stdin closed; shutting down")
-                hid.destroyAll()
-                keyboard.destroy()
-                Looper.myLooper()?.quitSafely()
+                lifecycle.requestQuit()
             }
         }
         stdinThread.name = "cxi-stdin"
@@ -69,9 +83,7 @@ object Main {
 
         Looper.loop()
 
-        hid.destroyAll()
-        keyboard.destroy()
-        writerLock.withLock { it.flush() }
+        lifecycle.cleanupOnce()
         System.exit(0)
     }
 
@@ -88,6 +100,94 @@ object Main {
             System.err.println("[Main] system context unavailable: ${t.javaClass.simpleName}: ${t.message}")
             null
         }
+    }
+}
+
+/**
+ * Coordinates the two-thread shutdown boundary without owning Android
+ * framework objects. The stdin worker requests main-loop termination; only the
+ * main thread performs cleanup after [Looper.loop] returns.
+ */
+class MainShutdownLifecycle(
+    private val requestMainLoopQuit: () -> Unit,
+    private val destroyKeyboard: () -> Unit,
+    private val destroyHid: () -> Unit,
+    private val flush: () -> Unit,
+) {
+    private val quitRequested = AtomicBoolean(false)
+    private val cleanupStarted = AtomicBoolean(false)
+
+    fun requestQuit() {
+        if (quitRequested.compareAndSet(false, true)) requestMainLoopQuit()
+    }
+
+    fun cleanupOnce() {
+        if (!cleanupStarted.compareAndSet(false, true)) return
+        try {
+            destroyKeyboard()
+        } finally {
+            try {
+                destroyHid()
+            } finally {
+                flush()
+            }
+        }
+    }
+}
+
+/**
+ * Keyboard backend selection mode.
+ * Test-only deterministic override; not a user-facing preference.
+ */
+enum class KeyboardBackendMode(val token: String) {
+    /** UHID preferred, automatic fallback to virtual injection (production default). */
+    AUTO("auto"),
+
+    /** Force UHID; never falls back to virtual injection. */
+    UHID("uhid"),
+
+    /** Force InputManager virtual injection; never uses UHID. */
+    INPUT_MANAGER("input-manager");
+
+    companion object {
+        const val FLAG = "--keyboard-backend"
+
+        private val EXPECTED = entries.joinToString("|") { it.token }
+
+        /** Resolves one value token; null when it names no mode. */
+        fun fromToken(token: String): KeyboardBackendMode? =
+            entries.firstOrNull { it.token == token.lowercase() }
+
+        /**
+         * Reads the mode from helper arguments, accepting both
+         * `--keyboard-backend=<value>` and `--keyboard-backend <value>`.
+         * Absent flag means [AUTO]; a missing or unknown value is a failure so
+         * the helper refuses to run under a silently wrong backend (a forced
+         * backend that quietly degrades to AUTO would invalidate a test run).
+         */
+        fun fromArgs(args: Array<out String>): Result<KeyboardBackendMode> {
+            var mode = AUTO
+            var i = 0
+            while (i < args.size) {
+                val arg = args[i]
+                val token = when {
+                    arg.startsWith("$FLAG=") -> arg.substringAfter('=')
+                    arg == FLAG -> args.getOrNull(++i)
+                        ?: return failure("$FLAG requires a value ($EXPECTED)")
+                    else -> {
+                        i++
+                        continue
+                    }
+                }
+                mode = fromToken(token)
+                    ?: return failure("invalid $FLAG value: $token (expected $EXPECTED)")
+                i++
+            }
+            return Result.success(mode)
+        }
+
+        private fun failure(message: String): Result<KeyboardBackendMode> =
+            Result.failure(IllegalArgumentException(message))
     }
 }
 

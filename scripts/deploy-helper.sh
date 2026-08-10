@@ -35,6 +35,16 @@ REMOTE_IN="/data/local/tmp/cxi-helper-stdin"
 REMOTE_OUT="/data/local/tmp/cxi-helper-stdout.bin"
 REMOTE_LOG="/data/local/tmp/cxi-helper.log"
 
+# Keyboard backend override (test-only): auto|uhid|input-manager
+KEYBOARD_BACKEND="${KEYBOARD_BACKEND:-auto}"
+case "$KEYBOARD_BACKEND" in
+    auto | uhid | input-manager) ;;
+    *)
+        echo "invalid KEYBOARD_BACKEND: $KEYBOARD_BACKEND (expected auto|uhid|input-manager)" >&2
+        exit 1
+        ;;
+esac
+
 # CXI frame presets (15-byte little-endian header; AGENTS.md rule 6 — keep in
 # sync with protocol/protocol.md). Header: "CXI" + version u16 + type u16 +
 # requestId u32 + payloadLen u32. Values mirror protocol/fixtures/*.bin.
@@ -79,8 +89,10 @@ start() {
     # Probe-style detached launch (Phase 0 pattern): tail -f holds the helper
     # stdin open and streams appended bytes; nohup keeps it alive after the
     # adb session ends. tail dies with SIGPIPE when the helper exits.
+    # Pass --keyboard-backend override for test-only deterministic selection
+    local kb_arg="--keyboard-backend=$KEYBOARD_BACKEND"
     adb -s "$DEVICE" shell \
-        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
+        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
     sleep 2
     if ! helper_running; then
         echo "helper failed to start — stderr log:" >&2
@@ -89,11 +101,38 @@ start() {
     fi
     echo "device: $DEVICE"
     echo "helper running (stdin <- tail -f $REMOTE_IN; stdout -> $REMOTE_OUT, stderr -> $REMOTE_LOG)"
+    echo "keyboard backend: $KEYBOARD_BACKEND"
     echo "next: scripts/deploy-helper.sh list"
 }
 
 helper_running() {
-    adb -s "$DEVICE" shell "ps -A -o ARGS" | grep -q "crossinput-helper.apk"
+    local pid
+    pid="$(helper_pid)"
+    [ -n "$pid" ]
+}
+
+helper_pid() {
+    adb -s "$DEVICE" shell "ps -A -o PID,ARGS" \
+        | awk '$2 == "app_process" && $0 ~ /crossinput-helper\.apk/ {print $1; exit}'
+}
+
+wait_for_helper_exit() {
+    local timeout_seconds="${STOP_TIMEOUT_SECONDS:-10}"
+    local deadline=$((SECONDS + timeout_seconds))
+    while (( SECONDS < deadline )); do
+        if [ -z "$(helper_pid)" ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
+preserve_diagnostics() {
+    adb -s "$DEVICE" pull "$REMOTE_OUT" /tmp/cxi-helper-stop-stdout.bin >/dev/null 2>&1 || true
+    adb -s "$DEVICE" pull "$REMOTE_LOG" /tmp/cxi-helper-stop.log >/dev/null 2>&1 || true
+    echo "diagnostics preserved: /tmp/cxi-helper-stop.log /tmp/cxi-helper-stop-stdout.bin"
+    adb -s "$DEVICE" shell "tail -30 $REMOTE_LOG" 2>/dev/null || true
 }
 
 # Kill the helper and every (possibly orphaned) tail -f feeding its stdin.
@@ -176,11 +215,28 @@ case "$mode" in
         adb -s "$DEVICE" shell "tail -30 $REMOTE_LOG"
         ;;
     stop)
-        send "$FRAME_SHUTDOWN" 2>/dev/null || true
-        sleep 2
+        if ! helper_running; then
+            echo "graceful shutdown not observed: helper is not running" >&2
+            preserve_diagnostics
+            kill_orphans
+            adb -s "$DEVICE" shell "rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG" || true
+            exit 1
+        fi
+        send "$FRAME_SHUTDOWN"
+        if wait_for_helper_exit; then
+            echo "graceful shutdown complete"
+            preserve_diagnostics
+            # The helper has already exited; clean the detached stdin feeder
+            # only after graceful termination has been established.
+            kill_orphans
+            adb -s "$DEVICE" shell "rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG" || true
+            exit 0
+        fi
+        echo "graceful shutdown timed out after ${STOP_TIMEOUT_SECONDS:-10}s; preserving diagnostics before force cleanup" >&2
+        preserve_diagnostics
         kill_orphans
         adb -s "$DEVICE" shell "rm -f $REMOTE_IN $REMOTE_OUT $REMOTE_LOG" || true
-        echo "stopped"
+        exit 1
         ;;
     *)
         echo "unknown mode: $mode" >&2

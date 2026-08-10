@@ -1,0 +1,12 @@
+[Main] keyboard backend mode=input-manager
+[KeyboardBackend] keyboard backend selected backend=input-manager mode=forced
+[DisplayDiscovery] display changed id=6
+[DisplayDiscovery] display changed id=0
+[DisplayDiscovery] display changed id=0
+[Main] handshake ok (v1)
+[Main] listing 2 display(s)
+[DisplayDiscovery] display changed id=0
+[DisplayDiscovery] display changed id=0
+[DisplayDiscovery] display changed id=0
+[DisplayDiscovery] display changed id=6
+[DisplayDiscovery] display changed id=0

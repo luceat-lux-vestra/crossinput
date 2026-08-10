@@ -94,6 +94,8 @@ No CXI keyboard message existed before this work (only mouse `HID_REPORT` /
 - (done) Protocol: keyboard message type (`KEY_EVENT` 0x000C) + fixtures pass `scripts/check-fixtures.mjs` and `swift test`
 - (done) Android: UHID keyboard create + HID report on-device (SM-G977N) — `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`
 - (done) Android: key-state reporting fix verified on-device (no infinite key repeat; issue #21, PR #26)
-- (pending) Android: virtual fallback injects keys via the internal `InputManager.injectInputEvent` API (per-device, AGENTS.md rule 2) — UHID path verified; fallback not yet exercised on-device
+- (done, 2026-08-10) Android: virtual fallback injects keys via the internal `InputManager.injectInputEvent` API on SM-G977N / Android 12 — forced backend selection, single key delivery, modifier delivery, release behavior, metadata-only logging, and clean shutdown verified (issue #33). A down-only held-key run also verified synthetic release during SHUTDOWN and graceful process-exit detection before orphan cleanup.
+- (done) Test-only deterministic backend override: `--keyboard-backend=uhid|input-manager|auto` enables forced backend selection for testing; an unknown value aborts startup rather than degrading to AUTO; production default remains AUTO (UHID preferred with automatic fallback)
+- (done) Automated tests: backend selection, forced-mode semantics, failure paths, and metadata-only logging covered by unit tests against a fake injector (`KeyboardBackendTest`, `KeyboardBackendModeTest`) — off-device only, so this does not satisfy AGENTS.md rule 2
 - (done) macOS: typing reaches a DeX-focused field; Cmd+Tab / Spotlight do not fire on the Mac while captured (user-confirmed on-device)
 - (done) Korean: 2-set composition produces correct hangul in a DeX field (user-confirmed)
