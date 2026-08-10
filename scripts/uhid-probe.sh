@@ -35,7 +35,7 @@ case "$MODE" in
             "nohup sh -c 'app_process -cp $REMOTE / com.crossinput.helper.UhidProbe $TYPE $REMOTE_CMD $EXTRA > $REMOTE_LOG 2>&1' >/dev/null 2>&1 &" >/dev/null
         sleep 2
         echo "device: $DEVICE  type: $TYPE  extra: [$EXTRA]"
-        echo "probe running (device background, independent of the host session).""
+        echo "probe running (device background, independent of the host session)."
         echo "inject: scripts/uhid-probe.sh $TYPE send 'abs 100 100'"
         ;;
     send)

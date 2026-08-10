@@ -23,7 +23,7 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 - **Two pointer injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and an InputManager injection fallback via reflection (alternative — routes events to windows, scrcpy-style)
 - **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
 - **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
-- **Keyboard**: mac → Android keyboard delivery — UHID keyboard backend (implemented, verified on SM-G977N / Android 12) plus an InputManager virtual-injection fallback via reflection (implemented, unit/build validated, on-device exercise pending), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
+- **Keyboard**: mac → Android keyboard delivery — UHID keyboard backend plus an InputManager virtual-injection fallback via reflection (both implemented and verified on SM-G977N / Android 12), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
 
 ## Status
 
@@ -32,7 +32,7 @@ Verified on device (SM-G977N, Android 12):
 - UHID virtual keyboard types into DeX fields, including Korean 2-set composition — verified on device
 - System shortcuts are suppressed on the Mac while captured — verified on device
 - The InputManager pointer fallback is implemented (unit/build validated); its on-device verification status is tracked separately from the UHID pointer path and has not yet been exercised on a physical device
-- The InputManager virtual-injection keyboard fallback is implemented (unit/build validated) but has **not yet been exercised on a physical device** — tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
+- The InputManager virtual-injection keyboard fallback is implemented and **verified on a physical device** (SM-G977N / Android 12); the verification record is tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
 
 Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 

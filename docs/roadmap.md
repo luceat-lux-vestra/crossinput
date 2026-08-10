@@ -1,6 +1,6 @@
 # Ampersand Roadmap
 
-> Updated: 2026-08-05 (v0.1.0 released; keyboard primary path + distribution shipped)
+> Updated: 2026-08-10 (v0.1.0 released; keyboard backends verified on device)
 > Original plan: `DEXCURSOR_IMPLEMENTATION_PLAN.md` (1221 lines, kept in local Downloads — historical document)
 
 ## Phase overview
@@ -18,9 +18,9 @@
 | 6 | Menu bar app + onboarding | settings/status UI + wireless debugging pairing guide | ✅ done |
 | 7 | Recovery & performance | sleep/wake, permission revocation, error recovery | 🔶 auto-reconnect done; sleep/wake edge cases open |
 | 8 | Distribution | **v0.1.0 shipped**: `Ampersand-0.1.0.dmg` on GitHub Releases, ad-hoc signed (ADR-0008). Open: Homebrew tap (ADR-0005), adb bundling (ADR-0004), notarization when a Developer ID exists | ✅ v0.1.0 shipped 🔶 |
-| 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | 🔶 UHID path verified on-device; InputManager fallback on-device verification pending |
+| 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | ✅ UHID and InputManager paths verified on-device; test-only override + unit tests done |
 
-## Phase 9: Keyboard extension — partially done
+## Phase 9: Keyboard extension — complete
 
 Completion criteria split (per ADR-0007):
 
@@ -28,7 +28,9 @@ Completion criteria split (per ADR-0007):
 - **UHID keyboard backend** — done, verified on device (key-state reporting; infinite repeat fixed — PR #24, #26)
 - **macOS system-shortcut suppression while captured** — done, verified on device (PR #25)
 - **Korean 2-set composition via Android IME** — done, verified on device
-- **InputManager virtual-injection fallback** — implemented, unit/build validated, **on-device verification pending** (issue #33)
+- **InputManager virtual-injection fallback** — implemented, unit/build validated, and verified on device (SM-G977N / Android 12; issue #33)
+- **Test-only deterministic backend override** — `--keyboard-backend=uhid|input-manager|auto` implemented; enables forced backend selection for testing; production default remains AUTO
+- **Automated backend-selection tests** — `KeyboardBackendTest.kt` / `KeyboardBackendModeTest.kt` cover AUTO, forced UHID, forced InputManager, failure paths, and override parsing
 
 ## Phase 0: UHID input verification — done
 
@@ -51,7 +53,7 @@ Completion criteria split (per ADR-0007):
 ## Extension scope (after v1, ADR-0003)
 > mac→Android keyboard completed in Phase 9 (ADR-0007) — see above.
 
-- ~~mac→Android keyboard: UHID keyboard delivery; macOS system-shortcut handling (Cmd+Tab etc.) was the open item~~ → **Phase 9, ADR-0007 — UHID path done on device**: keyboard message type + UHID keyboard backend on Android, system-shortcut suppression in the macOS capture tap, Korean 2-set via Android IME. InputManager virtual-injection fallback implemented; on-device verification pending (issue #33)
+- ~~mac→Android keyboard: UHID keyboard delivery; macOS system-shortcut handling (Cmd+Tab etc.) was the open item~~ → **Phase 9, ADR-0007 — both keyboard paths done on device**: keyboard message type + UHID keyboard backend on Android, InputManager virtual-injection fallback, system-shortcut suppression in the macOS capture tap, Korean 2-set via Android IME. On-device verification is recorded in issue #33.
 - dex→mac touch: AccessibilityService capture + CGEventPost injection
 - dex→mac keyboard: custom IME app (our keyboard must be the active IME), Korean via text transport
 - iPad: out of scope (no CGEventTap-equivalent API on iPadOS)
@@ -71,6 +73,7 @@ Completion criteria split (per ADR-0007):
 
 - 2026-08-05: **v0.1.0 released** — `Ampersand-0.1.0.dmg` on GitHub Releases (PR #28): ad-hoc signed + DMG packaging (ADR-0008), `release.yml` CI publishing on v* tags, README install docs, CHANGELOG.
 - 2026-08-05: keyboard extension primary path complete (ADR-0007, Phase 9) — UHID keyboard (PR #23–#26), macOS system-shortcut suppression, Korean 2-set; infinite key-repeat fixed on the UHID path (key-state reporting); verified on device (SM-G977N). InputManager virtual-injection fallback implemented but not yet exercised on a physical device (issue #33)
+- 2026-08-10: InputManager virtual-injection keyboard fallback verified on SM-G977N / Android 12 (PR #40): forced backend selection, single key delivery, modifier delivery, no repeat after release, metadata-only logging, held-key synthetic release during SHUTDOWN, and graceful process-exit detection passed; failure-path safety remains covered by unit tests.
 - 2026-08-04: display handling work committed (commit 65c4766): DISPLAY_CHANGED live update, manual Refresh Displays, stale-list clearing on connect/disconnect, wireless auto-reconnect; per-display list refresh remains manual for now, auto-update tracked as issue #17
 - 2026-08-03: environment check complete (SM-G977N, Android 12, wireless ADB connected, DeX active — display 0 phone / 2 Desktop / 6 HDMI)
 - 2026-08-03: leap-scrcpy server APK built (`app-debug.apk` 5.8MB), client built (`pnpm build`)

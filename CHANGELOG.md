@@ -5,7 +5,19 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- Test-only deterministic keyboard backend override: `--keyboard-backend=uhid|input-manager|auto` argument for the Android helper (also accepted as `--keyboard-backend <value>`, and via `KEYBOARD_BACKEND=` for `scripts/deploy-helper.sh`); an unknown or missing value aborts startup instead of degrading to AUTO; production default remains AUTO (UHID preferred with automatic fallback)
+- Metadata-only logging for keyboard backend selection: `keyboard backend selected backend=uhid|input-manager mode=auto|forced`, reporting the backend that actually came up
+- Unit tests for keyboard backend selection, forced-mode semantics, failure paths, metadata-only logging, and override parsing
+- CI guard: shell scripts are syntax-checked (`bash -n`)
+- Physical-device verification of the forced InputManager keyboard fallback on SM-G977N / Android 12; single key delivery, modifier delivery, release behavior, held-key synthetic release during SHUTDOWN, and graceful process termination passed
+
+### Changed
+
+- KeyboardBackend now honors forced backend selection: forced UHID never falls back to virtual injection; forced InputManager never uses UHID; failures in forced modes are logged and reported safely without silent fallback
+- Virtual key injection moved behind a `VirtualKeyInjector` seam so the fallback path is testable off-device, and a `SecurityException` from the hidden API is now logged by its own class name instead of `InvocationTargetException`
+- Helper shutdown now captures the main looper before starting the stdin worker, performs keyboard cleanup before HID cleanup on the main thread, and releases accepted virtual key-down events before teardown; the deploy helper waits for the actual `app_process` to exit before orphan cleanup
 
 ## [0.1.0] - 2026-08-05
 
@@ -13,7 +25,7 @@ No unreleased changes.
 
 - macOS menu bar app: pointer capture + edge switching (macOS ↔ DeX via UHID)
 - Pointer input: relative move, buttons, scroll (UHID primary — verified on device, SM-G977N / Android 12; InputManager injection fallback implemented, on-device verification pending)
-- Keyboard input: UHID keyboard backend + InputManager virtual-injection fallback (ADR-0007), system-shortcut suppression while captured, Korean 2-set via Android IME. UHID keyboard delivery, shortcut suppression, and Korean 2-set composition were verified on device. The InputManager injection fallback is implemented but has not yet been exercised on a physical device.
+- Keyboard input: UHID keyboard backend + InputManager virtual-injection fallback (ADR-0007), system-shortcut suppression while captured, Korean 2-set via Android IME. UHID keyboard delivery, shortcut suppression, and Korean 2-set composition were verified on device. The InputManager injection fallback was verified on SM-G977N / Android 12 on 2026-08-10; see issue #33.
 - Wireless ADB (mDNS TLS) auto-discovery and reconnect
 - Display handling: live DISPLAY_CHANGED updates, manual Refresh Displays
 - App packaging: `Ampersand.app` menu bar bundle (LSUIElement) + `Ampersand-0.1.0.dmg` (ADR-0008)

@@ -1,6 +1,6 @@
 # Ampersand Architecture
 
-> Status: v0.1.0 (pointer + keyboard shipped). On-device verified (SM-G977N, Android 12): UHID mouse, UHID keyboard, system-shortcut suppression, Korean 2-set. The InputManager pointer fallback is implemented; its on-device verification is tracked separately and is pending. The InputManager virtual-injection keyboard fallback is implemented but not yet exercised on a physical device (issue #33). Key decisions recorded in docs/adr/
+> Status: v0.1.0 (pointer + keyboard shipped). On-device verified (SM-G977N, Android 12): UHID mouse, UHID keyboard, InputManager virtual-injection keyboard fallback, system-shortcut suppression, Korean 2-set. The InputManager pointer fallback is implemented; its on-device verification is tracked separately and is pending. Key decisions recorded in docs/adr/
 
 ## Goal
 
