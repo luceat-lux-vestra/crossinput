@@ -75,26 +75,77 @@ Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
 Canonical frame bytes live in `protocol/fixtures/*.bin`; `protocol/scripts/check-fixtures.mjs` keeps them in sync with `protocol/protocol.md`.
 
-### Virtual-injection fallback verification (Status: Pending on-device)
+### Virtual-injection fallback verification (Status: Verified on device)
 
-The InputManager virtual-injection fallback is implemented but has **not yet
-been exercised on a physical device** (issue #33). When a test-only backend
-override exists, run this procedure (until then, the override itself is tracked
-in issue #33):
+The InputManager virtual-injection fallback is implemented and was verified on
+SM-G977N / Android 12 on 2026-08-10 (issue #33). A test-only backend override
+exists (`--keyboard-backend=input-manager`) so the verification run selects the
+fallback deterministically:
 
 1. Force the fallback backend via the test-only override; helper log must show the fallback engaged.
 2. Select a focused text field on the DeX display.
 3. Send a single key down/up pair — exactly one character must appear (no repeat, no stuck key).
 4. Repeat with a modifier combination (e.g. Shift+letter).
 5. Confirm no repeated input after release, and that shutdown leaves no stuck key state.
-6. Attach logcat/screen evidence; confirm the logs contain metadata only (no key codes or payloads; hard rule 4).
+6. Repeat the test with only the key-down fixture, omit the key-up fixture, and
+   send SHUTDOWN; the helper must synthesize the release and the focused field
+   must not repeat after shutdown.
+7. Confirm `scripts/deploy-helper.sh stop` reports graceful completion only
+   after the actual helper process exits; force cleanup is permitted only after
+   that success decision or after a bounded timeout with preserved diagnostics.
+8. Attach logcat/screen evidence; confirm the logs contain metadata only (no key codes or payloads; hard rule 4).
 
-A forced-selection switch does not exist yet — a test-only override has been
-filed as part of issue #33; do not invent ad-hoc commands for this.
+Verification result (2026-08-10): the forced-backend marker was present; a
+single key down/up pair produced exactly one character in the focused DeX
+search field; a modifier combination produced exactly one additional
+character; the field was unchanged after a delayed capture; and shutdown left
+no helper or stdin-feeder process running. A held-key run sent only DOWN before
+SHUTDOWN; the field remained unchanged after shutdown and a delayed capture,
+and the stop command returned success after graceful `app_process` exit. The
+captured helper log contained backend, display, and protocol metadata only.
+API-unavailable, rejected-injection, and `SecurityException` fail-safe
+behavior remains covered by the Android unit tests, which passed in the same
+build. Screen and ADB-pulled log evidence is preserved in
+[`docs/research/evidence/inputmanager-held-key-2026-08-10/`](research/evidence/inputmanager-held-key-2026-08-10/).
+
+Launch the helper with the override (manual). Both spellings are accepted:
+```sh
+adb shell app_process -cp /data/local/tmp/crossinput-helper.apk / com.crossinput.helper.Main --keyboard-backend=input-manager
+```
+
+Or via deploy-helper.sh (environment variable):
+```sh
+KEYBOARD_BACKEND=input-manager scripts/deploy-helper.sh start
+```
+
+Before recording any result, confirm the run is actually on the forced backend —
+the helper logs the active backend once at startup:
+
+```
+[Main] keyboard backend mode=input-manager
+[KeyboardBackend] keyboard backend selected backend=input-manager mode=forced
+```
+
+An unknown value makes the helper exit rather than fall back to `auto`, so a
+missing `selected` line means the helper never started, not that the override
+was ignored. In `auto` mode the same line reports whichever backend actually
+came up (`backend=uhid` or `backend=input-manager`), and it is logged again if
+the session switches after a UHID report failure.
+
+Automated coverage (`KeyboardBackendTest.kt`, `KeyboardBackendModeTest.kt`) —
+these substitute a fake injector for the hidden API, so they constrain the
+selection logic only and are not a substitute for the on-device run:
+- AUTO: UHID preferred; falls back on creation failure, report failure, and unmappable key codes
+- Forced UHID: never falls back to virtual injection, survives report failure
+- Forced InputManager: never creates or uses UHID; down/up pass through once each
+- Failure paths: injection API unavailable (logged once), SecurityException contained, rejection logged
+- Shutdown: held keys released with an empty report before the device is destroyed
+- Logs carry metadata only — no key codes, meta state, or payloads (AGENTS.md rule 4)
+- Override parsing: both `--keyboard-backend=<value>` and `--keyboard-backend <value>`; unknown/missing values fail loudly
 
 ### Verification items (Phase 2)
 
-Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet verified. Full results in issue [#6](https://github.com/luceat-lux-vestra/crossinput/issues/6); keyboard work in issue [#21](https://github.com/luceat-lux-vestra/crossinput/issues/21); InputManager fallback remains pending (issue [#33](https://github.com/luceat-lux-vestra/crossinput/issues/33)).
+Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet verified. Full results in issue [#6](https://github.com/luceat-lux-vestra/crossinput/issues/6); keyboard work in issue [#21](https://github.com/luceat-lux-vestra/crossinput/issues/21); InputManager fallback verification is recorded in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33).
 
 | # | Item | Pass criteria | Status |
 |---|---|---|---|
@@ -108,7 +159,7 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 7 | macOS shortcut suppression | Cmd+Tab / Spotlight do not fire on the Mac while captured | ✅ |
 | 8 | Korean 2-set | Hangul composes in a DeX field via Android IME | ✅ |
 | 9 | SHUTDOWN | Clean exit; UHID devices destroyed; stdout flushed | ✅ |
-| 10 | InputManager virtual-injection fallback | Fallback engaged (forced), single char + modifier, no repeat, no stuck keys, shutdown clean | ⏳ pending (issue #33) |
+| 10 | InputManager virtual-injection fallback | Fallback engaged (forced), single char + modifier, no repeat, no stuck keys, shutdown clean | ✅ verified on device (SM-G977N, 2026-08-10; issue #33) |
 
 ## Edge switching stability (Phase 5)
 

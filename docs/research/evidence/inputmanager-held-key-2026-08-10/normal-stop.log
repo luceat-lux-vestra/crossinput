@@ -1,0 +1,6 @@
+[Main] keyboard backend mode=input-manager
+[KeyboardBackend] keyboard backend selected backend=input-manager mode=forced
+[Main] handshake ok (v1)
+[Main] listing 2 display(s)
+[Main] shutdown requested
+[Main] stdin closed; shutting down
