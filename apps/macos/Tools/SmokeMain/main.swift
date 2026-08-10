@@ -23,9 +23,9 @@ struct SmokeMain {
         }
         print("serial: \(serial)")
 
-        var config = ConnectionManager.Configuration(serial: serial)
+        var config = RemoteSession.Configuration(serial: serial)
         config.adbPath = locateAdb() ?? "/opt/homebrew/bin/adb"
-        let manager = ConnectionManager(configuration: config)
+        let manager = RemoteSession(configuration: config)
 
         try await manager.connect()
         print("HELLO handshake OK")
@@ -73,7 +73,7 @@ struct SmokeMain {
     /// UHID end-to-end test: create the virtual mouse, then drive a rectangle
     /// path + a click through HID_REPORT frames (same wire format the app
     /// uses). The cursor sprite should visibly move on the target display.
-    static func runUhidTest(manager: ConnectionManager, serial: String) async throws {
+    static func runUhidTest(manager: RemoteSession, serial: String) async throws {
         let descriptor = Data([
             0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09,
             0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01,

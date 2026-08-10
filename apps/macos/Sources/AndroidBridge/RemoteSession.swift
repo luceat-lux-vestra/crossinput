@@ -11,12 +11,16 @@ public enum ConnectionError: Error, Sendable {
     case protocolError(String)
 }
 
-/// ConnectionManager owns the adb subprocess running the Android helper and
-/// implements the CXI request/response layer over its stdin/stdout.
+/// RemoteSession owns the CXI session over the helper's stdin/stdout.
+///
+/// The current implementation still contains the ADB process-launch seam.
+/// Keeping that seam here is intentional for this behavior-preserving slice;
+/// the next transport extraction can move process ownership into AdbTransport
+/// without changing callers or the CXI correlation contract.
 ///
 /// Transport: `adb -s SERIAL shell -T "app_process -cp ..."` with PTY disabled
 /// so the channel is binary-safe (same pattern scrcpy uses for its server).
-public final class ConnectionManager: @unchecked Sendable {
+public final class RemoteSession: @unchecked Sendable {
     public struct Configuration: Sendable {
         public var adbPath: String
         public var serial: String
@@ -270,6 +274,11 @@ public final class ConnectionManager: @unchecked Sendable {
         }
     }
 }
+
+/// Compatibility name for tools and clients that still refer to the pre-
+/// rebaseline type. New application code should use `RemoteSession`.
+@available(*, deprecated, renamed: "RemoteSession")
+public typealias ConnectionManager = RemoteSession
 
 extension NSLock {
     func withLock<T>(_ body: () throws -> T) rethrows -> T {

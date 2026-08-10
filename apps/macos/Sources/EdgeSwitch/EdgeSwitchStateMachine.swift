@@ -1,15 +1,32 @@
 import Foundation
 import Diagnostics
 
-public enum SwitchState: String, Sendable {
+public enum HandoffState: String, Sendable {
     case disabled
     case disconnected
     case connecting
-    case macActive
+    case localActive
     case edgeArmed
-    case dexActive
-    case recovering
+    case remoteActive
+    case returning
     case error
+}
+
+/// Compatibility name for clients and fixtures from the pre-rebaseline edge
+/// machine. New application code uses `ControlState` and `HandoffState`.
+public typealias SwitchState = HandoffState
+
+/// Compatibility spellings retained so the large safety regression suite can
+/// migrate independently from the behavior-preserving state rename.
+public extension HandoffState {
+    @available(*, deprecated, renamed: "localActive")
+    static var macActive: Self { .localActive }
+
+    @available(*, deprecated, renamed: "remoteActive")
+    static var dexActive: Self { .remoteActive }
+
+    @available(*, deprecated, renamed: "returning")
+    static var recovering: Self { .returning }
 }
 
 public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
@@ -37,16 +54,15 @@ public enum TransitionReason: String, Sendable {
 
 /// A concrete state transition with a monotonically increasing sequence.
 /// Consumers apply transitions in sequence order and discard stale ones
-/// (`sequence` lower than the last applied value) so an old `.dexActive`
-/// callback can never re-suppress the capture after a newer `.error` or
-/// `.recovering` transition was applied.
+/// (`sequence` lower than the last applied value) so an old remote callback can
+/// never re-suppress the capture after a newer failure or return transition.
 public struct StateTransition: Sendable, Equatable {
     public let sequence: UInt64
-    public let from: SwitchState
-    public let to: SwitchState
+    public let from: HandoffState
+    public let to: HandoffState
     public let reason: TransitionReason
 
-    public init(sequence: UInt64, from: SwitchState, to: SwitchState, reason: TransitionReason) {
+    public init(sequence: UInt64, from: HandoffState, to: HandoffState, reason: TransitionReason) {
         self.sequence = sequence
         self.from = from
         self.to = to
@@ -56,8 +72,8 @@ public struct StateTransition: Sendable, Equatable {
 
 /// Edge Switch state machine.
 ///
-/// Flow: disabled -> disconnected -> connecting -> macActive; pointer reaches a
-/// screen edge -> edgeArmed -> dexActive (pointer captured by the device); the
+/// Flow: disabled -> disconnected -> connecting -> localActive; pointer reaches a
+/// screen edge -> edgeArmed -> remoteActive (pointer captured by the device); the
 /// pointer moving back across the entry edge and beyond the return hysteresis,
 /// the emergency shortcut, or a lost connection brings control back to macOS.
 ///
@@ -103,7 +119,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     // MARK: - Internal storage (mutated only on the serial queue)
 
-    private var stateStorage: SwitchState = .disabled
+    private var stateStorage: HandoffState = .disabled
     private var entryEdgeStorage: ScreenEdge = .left
 
     /// Virtual pointer position along the axis perpendicular to the entry edge.
@@ -133,7 +149,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     // MARK: - Snapshot accessors (queue-protected immutable reads)
 
-    public var state: SwitchState {
+    public var state: HandoffState {
         queue.sync { stateStorage }
     }
 
@@ -171,8 +187,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func connectionBegan() {
         run {
             switch stateStorage {
-            case .disconnected, .recovering: transition(to: .connecting, reason: .connectionBegan)
-            case .macActive: transition(to: .connecting, reason: .connectionBegan)
+            case .disconnected, .returning: transition(to: .connecting, reason: .connectionBegan)
+            case .localActive: transition(to: .connecting, reason: .connectionBegan)
             default: break
             }
         }
@@ -183,7 +199,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             switch stateStorage {
             // .error is terminal (helper fatal): it must never be covered by a
             // readiness transition. Recovery is explicit deactivate -> activate.
-            case .connecting, .disconnected: transition(to: .macActive, reason: .connectionReady)
+            case .connecting, .disconnected: transition(to: .localActive, reason: .connectionReady)
             default: break
             }
         }
@@ -192,10 +208,10 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func connectionLost() {
         run {
             switch stateStorage {
-            case .connecting, .macActive, .edgeArmed, .dexActive, .recovering:
+            case .connecting, .localActive, .edgeArmed, .remoteActive, .returning:
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
-                transition(to: .recovering, reason: .connectionLost)
+                transition(to: .returning, reason: .connectionLost)
             default: break
             }
         }
@@ -205,12 +221,12 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func pointerAtEdge(_ edge: ScreenEdge) {
         run {
             switch stateStorage {
-            case .macActive:
+            case .localActive:
                 transition(to: .edgeArmed, reason: .edgeEntered)
                 entryEdgeStorage = edge
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
-                transition(to: .dexActive, reason: .edgeEntered)
+                transition(to: .remoteActive, reason: .edgeEntered)
             case .edgeArmed:
                 entryEdgeStorage = edge
                 virtualAxisPosition = 0
@@ -240,7 +256,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// transition callbacks.
     public func pointerMoved(dx: CGFloat, dy: CGFloat) {
         run {
-            guard stateStorage == .dexActive else { return }
+            guard stateStorage == .remoteActive else { return }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
             guard dx != 0 || dy != 0 else { return }
@@ -276,7 +292,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func emergencyReturn(reason: TransitionReason = .emergencyReturn) {
         run {
             switch stateStorage {
-            case .edgeArmed, .dexActive:
+            case .edgeArmed, .remoteActive:
                 returnToMacOS(reason: reason)
             default: break
             }
@@ -329,11 +345,11 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private func returnToMacOS(reason: TransitionReason) {
         virtualAxisPosition = 0
         hasReceivedFirstMove = false
-        transition(to: .recovering, reason: reason)
-        transition(to: .macActive, reason: reason)
+        transition(to: .returning, reason: reason)
+        transition(to: .localActive, reason: reason)
     }
 
-    private func transition(to newState: SwitchState, reason: TransitionReason) {
+    private func transition(to newState: HandoffState, reason: TransitionReason) {
         guard newState != stateStorage else { return }
         sequenceCounter &+= 1
         pendingTransitions.append(StateTransition(

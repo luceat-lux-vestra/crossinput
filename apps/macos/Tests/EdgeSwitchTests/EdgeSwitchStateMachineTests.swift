@@ -23,15 +23,15 @@ final class TransitionCollector: @unchecked Sendable {
 }
 
 final class EdgeSwitchStateMachineTests: XCTestCase {
-    /// Common setup: activate -> connect -> ready -> reach the edge -> dexActive.
-    private func makeDexActive(edge: ScreenEdge) -> EdgeSwitchStateMachine {
+    /// Common setup: activate -> connect -> ready -> reach the edge -> remoteActive.
+    private func makeRemoteActive(edge: ScreenEdge) -> EdgeSwitchStateMachine {
         let machine = EdgeSwitchStateMachine()
         machine.activate()
         machine.connectionBegan()
         machine.connectionReady()
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
         machine.pointerAtEdge(edge)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         // Drain async callbacks scheduled before a test installs its own
         // onStateChange; otherwise those transitions leak into the collector.
         machine.flushCallbacks()
@@ -40,131 +40,131 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     // MARK: - Entering: movement toward Android never returns
 
-    func testStaysDexActiveWhileMovingIntoAndroidOnLeftEdge() {
-        let machine = makeDexActive(edge: .left)
+    func testStaysRemoteActiveWhileMovingIntoAndroidOnLeftEdge() {
+        let machine = makeRemoteActive(edge: .left)
         machine.pointerMoved(dx: -1, dy: 0)
         machine.pointerMoved(dx: -60, dy: 0)
         machine.pointerMoved(dx: -500, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
-    func testStaysDexActiveWhileMovingIntoAndroidOnRightEdge() {
-        let machine = makeDexActive(edge: .right)
+    func testStaysRemoteActiveWhileMovingIntoAndroidOnRightEdge() {
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 1, dy: 0)
         machine.pointerMoved(dx: 60, dy: 0)
         machine.pointerMoved(dx: 500, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
-    func testStaysDexActiveWhileMovingIntoAndroidOnTopEdge() {
-        let machine = makeDexActive(edge: .top)
+    func testStaysRemoteActiveWhileMovingIntoAndroidOnTopEdge() {
+        let machine = makeRemoteActive(edge: .top)
         machine.pointerMoved(dx: 0, dy: -1)
         machine.pointerMoved(dx: 0, dy: -60)
         machine.pointerMoved(dx: 0, dy: -500)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
-    func testStaysDexActiveWhileMovingIntoAndroidOnBottomEdge() {
-        let machine = makeDexActive(edge: .bottom)
+    func testStaysRemoteActiveWhileMovingIntoAndroidOnBottomEdge() {
+        let machine = makeRemoteActive(edge: .bottom)
         machine.pointerMoved(dx: 0, dy: 1)
         machine.pointerMoved(dx: 0, dy: 60)
         machine.pointerMoved(dx: 0, dy: 500)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     // MARK: - Returning: only after crossing back past the entry boundary + hysteresis
 
     func testReturnsOnLeftEdgeAfterCrossingHysteresis() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         // 300 toward Android, then back toward macOS exactly to the boundary.
         machine.pointerMoved(dx: -300, dy: 0)
         machine.pointerMoved(dx: 300, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "at the entry boundary")
+        XCTAssertEqual(machine.state, .remoteActive, "at the entry boundary")
         // Hysteresis - 1 keeps DeX active.
         machine.pointerMoved(dx: 59, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "within the hysteresis band")
+        XCTAssertEqual(machine.state, .remoteActive, "within the hysteresis band")
         // One more pixel crosses the hysteresis threshold -> macOS.
         machine.pointerMoved(dx: 1, dy: 0)
-        XCTAssertEqual(machine.state, .macActive, "crossed hysteresis towards macOS")
+        XCTAssertEqual(machine.state, .localActive, "crossed hysteresis towards macOS")
     }
 
     func testReturnsOnRightEdgeAfterCrossingHysteresis() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 300, dy: 0)
         machine.pointerMoved(dx: -300, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "at the entry boundary")
+        XCTAssertEqual(machine.state, .remoteActive, "at the entry boundary")
         machine.pointerMoved(dx: -59, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "within the hysteresis band")
+        XCTAssertEqual(machine.state, .remoteActive, "within the hysteresis band")
         machine.pointerMoved(dx: -1, dy: 0)
-        XCTAssertEqual(machine.state, .macActive, "crossed hysteresis towards macOS")
+        XCTAssertEqual(machine.state, .localActive, "crossed hysteresis towards macOS")
     }
 
     func testReturnsOnTopEdgeAfterCrossingHysteresis() {
-        let machine = makeDexActive(edge: .top)
+        let machine = makeRemoteActive(edge: .top)
         machine.pointerMoved(dx: 0, dy: -300)
         machine.pointerMoved(dx: 0, dy: 300)
-        XCTAssertEqual(machine.state, .dexActive, "at the entry boundary")
+        XCTAssertEqual(machine.state, .remoteActive, "at the entry boundary")
         machine.pointerMoved(dx: 0, dy: 59)
-        XCTAssertEqual(machine.state, .dexActive, "within the hysteresis band")
+        XCTAssertEqual(machine.state, .remoteActive, "within the hysteresis band")
         machine.pointerMoved(dx: 0, dy: 1)
-        XCTAssertEqual(machine.state, .macActive, "crossed hysteresis towards macOS")
+        XCTAssertEqual(machine.state, .localActive, "crossed hysteresis towards macOS")
     }
 
     func testReturnsOnBottomEdgeAfterCrossingHysteresis() {
-        let machine = makeDexActive(edge: .bottom)
+        let machine = makeRemoteActive(edge: .bottom)
         machine.pointerMoved(dx: 0, dy: 300)
         machine.pointerMoved(dx: 0, dy: -300)
-        XCTAssertEqual(machine.state, .dexActive, "at the entry boundary")
+        XCTAssertEqual(machine.state, .remoteActive, "at the entry boundary")
         machine.pointerMoved(dx: 0, dy: -59)
-        XCTAssertEqual(machine.state, .dexActive, "within the hysteresis band")
+        XCTAssertEqual(machine.state, .remoteActive, "within the hysteresis band")
         machine.pointerMoved(dx: 0, dy: -1)
-        XCTAssertEqual(machine.state, .macActive, "crossed hysteresis towards macOS")
+        XCTAssertEqual(machine.state, .localActive, "crossed hysteresis towards macOS")
     }
 
     // MARK: - Round trip and orthogonal movement
 
     func testRoundTripKeepsVirtualPositionAcrossMoves() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         // +100 / -30 / +20 -> depth 90, still inside Android.
         machine.pointerMoved(dx: 100, dy: 0)
         machine.pointerMoved(dx: -30, dy: 0)
         machine.pointerMoved(dx: 20, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         // Back off the depth (90) plus hysteresis keeps DeX.
         machine.pointerMoved(dx: -90, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "back at the entry boundary")
+        XCTAssertEqual(machine.state, .remoteActive, "back at the entry boundary")
         machine.pointerMoved(dx: -59, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -1, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testOrthogonalMovementDoesNotAffectLeftEdge() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.pointerMoved(dx: 0, dy: 1000)
         machine.pointerMoved(dx: 0, dy: -1000)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     func testOrthogonalMovementDoesNotAffectRightEdge() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 0, dy: 1000)
         machine.pointerMoved(dx: 0, dy: -1000)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     func testOrthogonalMovementDoesNotAffectTopEdge() {
-        let machine = makeDexActive(edge: .top)
+        let machine = makeRemoteActive(edge: .top)
         machine.pointerMoved(dx: 1000, dy: 0)
         machine.pointerMoved(dx: -1000, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     func testOrthogonalMovementDoesNotAffectBottomEdge() {
-        let machine = makeDexActive(edge: .bottom)
+        let machine = makeRemoteActive(edge: .bottom)
         machine.pointerMoved(dx: 1000, dy: 0)
         machine.pointerMoved(dx: -1000, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     // MARK: - First event rule (issue #37: "first movement after entering is
@@ -179,15 +179,15 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // The first movement after entering must never alone switch to macOS,
         // regardless of magnitude, when it points toward Android (or stays
         // within the hysteresis band toward macOS).
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 1000, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     func testFirstMovementTowardMacOSWithinHysteresisDoesNotReturn() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: -1, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "tiny wobble toward macOS must not return")
+        XCTAssertEqual(machine.state, .remoteActive, "tiny wobble toward macOS must not return")
     }
 
     func testFirstMovementPastHysteresisDoesNotReturnButSecondDoes() {
@@ -195,11 +195,11 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // huge and points toward macOS (warp/synthetic leftover), and it is
         // normalized to max(0, delta) so it leaves no negative baseline. The
         // second movement is a real user gesture and normal hysteresis applies.
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: -61, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "first event never returns (issue #37)")
+        XCTAssertEqual(machine.state, .remoteActive, "first event never returns (issue #37)")
         machine.pointerMoved(dx: -61, dy: 0)
-        XCTAssertEqual(machine.state, .macActive, "second event past hysteresis returns")
+        XCTAssertEqual(machine.state, .localActive, "second event past hysteresis returns")
     }
 
     // MARK: - First-event baseline normalization (issue #37)
@@ -211,68 +211,68 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     func testFirstMacDirectedResidualDoesNotPoisonNextAndroidDirectedMove() {
         // Right edge: residual dx=-1000 (toward macOS), then dx=+1 (Android).
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: -1000, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: 1, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive, "Android-directed move after residual must not return")
+        XCTAssertEqual(machine.state, .remoteActive, "Android-directed move after residual must not return")
     }
 
     func testFirstResidualIsExcludedFromReturnBaselineForAllEdges() {
         // Left edge: residual dx=+1000 (toward macOS), then dx=-1 (Android).
-        let left = makeDexActive(edge: .left)
+        let left = makeRemoteActive(edge: .left)
         left.pointerMoved(dx: 1000, dy: 0)
         left.pointerMoved(dx: -1, dy: 0)
-        XCTAssertEqual(left.state, .dexActive)
+        XCTAssertEqual(left.state, .remoteActive)
 
         // Top edge: residual dy=+1000 (toward macOS = down), then dy=-1 (Android = up).
-        let top = makeDexActive(edge: .top)
+        let top = makeRemoteActive(edge: .top)
         top.pointerMoved(dx: 0, dy: 1000)
         top.pointerMoved(dx: 0, dy: -1)
-        XCTAssertEqual(top.state, .dexActive)
+        XCTAssertEqual(top.state, .remoteActive)
 
         // Bottom edge: residual dy=-1000 (toward macOS = up), then dy=+1 (Android = down).
-        let bottom = makeDexActive(edge: .bottom)
+        let bottom = makeRemoteActive(edge: .bottom)
         bottom.pointerMoved(dx: 0, dy: -1000)
         bottom.pointerMoved(dx: 0, dy: 1)
-        XCTAssertEqual(bottom.state, .dexActive)
+        XCTAssertEqual(bottom.state, .remoteActive)
     }
 
     func testReturnThresholdCountsOnlyMovementAfterFirstEventNormalization() {
         // First event is clamped to 0; only subsequent macOS-directed movement
         // accumulates toward -returnHysteresis.
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: -1000, dy: 0) // normalized to 0
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -61, dy: 0) // -61 <= -60 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testFirstNegativeResidualIsNormalized() {
         // Representative regression (directive test): a large macOS-directed
         // residual must not leak into the return baseline, so control returns
         // only after genuine pull-back accumulates past the hysteresis.
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: -1000, dy: 0) // residual -> normalized to 0
-        XCTAssertEqual(machine.state, .dexActive, "first event never returns")
+        XCTAssertEqual(machine.state, .remoteActive, "first event never returns")
         machine.pointerMoved(dx: -59, dy: 0) // position -59, above -60
-        XCTAssertEqual(machine.state, .dexActive, "not yet past hysteresis")
+        XCTAssertEqual(machine.state, .remoteActive, "not yet past hysteresis")
         machine.pointerMoved(dx: -1, dy: 0) // position -60 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testFirstAndroidDirectedInputIsNormalizedToItsMagnitude() {
         // First event toward Android is acknowledged at its full magnitude
         // (max(0, delta) == delta): a large entry jump creates deep position.
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.pointerMoved(dx: -300, dy: 0) // delta = +300 -> position 300
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         // Pull back 340 total: 300 - 340 = -40 (still above -60, no return).
         machine.pointerMoved(dx: 40, dy: 0)
         machine.pointerMoved(dx: 300, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: 20, dy: 0) // -60 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Real trace regression (recorded on device, left edge, 2026-08-05)
@@ -287,11 +287,11 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
             (-19, 5), (-11, -2), (-33, 7), (-26, 16), (-14, 4),
             (-8, -6), (-21, 12), (-37, 1), (-24, -9), (-15, 8),
         ]
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         for (dx, dy) in trace {
             machine.pointerMoved(dx: dx, dy: dy)
         }
-        XCTAssertEqual(machine.state, .dexActive,
+        XCTAssertEqual(machine.state, .remoteActive,
                        "sustained movement toward Android must never return")
     }
 
@@ -299,7 +299,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // Left edge: user pushed 300 into DeX, then pulled back toward macOS
         // in the recorded event sequence. Return must fire only when the
         // position crosses -60, not on the first pull-back event.
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.pointerMoved(dx: -300, dy: 0) // into Android (first event, exempt), pos +300
         let pullBack: [(dx: CGFloat, dy: CGFloat)] = [
             (81, -34), (103, -37), (111, -34), (138, -38),
@@ -307,12 +307,12 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         var returned = false
         for (dx, dy) in pullBack {
             machine.pointerMoved(dx: dx, dy: dy)
-            if machine.state == .macActive { returned = true; break }
+            if machine.state == .localActive { returned = true; break }
         }
         // left edge: delta = -dx. 300 - 81 - 103 = 116 (still inside),
         // -111 -> 5 (still inside), -138 -> -133 (crosses -60, 4th event).
         XCTAssertTrue(returned, "pull-back past the boundary + hysteresis must return")
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Equivalence with origin/main (left/right)
@@ -323,68 +323,68 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     // the same under both models.
 
     func testLeftEdgeEquivalenceWithOriginMain() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         // PR: position = -Σdx, return at <= -60  ⟺  Σdx >= 60 (main).
         machine.pointerMoved(dx: -100, dy: 0) // first event: exempt, pos 100
         machine.pointerMoved(dx: -20, dy: 0)  // pos 120
         machine.pointerMoved(dx: -40, dy: 0)  // pos 160
         machine.pointerMoved(dx: 100, dy: 0)  // pos 60; main Σdx=-60 < 60: active
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: 100, dy: 0)  // pos -40; main Σdx=40 < 60: active
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: 20, dy: 0)   // pos -60; main Σdx=60 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testRightEdgeEquivalenceWithOriginMain() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         // PR: position = Σdx, return at <= -60  ⟺  Σdx <= -60 (main).
         machine.pointerMoved(dx: 100, dy: 0)  // first event: exempt, pos 100
         machine.pointerMoved(dx: 20, dy: 0)   // pos 120
         machine.pointerMoved(dx: 40, dy: 0)   // pos 160
         machine.pointerMoved(dx: -100, dy: 0) // pos 60; main -Σdx=60: active
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -100, dy: 0) // pos -40; main -Σdx=40: active
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -20, dy: 0)  // pos -60; main -Σdx=60 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Transition reasons (root-cause tracing)
 
     func testBoundaryCrossedReasonIsReported() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.pointerMoved(dx: -100, dy: 0)
         machine.pointerMoved(dx: 160, dy: 0) // pos -60 -> boundary crossed
         machine.flushCallbacks()
         XCTAssertEqual(collector.reasons, [.boundaryCrossed, .boundaryCrossed],
-                       "dexActive -> recovering -> macActive, both boundaryCrossed")
+                       "remoteActive -> returning -> localActive, both boundaryCrossed")
     }
 
     func testConnectionLostReasonIsReported() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.connectionLost()
         machine.flushCallbacks()
         XCTAssertEqual(collector.reasons.last, .connectionLost)
-        XCTAssertEqual(machine.state, .recovering)
+        XCTAssertEqual(machine.state, .returning)
     }
 
     func testEmergencyReturnReasonIsReported() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .emergencyReturn)
         machine.flushCallbacks()
         XCTAssertEqual(collector.reasons, [.emergencyReturn, .emergencyReturn])
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testSuppressionReleasedReasonIsReported() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .suppressionReleased)
@@ -393,7 +393,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     }
 
     func testWatchdogTimeoutReasonIsReported() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.emergencyReturn(reason: .watchdogTimeout)
@@ -423,7 +423,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.pointerAtEdge(.left)
         machine.flushCallbacks()
         XCTAssertEqual(collector.reasons, [.edgeEntered, .edgeEntered],
-                       "macActive -> edgeArmed -> dexActive, both edgeEntered")
+                       "localActive -> edgeArmed -> remoteActive, both edgeEntered")
     }
 
     func testActivationAndConnectionReasonsAreReported() {
@@ -439,28 +439,28 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     // MARK: - Fail-safes
 
-    func testFailSafeEmergencyReturnGoesToMacActive() {
+    func testFailSafeEmergencyReturnGoesToLocalActive() {
         for edge in [ScreenEdge.left, .right, .top, .bottom] {
-            let machine = makeDexActive(edge: edge)
+            let machine = makeRemoteActive(edge: edge)
             machine.emergencyReturn()
-            XCTAssertEqual(machine.state, .macActive, "\(edge)")
+            XCTAssertEqual(machine.state, .localActive, "\(edge)")
         }
     }
 
-    func testFailSafeConnectionLostWhileDexActiveGoesToRecovering() {
-        let machine = makeDexActive(edge: .left)
+    func testFailSafeConnectionLostWhileRemoteActiveGoesToReturning() {
+        let machine = makeRemoteActive(edge: .left)
         machine.connectionLost()
-        XCTAssertEqual(machine.state, .recovering)
+        XCTAssertEqual(machine.state, .returning)
     }
 
-    func testMovementWhileMacActiveHasNoEffect() {
+    func testMovementWhileLocalActiveHasNoEffect() {
         let machine = EdgeSwitchStateMachine()
         machine.activate()
         machine.connectionBegan()
         machine.connectionReady()
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
         machine.pointerMoved(dx: -1000, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testMovementWhileDisabledHasNoEffect() {
@@ -470,12 +470,12 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     }
 
     func testMovementAfterReturnToMacOSHasNoEffect() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 300, dy: 0)
         machine.pointerMoved(dx: -360, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
         machine.pointerMoved(dx: -1000, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Re-entering resets the virtual position
@@ -483,16 +483,16 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     func testReenteringEdgeResetsVirtualPosition() {
         // Enter -> return -> re-enter. The stale position from the first session
         // must be reset; a small wobble after re-entering must not return.
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 300, dy: 0)
         machine.pointerMoved(dx: -360, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
 
         machine.pointerAtEdge(.right)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -30, dy: 0) // first event after re-entry, normalized to 0
         machine.pointerMoved(dx: -61, dy: 0) // second: -61 past hysteresis
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Virtual position matches UHID-delivered movement
@@ -508,29 +508,29 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         let raw = HIDReportSplitter.normalizeForHID(dx: 300, dy: 0)
         XCTAssertEqual(raw.deliveredDx, 300)
 
-        let perReport = makeDexActive(edge: .right)
+        let perReport = makeRemoteActive(edge: .right)
         for report in raw.reports {
             perReport.pointerMoved(dx: CGFloat(report.dx), dy: CGFloat(report.dy))
         }
-        XCTAssertEqual(perReport.state, .dexActive)
+        XCTAssertEqual(perReport.state, .remoteActive)
 
         // Pull back 361 in split form: 300 - 361 = -61 -> past hysteresis.
         let pull = HIDReportSplitter.normalizeForHID(dx: -361, dy: 0)
         for report in pull.reports {
             perReport.pointerMoved(dx: CGFloat(report.dx), dy: CGFloat(report.dy))
         }
-        XCTAssertEqual(perReport.state, .macActive)
+        XCTAssertEqual(perReport.state, .localActive)
     }
 
     func testVirtualPositionMatchesDeliveredWhenFedOncePerEvent() {
         // One pointerMoved call with the delivered total behaves identically
         // to per-report feeding (the send(event:) path in main.swift).
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 300, dy: 0)
         machine.pointerMoved(dx: -359, dy: 0) // 300 - 359 = -59: not yet
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -2, dy: 0) // -61: past hysteresis
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Fatal error survives suppression release
@@ -539,7 +539,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // helper fatal -> .error. A subsequent suppression release calls
         // emergencyReturn(), which must NOT move the machine out of .error
         // (the app phase stays .error via SuppressionPhasePolicy).
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()
         machine.onStateChange = { collector.append($0) }
         machine.fatal()
@@ -552,7 +552,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     }
 
     func testFatalThenConnectionReadyCannotReviveFromError() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.fatal()
         machine.connectionReady()
         XCTAssertEqual(machine.state, .error, "error is terminal until explicit deactivate")
@@ -570,13 +570,13 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // exemption. A later successful -61 is then the FIRST real movement,
         // so it is normalized to 0 and does not return; the following -61 is
         // the one that crosses the hysteresis.
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 0, dy: 0) // failed send: no-op
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -61, dy: 0) // first real movement: normalized to 0
-        XCTAssertEqual(machine.state, .dexActive, "zero delivery must not consume the first-move exemption")
+        XCTAssertEqual(machine.state, .remoteActive, "zero delivery must not consume the first-move exemption")
         machine.pointerMoved(dx: -61, dy: 0) // second: -61 -> return
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     func testPartialDeliveryCreditsOnlySentReports() {
@@ -584,21 +584,21 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         // credited 254, not 300 — pull-back must cross from 254, not 300.
         // Failed reports are simply not fed to the machine (never a (0,0)
         // placeholder call, which is now a no-op).
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 127, dy: 0)
         machine.pointerMoved(dx: 127, dy: 0)
         // Third report failed: no pointerMoved call at all.
         // Position is 254; -313 -> -59 (not yet), -2 -> -61 (return).
         machine.pointerMoved(dx: -313, dy: 0)
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -2, dy: 0)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Concurrent transitions stay consistent
 
     func testConcurrentEmergencyReturnAndPointerMovement() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         let expectations = (0..<8).map { _ in expectation(description: "worker") }
         DispatchQueue.concurrentPerform(iterations: 8) { i in
             if i.isMultiple(of: 2) {
@@ -611,7 +611,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         wait(for: expectations, timeout: 5)
         // Serialized queue: the final state is one of the valid outcomes,
         // never a torn intermediate (e.g. .edgeArmed from a concurrent entry).
-        XCTAssertTrue(machine.state == .macActive || machine.state == .dexActive)
+        XCTAssertTrue(machine.state == .localActive || machine.state == .remoteActive)
     }
 
     func testConcurrentConnectionLostAndPointerAtEdge() {
@@ -626,32 +626,32 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
                 machine.pointerAtEdge(.left)
             }
         }
-        // Either .recovering (if connectionLost won) or a valid edge-armed
-        // chain from macActive — never a state that the serialized transitions
+        // Either .returning (if connectionLost won) or a valid edge-armed
+        // chain from localActive — never a state that the serialized transitions
         // cannot produce.
-        XCTAssertTrue([.recovering, .edgeArmed, .dexActive, .connecting].contains(machine.state),
+        XCTAssertTrue([.returning, .edgeArmed, .remoteActive, .connecting].contains(machine.state),
                       "unexpected state after concurrent transitions: \(machine.state.rawValue)")
     }
 
     // MARK: - Zero delivery never consumes the first-movement exemption (directive 3.1)
 
     func testZeroDeliveredMovementDoesNotConsumeFirstMovementExemption() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 0, dy: 0) // no-op: must not touch hasReceivedFirstMove
-        XCTAssertEqual(machine.state, .dexActive)
+        XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: -1000, dy: 0) // FIRST real movement: normalized to 0
-        XCTAssertEqual(machine.state, .dexActive, "-1000 is the first real event and must be normalized")
+        XCTAssertEqual(machine.state, .remoteActive, "-1000 is the first real event and must be normalized")
         machine.pointerMoved(dx: -61, dy: 0) // second real: crosses hysteresis
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     // MARK: - Deterministic callback-order inversion (directive 3.2)
 
     func testConcurrentMutationsPreserveTransitionApplicationOrder() {
         // Pause the VERY FIRST callback (edgeArmed) while the state machine
-        // has already finished mutating to .dexActive; run fatal() from
+        // has already finished mutating to .remoteActive; run fatal() from
         // another queue; then unblock. The observed logical order must be
-        // edgeArmed -> dexActive -> error, never edgeArmed -> error -> dexActive.
+        // edgeArmed -> remoteActive -> error, never edgeArmed -> error -> remoteActive.
         let machine = EdgeSwitchStateMachine()
         machine.activate()
         machine.connectionBegan()
@@ -669,7 +669,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
             }
         }
 
-        // Start pointerAtEdge on a background thread: it mutates to .dexActive
+        // Start pointerAtEdge on a background thread: it mutates to .remoteActive
         // and begins firing; the first callback blocks on the gate.
         let entryDone = expectation(description: "entry-finished")
         DispatchQueue.global(qos: .userInitiated).async {
@@ -715,11 +715,11 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         let sequences = collector.transitions.map(\.sequence)
         XCTAssertEqual(sequences, sequences.sorted(), "callbacks must fire in sequence order")
         let toStates = collector.transitions.map(\.to)
-        if toStates.contains(.dexActive) {
-            let dexIndex = toStates.firstIndex(of: .dexActive)!
+        if toStates.contains(.remoteActive) {
+            let dexIndex = toStates.firstIndex(of: .remoteActive)!
             let errIndex = toStates.firstIndex(of: .error)!
             XCTAssertLessThan(dexIndex, errIndex,
-                              "edgeArmed -> dexActive -> error order violated: \(toStates)")
+                              "edgeArmed -> remoteActive -> error order violated: \(toStates)")
         }
     }
 
@@ -727,8 +727,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     func testStaleSequenceIsDiscardedByGate() {
         var gate = TransitionSequenceGate()
-        let error = StateTransition(sequence: 11, from: .recovering, to: .error, reason: .fatalError)
-        let staleDex = StateTransition(sequence: 10, from: .edgeArmed, to: .dexActive, reason: .edgeEntered)
+        let error = StateTransition(sequence: 11, from: .returning, to: .error, reason: .fatalError)
+        let staleDex = StateTransition(sequence: 10, from: .edgeArmed, to: .remoteActive, reason: .edgeEntered)
 
         XCTAssertTrue(gate.shouldApply(error))
         XCTAssertEqual(gate.lastAppliedSequence, 11)
@@ -739,7 +739,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     func testGateRejectsEqualSequenceDuplicate() {
         var gate = TransitionSequenceGate()
-        let t = StateTransition(sequence: 5, from: .macActive, to: .dexActive, reason: .edgeEntered)
+        let t = StateTransition(sequence: 5, from: .localActive, to: .remoteActive, reason: .edgeEntered)
         XCTAssertTrue(gate.shouldApply(t))
         XCTAssertFalse(gate.shouldApply(t), "identical sequence is a duplicate, not newer")
         XCTAssertEqual(gate.lastAppliedSequence, 5)
@@ -747,8 +747,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     // MARK: - Fatal / connection loss can never be re-suppressed (directive 3.4)
 
-    func testFatalInterleavedWithEntryNeverReentersDexActive() {
-        let machine = makeDexActive(edge: .left)
+    func testFatalInterleavedWithEntryNeverReentersRemoteActive() {
+        let machine = makeRemoteActive(edge: .left)
         machine.fatal()
         XCTAssertEqual(machine.state, .error)
         machine.pointerAtEdge(.left) // parked entry attempt after fatal
@@ -757,14 +757,14 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .error, "movement must not suppress after fatal")
     }
 
-    func testConnectionLostInterleavedWithEntryNeverReentersDexActive() {
-        let machine = makeDexActive(edge: .left)
+    func testConnectionLostInterleavedWithEntryNeverReentersRemoteActive() {
+        let machine = makeRemoteActive(edge: .left)
         machine.connectionLost()
-        XCTAssertEqual(machine.state, .recovering)
+        XCTAssertEqual(machine.state, .returning)
         machine.pointerAtEdge(.left)
-        XCTAssertEqual(machine.state, .recovering, "entry must not revive a lost connection")
+        XCTAssertEqual(machine.state, .returning, "entry must not revive a lost connection")
         machine.pointerMoved(dx: -500, dy: 0)
-        XCTAssertEqual(machine.state, .recovering, "pointer must stay released")
+        XCTAssertEqual(machine.state, .returning, "pointer must stay released")
     }
 
     // MARK: - Callback enqueue order preservation (directive 2)
@@ -785,8 +785,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         }
     }
 
-    /// Creates a state machine in .macActive state, ready for mutation.
-    private func makeMacActive() -> EdgeSwitchStateMachine {
+    /// Creates a state machine in .localActive state, ready for mutation.
+    private func makeLocalActive() -> EdgeSwitchStateMachine {
         let machine = EdgeSwitchStateMachine()
         machine.activate()
         machine.connectionBegan()
@@ -796,7 +796,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     }
 
     func testConcurrentMutationsEnqueueCallbacksInSequenceOrder() {
-        let machine = makeMacActive()
+        let machine = makeLocalActive()
         let collector = SequenceCollector()
 
         machine.onStateChange = { transition in
@@ -832,7 +832,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
             group.wait()
 
-            // Recover to .macActive for the next iteration
+            // Recover to .localActive for the next iteration
             if machine.state == .error {
                 machine.deactivate()
             }
@@ -846,14 +846,14 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
                 machine.connectionReady()
             }
             machine.flushCallbacks()
-            XCTAssertEqual(machine.state, .macActive, "iteration must end in .macActive")
+            XCTAssertEqual(machine.state, .localActive, "iteration must end in .localActive")
         }
 
         let sequences = collector.sequences
 
         // Each iteration fires at minimum: deactivate (->disabled), fatal (->error),
         // recovery: deactivate (error->disabled), activate (->disconnected),
-        // connectionBegan (->connecting), connectionReady (->macActive) = 6 transitions
+        // connectionBegan (->connecting), connectionReady (->localActive) = 6 transitions
         // Some transitions may be skipped if state already matches, so require >= 5
         XCTAssertGreaterThanOrEqual(
             sequences.count,
@@ -879,9 +879,9 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     // MARK: - Fatal recovery & stale-release regression (directive 5)
 
     /// Fatal error state must be recoverable through explicit Connect:
-    /// error -> deactivate -> activate -> connectionBegan -> connectionReady -> macActive
+    /// error -> deactivate -> activate -> connectionBegan -> connectionReady -> localActive
     func testFatalThenConnectRecoversStateMachine() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.fatal()
         XCTAssertEqual(machine.state, .error)
 
@@ -893,21 +893,21 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.connectionBegan()
         XCTAssertEqual(machine.state, .connecting)
         machine.connectionReady()
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
     /// Stale normal release after fatal must not overwrite .error phase.
     /// TransitionSequenceGate discards stale transition; phase stays .error.
     func testStaleNormalReleaseAfterFatalDoesNotOverwriteError() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.fatal()
         XCTAssertEqual(machine.state, .error)
 
         // Stale normal release callback (as if from a prior suppression session)
         // attempts to drive phase back to .ready. The gate must reject it.
         var gate = TransitionSequenceGate()
-        let fatalTransition = StateTransition(sequence: 5, from: .dexActive, to: .error, reason: .fatalError)
-        let staleNormalRelease = StateTransition(sequence: 4, from: .recovering, to: .macActive, reason: .suppressionReleased)
+        let fatalTransition = StateTransition(sequence: 5, from: .remoteActive, to: .error, reason: .fatalError)
+        let staleNormalRelease = StateTransition(sequence: 4, from: .returning, to: .localActive, reason: .suppressionReleased)
 
         XCTAssertTrue(gate.shouldApply(fatalTransition), "fatal transition applied")
         XCTAssertFalse(gate.shouldApply(staleNormalRelease), "stale normal release discarded")
@@ -916,13 +916,13 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
     /// Stale normal release after connection loss must not set phase to .ready.
     func testStaleNormalReleaseAfterConnectionLostDoesNotSetReady() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
         machine.connectionLost()
-        XCTAssertEqual(machine.state, .recovering)
+        XCTAssertEqual(machine.state, .returning)
 
         var gate = TransitionSequenceGate()
-        let lostTransition = StateTransition(sequence: 7, from: .dexActive, to: .recovering, reason: .connectionLost)
-        let staleNormalRelease = StateTransition(sequence: 6, from: .recovering, to: .macActive, reason: .suppressionReleased)
+        let lostTransition = StateTransition(sequence: 7, from: .remoteActive, to: .returning, reason: .connectionLost)
+        let staleNormalRelease = StateTransition(sequence: 6, from: .returning, to: .localActive, reason: .suppressionReleased)
 
         XCTAssertTrue(gate.shouldApply(lostTransition))
         XCTAssertFalse(gate.shouldApply(staleNormalRelease))
@@ -933,46 +933,46 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     /// Simulated by feeding a stale sequence to TransitionSequenceGate.
     func testStaleReleaseFromOldGenerationDiscarded() {
         var gate = TransitionSequenceGate()
-        let current = StateTransition(sequence: 10, from: .recovering, to: .macActive, reason: .suppressionReleased)
-        let stale = StateTransition(sequence: 9, from: .recovering, to: .macActive, reason: .suppressionReleased)
+        let current = StateTransition(sequence: 10, from: .returning, to: .localActive, reason: .suppressionReleased)
+        let stale = StateTransition(sequence: 9, from: .returning, to: .localActive, reason: .suppressionReleased)
 
         XCTAssertTrue(gate.shouldApply(current))
         XCTAssertFalse(gate.shouldApply(stale), "older generation release must be discarded")
         XCTAssertEqual(gate.lastAppliedSequence, 10)
     }
 
-    /// Non-fatal connection loss followed by fresh Connect recovers via recovering -> connecting -> macActive.
-    func testConnectionLostThenFreshConnectRecoversViaRecovering() {
-        let machine = makeDexActive(edge: .left)
+    /// Non-fatal connection loss followed by fresh Connect recovers via returning -> connecting -> localActive.
+    func testConnectionLostThenFreshConnectRecoversViaReturning() {
+        let machine = makeRemoteActive(edge: .left)
         machine.connectionLost()
-        XCTAssertEqual(machine.state, .recovering)
+        XCTAssertEqual(machine.state, .returning)
 
-        // Fresh Connect path: connectionBegan -> connectionReady -> macActive
+        // Fresh Connect path: connectionBegan -> connectionReady -> localActive
         machine.connectionBegan()
         XCTAssertEqual(machine.state, .connecting)
         machine.connectionReady()
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
-    /// Normal boundary return with live connection transitions to macActive and phase ready.
+    /// Normal boundary return with live connection transitions to localActive and phase ready.
     func testNormalBoundaryReturnWithLiveConnection() {
-        let machine = makeDexActive(edge: .right)
+        let machine = makeRemoteActive(edge: .right)
         machine.pointerMoved(dx: 300, dy: 0) // deep into Android
         machine.pointerMoved(dx: -360, dy: 0) // crosses boundary + hysteresis
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 
-    /// Watchdog/emergency hotkey release immediately returns to macActive via recovering.
+    /// Watchdog/emergency hotkey release immediately returns to localActive via returning.
     func testWatchdogAndEmergencyHotkeyReleaseImmediately() {
-        let machine = makeDexActive(edge: .left)
+        let machine = makeRemoteActive(edge: .left)
 
-        // Watchdog timeout path: emergencyReturn transitions recovering -> macActive
+        // Watchdog timeout path: emergencyReturn transitions returning -> localActive
         machine.emergencyReturn(reason: .watchdogTimeout)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
 
         // Emergency hotkey path
         machine.pointerAtEdge(.left)
         machine.emergencyReturn(reason: .emergencyReturn)
-        XCTAssertEqual(machine.state, .macActive)
+        XCTAssertEqual(machine.state, .localActive)
     }
 }

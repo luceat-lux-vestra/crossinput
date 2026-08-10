@@ -8,6 +8,16 @@ import android.view.InputEvent
 import android.view.MotionEvent
 import java.lang.reflect.Method
 
+/** Semantic pointer boundary consumed by the CXI dispatcher. */
+interface PointerInjector {
+    fun selectDisplay(display: Display)
+    fun refreshMetrics(displayId: Int)
+    fun moveRelative(dx: Int, dy: Int)
+    fun button(button: Int, down: Boolean)
+    fun scroll(horizontal: Float, vertical: Float)
+    fun close()
+}
+
 /**
  * Input backend that injects pointer events via InputManager.injectInputEvent()
  * with display ID targeting (scrcpy-style SDK injection).
@@ -17,10 +27,10 @@ import java.lang.reflect.Method
  * (android.jar), so they are invoked via reflection wrappers, exactly like
  * scrcpy's server does.
  */
-class SdkPointerBackend(
+class InputManagerPointerInjector(
     private val log: Logger,
     private val context: Context,
-) {
+) : PointerInjector {
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
     private var selectedDisplayId: Int = -1
     private var selectedDisplay: Display? = null
@@ -51,7 +61,7 @@ class SdkPointerBackend(
         }
     }
 
-    fun selectDisplay(display: Display) {
+    override fun selectDisplay(display: Display) {
         selectedDisplayId = display.displayId
         selectedDisplay = display
         initialized = true
@@ -67,12 +77,12 @@ class SdkPointerBackend(
         // external screen is rendering), so an OFF state only logs a warning.
         if (display.state != Display.STATE_ON) {
             log.warn(
-                "SdkPointerBackend",
+                "InputManagerPointerInjector",
                 "display $selectedDisplayId state=${display.state} is not ON; " +
                     "still selecting it (DeX reports stale OFF states)",
             )
         }
-        log.info("SdkPointerBackend", "selected display $selectedDisplayId (${displayWidth}x$displayHeight)")
+        log.info("InputManagerPointerInjector", "selected target $selectedDisplayId (${displayWidth}x$displayHeight)")
     }
 
     /**
@@ -80,7 +90,7 @@ class SdkPointerBackend(
      * (e.g. the external monitor resolution changed mid-session). Keeps the
      * clamp bounds in sync so pointer coordinates stay inside the new size.
      */
-    fun refreshMetrics(displayId: Int) {
+    override fun refreshMetrics(displayId: Int) {
         if (displayId != selectedDisplayId || !initialized) return
         val display = selectedDisplay ?: return
         val metrics = android.util.DisplayMetrics()
@@ -91,14 +101,14 @@ class SdkPointerBackend(
         currentX = currentX.coerceIn(0f, displayWidth - 1f)
         currentY = currentY.coerceIn(0f, displayHeight - 1f)
         log.info(
-            "SdkPointerBackend",
+            "InputManagerPointerInjector",
             "display $displayId size changed to ${displayWidth}x$displayHeight; re-clamped cursor",
         )
     }
 
-    fun moveRelative(dx: Int, dy: Int) {
+    override fun moveRelative(dx: Int, dy: Int) {
         if (!initialized || displayWidth == 0) {
-            log.warn("SdkPointerBackend", "moveRelative called before display selected")
+            log.warn("InputManagerPointerInjector", "moveRelative called before target selected")
             return
         }
 
@@ -108,9 +118,9 @@ class SdkPointerBackend(
         injectMoveEvent()
     }
 
-    fun button(button: Int, down: Boolean) {
+    override fun button(button: Int, down: Boolean) {
         if (!initialized || selectedDisplay == null) {
-            log.warn("SdkPointerBackend", "button called before display selected")
+            log.warn("InputManagerPointerInjector", "button called before target selected")
             return
         }
 
@@ -136,9 +146,9 @@ class SdkPointerBackend(
         buttons = newButtons
     }
 
-    fun scroll(horizontal: Float, vertical: Float) {
+    override fun scroll(horizontal: Float, vertical: Float) {
         if (!initialized || selectedDisplay == null) {
-            log.warn("SdkPointerBackend", "scroll called before display selected")
+            log.warn("InputManagerPointerInjector", "scroll called before target selected")
             return
         }
 
@@ -205,7 +215,7 @@ class SdkPointerBackend(
                 try {
                     method.invoke(event, selectedDisplayId)
                 } catch (e: Exception) {
-                    log.warn("SdkPointerBackend", "setDisplayId failed: ${e.message}")
+                    log.warn("InputManagerPointerInjector", "target routing metadata update failed: ${e.message}")
                 }
             }
         }
@@ -214,23 +224,27 @@ class SdkPointerBackend(
     private fun injectEvent(event: MotionEvent) {
         try {
             val method = injectInputEventMethod ?: run {
-                log.error("SdkPointerBackend", "injectInputEvent method not available")
+                log.error("InputManagerPointerInjector", "injectInputEvent method not available")
                 return
             }
             val result = method.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC) as Boolean
             if (!result) {
-                log.warn("SdkPointerBackend", "injectInputEvent returned false")
+                log.warn("InputManagerPointerInjector", "injectInputEvent returned false")
             }
         } catch (e: SecurityException) {
-            log.error("SdkPointerBackend", "injectInputEvent security exception: ${e.message}")
+            log.error("InputManagerPointerInjector", "injectInputEvent security exception: ${e.message}")
         } catch (e: Exception) {
-            log.error("SdkPointerBackend", "injectInputEvent failed: ${e.javaClass.simpleName}: ${e.message}")
+            log.error("InputManagerPointerInjector", "injectInputEvent failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
-    fun close() {
+    override fun close() {
         initialized = false
         selectedDisplayId = -1
         selectedDisplay = null
     }
 }
+
+/** Compatibility name for the pre-rebaseline implementation. */
+@Deprecated("Use InputManagerPointerInjector")
+typealias SdkPointerBackend = InputManagerPointerInjector

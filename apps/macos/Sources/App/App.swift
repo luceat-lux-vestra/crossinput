@@ -47,45 +47,39 @@ extension Ampersand {
     }()
 }
 
-/// Menu bar icon color reflects state at a glance:
-/// gray idle / orange connecting / red error / green macActive /
-/// blue dexActive / yellow recovering.
+/// Menu bar icon color reflects session and control state at a glance.
 extension AppModel {
     var statusColor: Color {
-        if state == .dexActive { return .blue }
-        if state == .recovering { return .yellow }
-        switch phase {
-        case .idle: return .gray
+        if case .remote = controlState { return .blue }
+        if case .returning = controlState { return .yellow }
+        switch sessionState {
+        case .disconnected: return .gray
         case .connecting: return .orange
         case .ready: return .green
-        case .error: return .red
+        case .reconnecting: return .orange
+        case .failed: return .red
         }
     }
-}
-
-enum AppPhase: Equatable {
-    case idle
-    case connecting
-    case ready
-    case error(String)
 }
 
 @MainActor
 final class AppModel: ObservableObject {
 
-    @Published var phase: AppPhase = .idle
-    @Published var state: SwitchState = .disabled
-    @Published var displays: [DisplayInfo] = []
-    @Published var selectedDisplay: DisplayInfo?
+    @Published var sessionState: SessionState = .disconnected
+    @Published var controlState: ControlState = .local
+    @Published var targetState: TargetState = .unavailable
+    @Published var targets: [RemoteTarget] = []
+    @Published var selectedTarget: RemoteTarget?
     @Published var serial: String = ""
 
     /// Last successful serial, kept for auto-reconnect after wireless drops.
     @Published var lastSerial: String = ""
     @MainActor private var reconnectTask: Task<Void, Never>?
 
-    /// Accessed from the capture thread and the reader queue; ConnectionManager
+    /// Accessed from the capture thread and the reader queue; RemoteSession
     /// is internally locked (@unchecked Sendable).
-    nonisolated(unsafe) var connection: ConnectionManager?
+    nonisolated(unsafe) var connection: RemoteSession?
+    nonisolated let adbTransport: AdbTransport
     nonisolated let capture: InputCapture
     nonisolated let switchMachine: EdgeSwitchStateMachine
     nonisolated(unsafe) private var hidDeviceId: UInt32?
@@ -94,15 +88,16 @@ final class AppModel: ObservableObject {
 
     /// Monotonic gate for transition side effects. Transitions with a lower
     /// or equal sequence are stale (their side effects already superseded by
-    /// a newer transition) and must be discarded — an old `.dexActive`
-    /// callback can never re-suppress the capture after a newer
-    /// `.error`/`.recovering` (see TransitionSequenceGate).
+    /// a newer transition) and must be discarded — an old remote callback
+    /// can never re-suppress the capture after a newer failure/return
+    /// (see TransitionSequenceGate).
     private var transitionGate = TransitionSequenceGate()
     /// Current suppression generation, set when suppression starts.
     /// Used to discard stale onSuppressionReleased callbacks.
     private var currentSuppressionGeneration: UInt64 = 0
 
     init() {
+        adbTransport = AdbTransport()
         capture = InputCapture()
         // Opt-in diagnostic logging for edge-switch movement (metadata only:
         // entryEdge, raw dx/dy, axis delta, virtual position, state). Never
@@ -114,11 +109,11 @@ final class AppModel: ObservableObject {
                 guard let self else { return }
                 // Stale-transition guard: an older transition callback that
                 // arrives after a newer one must not overwrite newer side
-                // effects (e.g. a past `.dexActive` re-suppressing capture
-                // after a newer `.error` released it).
+                // effects (e.g. a past remote callback re-suppressing capture
+                // after a newer failure released it).
                 guard self.transitionGate.shouldApply(transition) else { return }
                 Diagnostics.log("edge transition \(transition.from.rawValue) -> \(transition.to.rawValue) reason=\(transition.reason.rawValue) sequence=\(transition.sequence)")
-                self.state = transition.to
+                self.updateControlState(for: transition.to)
                 self.apply(state: transition.to, reason: transition.reason)
             }
         }
@@ -137,7 +132,7 @@ final class AppModel: ObservableObject {
         }
         capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
-                // Suppression was lifted. The phase must reflect the actual
+                // Suppression was lifted. The session state must reflect the actual
                 // cause: a dead connection stays disconnected (idle/reconnect),
                 // a fatal error stays error, and only live-connection releases
                 // (normal return, watchdog, emergency hotkey) become ready.
@@ -152,9 +147,9 @@ final class AppModel: ObservableObject {
                 let outcome = SuppressionPhasePolicy.nextPhase(after: reason,
                                                                isConnected: self.connection?.isConnected == true)
                 switch outcome {
-                case .idle: self.phase = .idle
-                case .ready: self.phase = .ready
-                case .error: self.phase = .error("helper fatal: suppression released after fatal error")
+                case .idle: self.sessionState = .disconnected
+                case .ready: self.sessionState = .ready
+                case .error: self.sessionState = .failed("helper fatal: suppression released after fatal error")
                 }
                 let machineReason: TransitionReason
                 switch reason {
@@ -167,7 +162,7 @@ final class AppModel: ObservableObject {
                 case .externalControl: machineReason = .externalControlTakeover
                 }
                 self.switchMachine.emergencyReturn(reason: machineReason)
-                Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase) gen=\(generation)")
+                Diagnostics.log("suppression released reason=\(reason.rawValue) session=\(self.sessionState) gen=\(generation)")
             }
         }
     }
@@ -176,20 +171,21 @@ final class AppModel: ObservableObject {
 
     func connect(serial: String) async {
         self.serial = serial
-        phase = .connecting
-        // Start clean: any displays from a previous session must not survive.
-        displays = []
-        selectedDisplay = nil
+        sessionState = .connecting
+        // Start clean: targets from a previous session must not survive.
+        targets = []
+        selectedTarget = nil
+        targetState = .unavailable
         // Tear down any previous connection (repeated Connect clicks must not
         // leave orphaned helpers on the device).
         let old = connection
         connection = nil
         old?.shutdownAndWait()
-        var config = ConnectionManager.Configuration(serial: serial)
-        let adbPath = Self.locateAdb()
+        var config = RemoteSession.Configuration(serial: serial)
+        let adbPath = adbTransport.configuredPath ?? AdbTransport.locate()
         if let adbPath { config.adbPath = adbPath }
         config.stderrHandler = { text in Diagnostics.log("helper: \(text)") }
-        let manager = ConnectionManager(configuration: config)
+        let manager = RemoteSession(configuration: config)
         manager.onEvent = { [weak self] frame in
             self?.handleUnsolicited(frame)
         }
@@ -201,11 +197,12 @@ final class AppModel: ObservableObject {
                 guard let self, let manager, self.connection === manager else { return }
                 self.hidDeviceId = nil
                 self.connection = nil
-                self.displays = []
-                self.selectedDisplay = nil
+                self.targets = []
+                self.selectedTarget = nil
+                self.targetState = .unavailable
                 self.switchMachine.connectionLost()
-                if self.phase == .connecting || self.phase == .ready {
-                    self.phase = .idle
+                if self.sessionState == .connecting || self.sessionState == .ready {
+                    self.sessionState = .disconnected
                 }
                 self.scheduleAutoReconnect()
             }
@@ -225,11 +222,14 @@ final class AppModel: ObservableObject {
             let listFrame = try await manager.request(.listDisplays, payload: Data())
             let list = try Messages.decodeDisplayList(listFrame.payload)
             await MainActor.run {
-                displays = list
-                applyAutoSelection(list)
+                let normalized = RemoteTargetCatalog.normalize(list)
+                targets = normalized
+                targetState = normalized.isEmpty ? .unavailable : .available
+                applyAutoSelection(normalized)
             }
             switchMachine.connectionReady()
-            // phase is set via onStateChange callback when state reaches .macActive
+            sessionState = .ready
+            // sessionState is set via the successful connection path.
             applyEdgeConfig()
             if enable() {
                 await setupHidDevice()
@@ -237,23 +237,25 @@ final class AppModel: ObservableObject {
         } catch {
             Diagnostics.log("connect failed: \(error)")
             switchMachine.connectionLost()
-            phase = .error("\(error)")
+            sessionState = .failed("\(error)")
         }
     }
 
-    func select(_ display: DisplayInfo) {
-        selectedDisplay = display
+    func select(_ target: RemoteTarget) {
+        selectedTarget = target
+        targetState = .selected(target.id)
         Task {
             guard let connection else { return }
             _ = try? await connection.request(.selectDisplay,
-                                              payload: Messages.selectDisplay(displayId: display.displayId))
+                                              payload: Messages.selectDisplay(displayId: target.id.rawValue))
         }
     }
 
     func disconnect() {
         reconnectTask?.cancel()
-        displays = []
-        selectedDisplay = nil
+        targets = []
+        selectedTarget = nil
+        targetState = .unavailable
         if let deviceId = hidDeviceId {
             hidDeviceId = nil
             let destroyPayload = Messages.destroyHidDevice(deviceId: deviceId)
@@ -265,25 +267,27 @@ final class AppModel: ObservableObject {
         connection?.shutdownAndWait()
         connection = nil
         switchMachine.deactivate()
-        phase = .idle
+        sessionState = .disconnected
     }
 
     @MainActor
     func handleDisplayChanged(_ info: DisplayInfo) {
-        if let idx = displays.firstIndex(where: { $0.displayId == info.displayId }) {
-            displays[idx] = info
-            Diagnostics.log("display updated id=\(info.displayId) name=\(info.name)")
+        let target = RemoteTargetCatalog.normalize(info)
+        if let idx = targets.firstIndex(where: { $0.id == target.id }) {
+            targets[idx] = target
+            Diagnostics.log("target updated id=\(target.id.rawValue) name=\(target.name)")
         } else {
-            displays.append(info)
-            Diagnostics.log("display added id=\(info.displayId) name=\(info.name)")
+            targets.append(target)
+            Diagnostics.log("target added id=\(target.id.rawValue) name=\(target.name)")
         }
-        // If we were on this display and it changed, refresh edge config
-        if selectedDisplay?.displayId == info.displayId {
+        targetState = selectedTarget == nil ? .available : targetState
+        // If we were on this target and it changed, refresh edge config.
+        if selectedTarget?.id == target.id {
             applyEdgeConfig()
         }
-        // If the new/updated display is a desktop and we have no selection, auto-select
-        if info.isDesktop && selectedDisplay == nil {
-            select(info)
+        // If the new/updated target is external and we have no selection, auto-select.
+        if target.kind == .external && selectedTarget == nil {
+            select(target)
         }
     }
 
@@ -302,12 +306,21 @@ final class AppModel: ObservableObject {
                     return
                 }
                 await MainActor.run {
-                    displays = list
+                    let normalized = RemoteTargetCatalog.normalize(list)
+                    targets = normalized
+                    if let currentTarget = selectedTarget,
+                       normalized.contains(where: { $0.id == currentTarget.id }) {
+                        targetState = .selected(currentTarget.id)
+                    } else {
+                        targetState = normalized.isEmpty ? .unavailable : .available
+                    }
                     Diagnostics.log("refreshDisplays: \(list.count) display(s)")
                     applyEdgeConfig()
-                    if selectedDisplay.flatMap({ sel in list.contains(where: { $0.displayId == sel.displayId }) }) == false {
-                        // Previously selected display disappeared; fall back to desktop.
-                        applyAutoSelection(list)
+                    if let currentTarget = selectedTarget,
+                       !normalized.contains(where: { $0.id == currentTarget.id }) {
+                        // Previously selected target disappeared; fall back by policy.
+                        selectedTarget = nil
+                        applyAutoSelection(normalized)
                     }
                 }
             } catch {
@@ -317,17 +330,15 @@ final class AppModel: ObservableObject {
     }
 
     @MainActor
-    private func applyAutoSelection(_ list: [DisplayInfo]) {
-        if let override = AppSettings.Settings.displayIdOverride,
-           let match = list.first(where: { $0.displayId == UInt32(override) }) {
-            select(match)
-        } else if let desktop = list.first(where: { $0.isDesktop }) {
-            select(desktop)
-        } else if let hdmi = list.first(where: { $0.type == 2 }) { // HDMI
-            select(hdmi)
-        } else if let first = list.first {
-            select(first)
+    private func applyAutoSelection(_ targets: [RemoteTarget]) {
+        guard let target = RemoteTargetCatalog.preferredTarget(
+            in: targets,
+            override: AppSettings.Settings.displayIdOverride
+        ) else {
+            targetState = .unavailable
+            return
         }
+        select(target)
     }
 
     /// Wireless debugging on Samsung automatically disables on Wi-Fi drop /
@@ -344,7 +355,7 @@ final class AppModel: ObservableObject {
             Diagnostics.log("auto-reconnect skipped (serial: \(serial.isEmpty ? "none" : "usb"))")
             return
         }
-        phase = .idle
+        sessionState = .reconnecting
         Diagnostics.log("auto-reconnect scheduled for \(serial)")
         reconnectTask?.cancel()
         let target = serial
@@ -356,12 +367,12 @@ final class AppModel: ObservableObject {
                 guard await self.isConnectionNil() else { return }
                 // Re-issue adb connect on the remembered endpoint and on any
                 // freshly discovered mDNS endpoint (port may have changed).
-                let endpoints = await Self.discoverWirelessEndpoints(target: target)
+                let endpoints = self.adbTransport.discoverWirelessEndpoints(target: target)
                 Diagnostics.log("auto-reconnect attempt \(attempt): endpoints \(endpoints.count)")
                 for endpoint in endpoints {
-                    Self.reconnectAdb(serial: endpoint)
+                    self.adbTransport.reconnect(serial: endpoint)
                 }
-                let found = await Self.firstAdbSerial()
+                let found = self.adbTransport.firstConnectedSerial()
                 if !found.isEmpty {
                     Diagnostics.log("auto-reconnect attempt \(attempt): device \(found)")
                     await self.connect(serial: found)
@@ -376,59 +387,12 @@ final class AppModel: ObservableObject {
     @MainActor
     private func isConnectionNil() -> Bool { connection == nil }
     @MainActor
-    private func isPhaseReady() -> Bool { phase == .ready }
-
-    nonisolated private static func reconnectAdb(serial: String) {
-        guard serial.contains(":") else { return }
-        let adb = locateAdb() ?? "/usr/local/bin/adb"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adb)
-        process.arguments = ["connect", serial]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            Diagnostics.log("adb connect failed: \(error)")
-        }
-    }
-
-    /// Returns `[ip:port]` candidates: the remembered endpoint first, then any
-    /// `_adb-tls-connect._tcp` mDNS advertisement with a matching IP.
-    nonisolated private static func discoverWirelessEndpoints(target: String) async -> [String] {
-        let adb = locateAdb() ?? "/usr/local/bin/adb"
-        var endpoints: [String] = []
-        if !target.isEmpty { endpoints.append(target) }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adb)
-        process.arguments = ["mdns", "services"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
-            for line in lines {
-                guard line.contains("_adb-tls-connect._tcp") else { continue }
-                // e.g. "SM-G977N_XXXX._adb-tls-connect._tcp 192.168.0.10:37327"
-                guard let endpoint = line.split(whereSeparator: { $0.isWhitespace }).last else { continue }
-                let s = String(endpoint)
-                guard s.contains(":") else { continue }
-                if s != target, endpoints.contains(s) == false { endpoints.append(s) }
-            }
-        } catch {
-            Diagnostics.log("adb mdns services failed: \(error)")
-        }
-        return endpoints
-    }
+    private func isPhaseReady() -> Bool { sessionState == .ready }
 
     func enable() -> Bool {
         guard capture.start() else {
             Diagnostics.log("capture start failed: accessibility not granted")
-            phase = .error("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
+            sessionState = .failed("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
             return false
         }
         Diagnostics.log("capture started; edge switch activated")
@@ -447,8 +411,8 @@ final class AppModel: ObservableObject {
     }
 
     var isDisconnected: Bool {
-        switch phase {
-        case .idle, .error: return true
+        switch sessionState {
+        case .disconnected, .failed: return true
         default: return false
         }
     }
@@ -471,22 +435,39 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func apply(state: SwitchState, reason: TransitionReason) {
+    private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
-        case .dexActive:
+        case .remoteActive:
             if let gen = capture.suppress() {
                 currentSuppressionGeneration = gen
             }
-        case .macActive, .recovering, .disabled, .error:
+        case .localActive, .returning, .disabled, .error:
             capture.release(reason: Self.releaseReason(for: reason))
         default:
             break
         }
     }
 
+    /// Projects the legacy edge-safety machine into the application control
+    /// lifecycle. Session and target state are updated by their own paths.
+    private func updateControlState(for state: HandoffState) {
+        switch state {
+        case .edgeArmed:
+            controlState = .arming(switchMachine.entryEdge)
+        case .remoteActive:
+            controlState = .remote(selectedTarget?.id)
+        case .returning:
+            controlState = .returning
+        case .localActive:
+            controlState = .local
+        case .disabled, .disconnected, .connecting, .error:
+            controlState = .local
+        }
+    }
+
     /// Creates the UHID mouse on the helper and remembers its device id.
     /// If creation fails, pointer events fall back to the SDK injection path
-    /// (SdkPointerBackend) which still routes hover/click but cannot move the
+    /// (InputManagerPointerInjector) which still routes hover/click but cannot move the
     /// DeX cursor sprite — UHID is the verified channel (issue #6 verdict).
     func setupHidDevice() async {
         guard let connection else { return }
@@ -529,7 +510,7 @@ final class AppModel: ObservableObject {
         send(event: event)
     }
 
-    /// Forward a captured event while the pointer is suppressed (dexActive).
+    /// Forward a captured event while the pointer is suppressed for a remote target.
     /// Uses the UHID mouse when available, else falls back to SDK injection.
     nonisolated func onCapturedKeyEvent(_ keyEvent: CapturedKeyEvent) {
         // Dispatched straight to the helper as KEY_EVENT. The Android side
@@ -647,7 +628,7 @@ final class AppModel: ObservableObject {
         case .fatalError:
             if let fatal = try? Messages.decodeFatalError(frame.payload) {
                 Task { @MainActor in
-                    phase = .error("helper fatal \(fatal.code): \(fatal.message)")
+                    sessionState = .failed("helper fatal \(fatal.code): \(fatal.message)")
                     // fatal() (not connectionLost()) keeps the machine in .error,
                     // so the subsequent suppression release cannot collapse the
                     // fatal cause into an idle/ready phase (SuppressionPhasePolicy).
@@ -666,11 +647,6 @@ final class AppModel: ObservableObject {
         default:
             break
         }
-    }
-
-    nonisolated private static func locateAdb() -> String? {
-        let candidates = ["/usr/local/bin/adb", "/opt/homebrew/bin/adb", "/usr/bin/adb"]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     // MARK: - Per-display edge configuration
@@ -740,31 +716,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Returns the first connected adb device serial, if any.
-    static func firstAdbSerial() async -> String {
-        let adb = locateAdb() ?? "/usr/local/bin/adb"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adb)
-        process.arguments = ["devices"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return ""
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
-        for line in lines.dropFirst() {
-            let parts = line.split(whereSeparator: { $0.isWhitespace })
-            if parts.count >= 2, parts[1] == "device" {
-                return String(parts[0])
-            }
-        }
-        return ""
-    }
 }
 
 private struct AppMenu: View {
@@ -777,7 +728,7 @@ private struct AppMenu: View {
         if model.isDisconnected {
             Button("Connect") {
                 Task {
-                    await model.connect(serial: await AppModel.firstAdbSerial())
+                    await model.connect(serial: model.adbTransport.firstConnectedSerial())
                 }
             }
             Button("Grant Accessibility…") {
@@ -788,16 +739,16 @@ private struct AppMenu: View {
             }
         }
 
-        if !model.displays.isEmpty {
+        if !model.targets.isEmpty {
             Divider()
-            ForEach(model.displays, id: \.uniqueId) { display in
+            ForEach(model.targets) { target in
                 Button {
-                    model.select(display)
+                    model.select(target)
                 } label: {
                     HStack {
-                        Image(systemName: model.selectedDisplay?.displayId == display.displayId
+                        Image(systemName: model.selectedTarget?.id == target.id
                               ? "checkmark.circle.fill" : "circle")
-                        Text("\(display.name) (\(display.width)×\(display.height))")
+                        Text("\(target.name) (\(target.width)×\(target.height))")
                     }
                 }
             }
@@ -832,7 +783,7 @@ private struct AppMenu: View {
             }
         }
 
-        if model.state == .dexActive {
+        if case .remote = model.controlState {
             Divider()
             Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
         }
@@ -843,11 +794,18 @@ private struct AppMenu: View {
 
     @MainActor
     private var statusText: String {
-        switch model.phase {
-        case .idle: return "Not connected"
+        switch model.sessionState {
+        case .disconnected: return "Not connected"
         case .connecting: return "Connecting…"
-        case .ready: return model.state.rawValue
-        case let .error(message): return "Error: \(message)"
+        case .ready:
+            switch model.controlState {
+            case .local: return "Local"
+            case let .arming(edge): return "Arming (\(edge.rawValue))"
+            case .remote: return "Remote"
+            case .returning: return "Returning"
+            }
+        case .reconnecting: return "Reconnecting…"
+        case let .failed(message): return "Error: \(message)"
         }
     }
 }

@@ -1,8 +1,12 @@
 # Ampersand — CrossInput
 
-**One MacBook pointer for macOS and Android.**
+**A macOS-to-Android input bridge.**
 
-Push your trackpad or mouse pointer to the screen edge to switch to your Samsung DeX external display — or, when DeX isn't running, control the Android phone screen directly. Push it back to return to macOS. No app install on your phone and no root required: after a one-time wireless debugging setup, your MacBook trackpad or mouse becomes the pointer on your Android device.
+CrossInput captures pointer and keyboard input on macOS and safely hands control
+to a selected Android display at a configured screen edge. Samsung DeX is a
+supported Android target/use case, not the product definition. Push the pointer
+back to return to macOS. No phone app install or root is required: after a
+one-time wireless-debugging setup, the Mac controls the selected Android target.
 
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
@@ -17,11 +21,11 @@ Push your trackpad or mouse pointer to the screen edge to switch to your Samsung
 
 ## Features
 
-- **Edge switching**: push the pointer past the screen edge to switch between macOS and DeX
+- **Edge switching**: push the pointer past the screen edge to switch between macOS and the selected Android target
 - **Works with any pointer device**: trackpad, wired or wireless mouse — captured at the macOS level (CGEventTap), no device-specific setup
 - **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface — the cursor sprite is rendered by Samsung DeX itself
 - **Two pointer injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and an InputManager injection fallback via reflection (alternative — routes events to windows, scrcpy-style)
-- **Works on any Android screen**: DeX external display, or the phone screen directly when DeX is not in use — DeX is not required
+- **Works across Android targets**: DeX external display, phone screen, or another discovered Android display — DeX is not required
 - **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
 - **Keyboard**: mac → Android keyboard delivery — UHID keyboard backend plus an InputManager virtual-injection fallback via reflection (both implemented and verified on SM-G977N / Android 12), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
 
@@ -36,7 +40,7 @@ Verified on device (SM-G977N, Android 12):
 
 Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 
-Progress: [docs/roadmap.md](docs/roadmap.md) · Design: [docs/architecture.md](docs/architecture.md)
+Progress: [docs/roadmap.md](docs/roadmap.md) · Product: [docs/product.md](docs/product.md) · Design: [docs/architecture.md](docs/architecture.md) · [ADR-0009](docs/adr/ADR-0009-architecture-rebaseline.md) · [CXI v2 design](protocol/v2-design.md)
 
 ## Installation (v0.1.0)
 
@@ -51,7 +55,7 @@ Ampersand needs `adb` 37+ (with mDNS wireless debugging support) on `PATH`; inst
 | Component | Requirement |
 |---|---|
 | macOS | 14+ (Apple Silicon preferred) |
-| Samsung Galaxy | Android 10+ (DeX-capable device) |
+| Android target | Android 10+; Samsung Galaxy/DeX is a supported target/use case |
 | Phone setup | Developer options → Wireless debugging (one-time) |
 
 ## Development environment

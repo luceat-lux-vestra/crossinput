@@ -9,7 +9,6 @@ import com.crossinput.helper.protocol.FrameWriter
 import com.crossinput.helper.protocol.Messages
 import com.crossinput.helper.protocol.Protocol
 import com.crossinput.helper.protocol.ProtocolException
-import com.crossinput.helper.SdkPointerBackend
 import java.io.BufferedOutputStream
 import java.io.FileDescriptor
 import java.io.FileInputStream
@@ -48,7 +47,7 @@ object Main {
             log.error("Main", "no system context (ActivityThread unavailable); aborting")
             return
         }
-        val sdkPointer = SdkPointerBackend(log, context)
+        val sdkPointer = InputManagerPointerInjector(log, context)
         val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
         val keyboard = KeyboardBackend(log, context, hid, mode)
@@ -195,8 +194,8 @@ enum class KeyboardBackendMode(val token: String) {
 class Controller(
     private val discovery: DisplayDiscovery,
     private val hid: HidDeviceManager,
-    private val sdkPointer: SdkPointerBackend,
-    private val keyboard: KeyboardBackend,
+    private val pointer: PointerInjector,
+    private val keyboard: KeyboardInjector,
     private val writerLock: WriterLock,
     private val log: Logger,
 ) {
@@ -217,15 +216,15 @@ class Controller(
             }
             Protocol.TYPE_POINTER_MOVE_REL -> {
                 val (dx, dy) = Messages.pointerMoveRel(frame.payload)
-                sdkPointer.moveRelative(dx, dy)
+                pointer.moveRelative(dx, dy)
             }
             Protocol.TYPE_POINTER_BUTTON -> {
                 val btn = Messages.pointerButton(frame.payload)
-                sdkPointer.button(btn.button, btn.down)
+                pointer.button(btn.button, btn.down)
             }
             Protocol.TYPE_POINTER_SCROLL -> {
                 val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
-                sdkPointer.scroll(horizontal, vertical)
+                pointer.scroll(horizontal, vertical)
             }
             Protocol.TYPE_KEY_EVENT -> {
                 keyboard.keyEvent(Messages.keyEvent(frame.payload))
@@ -304,8 +303,8 @@ class Controller(
             }
             return
         }
-        sdkPointer.selectDisplay(raw)
-        log.info("Main", "selected display id=$displayId (SDK pointer backend)")
+        pointer.selectDisplay(raw)
+        log.info("Main", "selected target display id=$displayId (InputManagerPointerInjector)")
         writerLock.withLock {
             it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(display))
         }

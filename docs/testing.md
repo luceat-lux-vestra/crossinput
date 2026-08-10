@@ -154,7 +154,7 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 3 | SELECT_DISPLAY | Unknown id → FATAL_ERROR; known id → DISPLAY_CHANGED echo | ✅ |
 | 4 | CREATE_HID_DEVICE | HID_CREATED with device id; `/dev/uhid` created (log metadata) | ✅ |
 | 5 | HID_REPORT (pointer, UHID) | Pointer visible + moves on DeX external display | ✅ |
-| 5b | InputManager pointer fallback (SdkPointerBackend) | Implemented; UHID pointer path verified on device above. Pointer fallback on-device verification is tracked separately and is pending — no verification claim for the fallback path | ⏳ pending (no on-device record; UHID path verified only) |
+| 5b | InputManager pointer fallback (InputManagerPointerInjector) | Implemented; UHID pointer path verified on device above. Pointer fallback on-device verification is tracked separately and is pending — no verification claim for the fallback path | ⏳ pending (no on-device record; UHID path verified only) |
 | 6 | UHID keyboard | `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`; single key-down/up yields exactly one character | ✅ |
 | 7 | macOS shortcut suppression | Cmd+Tab / Spotlight do not fire on the Mac while captured | ✅ |
 | 8 | Korean 2-set | Hangul composes in a DeX field via Android IME | ✅ |
@@ -192,7 +192,7 @@ identically, the root cause is not yet found — do not claim otherwise.
 4. **Feed the same trace to both**: run the captured trace through the unit-test
    fixture on each branch and compare the state transitions. Accept:
    - origin/main: reproduces immediate return (failure)
-   - fix branch: stays `dexActive` while moving into Android; returns only past
+   - fix branch: stays `remoteActive` while moving into Android; returns only past
      the boundary + hysteresis
    Identical behavior on both branches ⇒ root cause not found; stop and
    investigate before continuing.
@@ -205,7 +205,7 @@ identically, the root cause is not yet found — do not claim otherwise.
 For each edge (left, right, top, bottom) capture diag.log excerpts covering:
 (1) movement toward Android, (2) movement inside Android, (3) pull-back toward
 macOS, (4) reaching the boundary, (5) crossing the hysteresis threshold,
-(6) `macActive` transition with reason. Validate the invariant on all four
+(6) `localActive` transition with reason. Validate the invariant on all four
 edges: `axisDelta > 0` while moving into Android, `axisDelta < 0` while
 pulling back toward macOS. The top/bottom directions were inverted in
 origin/main (returning while moving *into* Android); the fix branch must show
