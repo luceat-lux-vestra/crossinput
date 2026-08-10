@@ -148,6 +148,17 @@ class FixtureTest {
     }
 
     @Test
+    fun pointerResult() {
+        val frame = fixture("pointer-result")
+        assertEquals(Protocol.TYPE_POINTER_RESULT, frame.type)
+        assertEquals(10, frame.requestId)
+        assertArrayEquals(
+            byteArrayOf(0, 12, 0, 0, 0, 248.toByte(), 255.toByte(), 255.toByte(), 255.toByte()),
+            frame.payload,
+        )
+    }
+
+    @Test
     fun ping() {
         val frame = fixture("ping")
         assertEquals(Protocol.TYPE_PING, frame.type)

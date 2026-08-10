@@ -1,15 +1,12 @@
 import Foundation
 import Diagnostics
 
-public enum HandoffState: String, Sendable {
+public enum HandoffState: String, Sendable, Hashable {
     case disabled
-    case disconnected
-    case connecting
     case localActive
     case edgeArmed
     case remoteActive
     case returning
-    case error
 }
 
 /// Compatibility name for clients and fixtures from the pre-rebaseline edge
@@ -33,22 +30,17 @@ public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
     case left, right, top, bottom
 }
 
-/// Why a state transition happened. Every transition is logged with its
-/// reason so on-device traces distinguish an intentional boundary crossing
-/// from fail-safe paths (watchdog, hotkey, suppression release, connection
-/// loss) — the root-cause questions AGENTS.md verification demands.
+/// Why a state transition happened. The handoff machine records only control
+/// and safety causes. External availability causes are translated by the
+/// application layer into the control-oriented `remoteUnavailable` command.
 public enum TransitionReason: String, Sendable {
     case activation
-    case connectionBegan
-    case connectionReady
-    case connectionLost
     case edgeEntered
     case boundaryCrossed
     case emergencyReturn
     case watchdogTimeout
     case suppressionReleased
-    case externalControlTakeover
-    case fatalError
+    case remoteUnavailable
     case deactivated
 }
 
@@ -72,10 +64,11 @@ public struct StateTransition: Sendable, Equatable {
 
 /// Edge Switch state machine.
 ///
-/// Flow: disabled -> disconnected -> connecting -> localActive; pointer reaches a
-/// screen edge -> edgeArmed -> remoteActive (pointer captured by the device); the
-/// pointer moving back across the entry edge and beyond the return hysteresis,
-/// the emergency shortcut, or a lost connection brings control back to macOS.
+/// Flow: disabled -> localActive; pointer reaches a screen edge -> edgeArmed ->
+/// remoteActive (pointer captured by the device); the pointer moving back
+/// across the entry edge and beyond the return hysteresis, an emergency
+/// shortcut, or a remote-unavailable fail-safe command brings control back to
+/// macOS. External lifecycle is deliberately outside this type.
 ///
 /// Movement model: while DeX owns the pointer, movement is tracked along a
 /// virtual axis perpendicular to the entry edge. Position 0 is the entry
@@ -137,9 +130,10 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// before control returns (hysteresis against accidental wobble).
     public let returnHysteresis: CGFloat
 
-    /// When enabled, `pointerMoved` logs movement metadata only (entryEdge, raw
-    /// dx/dy, axis delta, virtual position, state) — never key codes, clipboard
-    /// contents, or input payloads (AGENTS.md hard rule 4). Off by default.
+    /// When enabled, `pointerMoved` logs non-payload movement metadata only
+    /// (entry edge, state, and first-event marker) — never raw deltas, key
+    /// codes, clipboard contents, or input payloads (AGENTS.md hard rule 4).
+    /// Off by default.
     public let isDiagnosticsEnabled: Bool
 
     public init(returnHysteresis: CGFloat = 60, isDiagnosticsEnabled: Bool = false) {
@@ -172,7 +166,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func activate() {
         run {
             guard stateStorage == .disabled else { return }
-            transition(to: .disconnected, reason: .activation)
+            transition(to: .localActive, reason: .activation)
         }
     }
 
@@ -181,39 +175,6 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
             transition(to: .disabled, reason: .deactivated)
-        }
-    }
-
-    public func connectionBegan() {
-        run {
-            switch stateStorage {
-            case .disconnected, .returning: transition(to: .connecting, reason: .connectionBegan)
-            case .localActive: transition(to: .connecting, reason: .connectionBegan)
-            default: break
-            }
-        }
-    }
-
-    public func connectionReady() {
-        run {
-            switch stateStorage {
-            // .error is terminal (helper fatal): it must never be covered by a
-            // readiness transition. Recovery is explicit deactivate -> activate.
-            case .connecting, .disconnected: transition(to: .localActive, reason: .connectionReady)
-            default: break
-            }
-        }
-    }
-
-    public func connectionLost() {
-        run {
-            switch stateStorage {
-            case .connecting, .localActive, .edgeArmed, .remoteActive, .returning:
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
-                transition(to: .returning, reason: .connectionLost)
-            default: break
-            }
         }
     }
 
@@ -248,8 +209,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     /// Relative pointer movement while DeX owns the pointer.
-    /// Called with the movement actually delivered to Android (deliveredDx/dy
-    /// from HIDReportSplitter), never with raw deltas that were dropped.
+    /// Called with the movement accepted by the semantic input-delivery
+    /// boundary, never with raw deltas from a failed send.
     ///
     /// A zero-zero call is a complete no-op: it neither consumes the
     /// first-movement exemption nor changes the virtual position, state, or
@@ -276,7 +237,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             if isDiagnosticsEnabled {
                 Diagnostics.log(
                     "edge pointerMoved entry=\(entryEdgeStorage.rawValue) state=\(stateStorage.rawValue) "
-                        + "dx=\(dx) dy=\(dy) axisDelta=\(delta) virtualPos=\(position) first=\(first)"
+                        + "movement=received first=\(first)"
                 )
             }
             // The first event after entering never returns (issue #37); leftover
@@ -288,8 +249,10 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         }
     }
 
-    /// Emergency return: always works, regardless of connection state.
-    public func emergencyReturn(reason: TransitionReason = .emergencyReturn) {
+    /// Returns control to macOS for a control-oriented fail-safe reason.
+    /// The caller may use this for an external failure, a watchdog, or an
+    /// emergency shortcut; the machine does not know the underlying cause.
+    public func forceReturn(reason: TransitionReason = .emergencyReturn) {
         run {
             switch stateStorage {
             case .edgeArmed, .remoteActive:
@@ -299,12 +262,11 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         }
     }
 
-    public func fatal() {
-        run {
-            virtualAxisPosition = 0
-            hasReceivedFirstMove = false
-            transition(to: .error, reason: .fatalError)
-        }
+    /// Compatibility spelling for callers that issue an explicit emergency
+    /// return. New control code uses `forceReturn(reason:)` so all fail-safe
+    /// causes share the same control-oriented boundary.
+    public func emergencyReturn(reason: TransitionReason = .emergencyReturn) {
+        forceReturn(reason: reason)
     }
 
     // MARK: - Internal

@@ -16,6 +16,7 @@ const T = {
   0x8001: "HELLO_ACK", 0x8002: "DISPLAY_LIST", 0x8003: "DISPLAY_CHANGED",
   0x8004: "HID_CREATED", 0x8005: "HID_ERROR", 0x8006: "PONG",
   0x8007: "LOG_EVENT", 0x8008: "FATAL_ERROR",
+  0x8009: "POINTER_RESULT",
 };
 const codes = Object.fromEntries(Object.entries(T).map(([v, k]) => [k, Number(v)]));
 
@@ -131,6 +132,14 @@ function decodePayload(type, payload) {
       const code = u32(payload, 0);
       const message = lengthPrefixed(payload, 4).toString("utf8");
       return { code, message };
+    }
+    case "POINTER_RESULT": {
+      const statuses = ["DELIVERED", "FAILED", "PARTIALLY_DELIVERED"];
+      return {
+        status: statuses[payload[0]] ?? `0x${payload[0].toString(16)}`,
+        deliveredDx: payload.readInt32LE(1),
+        deliveredDy: payload.readInt32LE(5),
+      };
     }
     default:
       fail(`no decoder for type ${type}`);

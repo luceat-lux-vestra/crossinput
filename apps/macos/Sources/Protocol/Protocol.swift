@@ -31,6 +31,7 @@ public enum MessageType: UInt16, Sendable {
     case pong = 0x8006
     case logEvent = 0x8007
     case fatalError = 0x8008
+    case pointerResult = 0x8009
 
     public var isRequest: Bool { rawValue < 0x8000 }
 }
@@ -219,6 +220,13 @@ public enum DecodeError: Error, Equatable, Sendable {
     case truncated(String)
     case invalidString
     case invalidDisplay
+    case invalidPointerDelivery
+}
+
+public enum PointerDeliveryStatus: UInt8, Sendable, Equatable {
+    case delivered = 0
+    case failed = 1
+    case partiallyDelivered = 2
 }
 
 struct Decoder {
@@ -242,6 +250,12 @@ struct Decoder {
     mutating func u32() throws -> UInt32 {
         guard offset + 4 <= data.count else { throw DecodeError.truncated("u32") }
         let v = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        offset += 4
+        return v
+    }
+    mutating func i32() throws -> Int32 {
+        guard offset + 4 <= data.count else { throw DecodeError.truncated("i32") }
+        let v = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
         offset += 4
         return v
     }
@@ -271,7 +285,7 @@ public extension Messages {
         return (keyCode, metaState, action, repeatCount)
     }
 
-    static func decodeDisplay(_ payload: Data) throws -> DisplayInfo {
+    public static func decodeDisplay(_ payload: Data) throws -> DisplayInfo {
         var d = Decoder(payload)
         let displayId = try d.u32()
         let type = try d.u8()
@@ -290,11 +304,26 @@ public extension Messages {
                            layerStack: layerStack)
     }
 
-    static func decodeDisplayChanged(_ payload: Data) throws -> DisplayInfo {
+    public static func decodeDisplayChanged(_ payload: Data) throws -> DisplayInfo {
         return try decodeDisplay(payload)
     }
 
-    static func decodeDisplayList(_ payload: Data) throws -> [DisplayInfo] {
+    public static func pointerResult(status: PointerDeliveryStatus,
+                                     deliveredDx: Int32 = 0,
+                                     deliveredDy: Int32 = 0) -> Data {
+        Data([status.rawValue]) + LE.i32(deliveredDx) + LE.i32(deliveredDy)
+    }
+
+    public static func decodePointerResult(_ payload: Data) throws -> (status: PointerDeliveryStatus, deliveredDx: Int32, deliveredDy: Int32) {
+        var d = Decoder(payload)
+        let rawStatus = try d.u8()
+        guard let status = PointerDeliveryStatus(rawValue: rawStatus) else {
+            throw DecodeError.invalidPointerDelivery
+        }
+        return (status, try d.i32(), try d.i32())
+    }
+
+    public static func decodeDisplayList(_ payload: Data) throws -> [DisplayInfo] {
         var d = Decoder(payload)
         let count = Int(try d.u32())
         var displays: [DisplayInfo] = []
@@ -307,12 +336,12 @@ public extension Messages {
         return displays
     }
 
-    static func decodeHidCreated(_ payload: Data) throws -> UInt32 {
+    public static func decodeHidCreated(_ payload: Data) throws -> UInt32 {
         var d = Decoder(payload)
         return try d.u32()
     }
 
-    static func decodeHidError(_ payload: Data) throws -> (deviceId: UInt32, code: UInt32, message: String) {
+    public static func decodeHidError(_ payload: Data) throws -> (deviceId: UInt32, code: UInt32, message: String) {
         var d = Decoder(payload)
         let deviceId = try d.u32()
         let code = try d.u32()
@@ -320,7 +349,7 @@ public extension Messages {
         return (deviceId, code, message)
     }
 
-    static func decodeLogEvent(_ payload: Data) throws -> (level: UInt8, tag: String, message: String) {
+    public static func decodeLogEvent(_ payload: Data) throws -> (level: UInt8, tag: String, message: String) {
         var d = Decoder(payload)
         let level = try d.u8()
         let tag = try d.lengthPrefixedString()
@@ -328,7 +357,7 @@ public extension Messages {
         return (level, tag, message)
     }
 
-    static func decodeFatalError(_ payload: Data) throws -> (code: UInt32, message: String) {
+    public static func decodeFatalError(_ payload: Data) throws -> (code: UInt32, message: String) {
         var d = Decoder(payload)
         let code = try d.u32()
         let message = try d.lengthPrefixedString()

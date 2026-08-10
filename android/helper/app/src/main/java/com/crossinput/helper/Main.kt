@@ -42,22 +42,32 @@ object Main {
         }
         log.info("Main", "keyboard backend mode=${mode.token}")
 
+        val pointerMode = PointerBackendMode.fromArgs(args).getOrElse {
+            log.error("Main", it.message ?: "invalid ${PointerBackendMode.FLAG} argument")
+            System.exit(2)
+            return
+        }
+        log.info("Main", "pointer backend mode=${pointerMode.token}")
+
         val context = systemContext()
         if (context == null) {
             log.error("Main", "no system context (ActivityThread unavailable); aborting")
             return
         }
-        val sdkPointer = InputManagerPointerInjector(log, context)
-        val discovery = DisplayDiscovery(context, writerLock, log, sdkPointer::refreshMetrics)
         val hid = HidDeviceManager(log, context)
+        val inputManagerPointer = InputManagerPointerInjector(log, context)
+        val uhidPointer = UhidPointerInjector(log, hid)
+        val pointer = PointerDispatcher(log, uhidPointer, inputManagerPointer, pointerMode)
+        val discovery = DisplayDiscovery(context, writerLock, log, pointer::refreshMetrics)
         val keyboard = KeyboardBackend(log, context, hid, mode)
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { mainLooper.quitSafely() },
             destroyKeyboard = keyboard::destroy,
+            destroyPointer = pointer::close,
             destroyHid = hid::destroyAll,
             flush = { writerLock.withLock { it.flush() } },
         )
-        val controller = Controller(discovery, hid, sdkPointer, keyboard, writerLock, log)
+        val controller = Controller(discovery, hid, pointer, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
         val stdinThread = Thread {
@@ -110,6 +120,7 @@ object Main {
 class MainShutdownLifecycle(
     private val requestMainLoopQuit: () -> Unit,
     private val destroyKeyboard: () -> Unit,
+    private val destroyPointer: () -> Unit = {},
     private val destroyHid: () -> Unit,
     private val flush: () -> Unit,
 ) {
@@ -126,9 +137,13 @@ class MainShutdownLifecycle(
             destroyKeyboard()
         } finally {
             try {
-                destroyHid()
+                destroyPointer()
             } finally {
-                flush()
+                try {
+                    destroyHid()
+                } finally {
+                    flush()
+                }
             }
         }
     }
@@ -216,15 +231,27 @@ class Controller(
             }
             Protocol.TYPE_POINTER_MOVE_REL -> {
                 val (dx, dy) = Messages.pointerMoveRel(frame.payload)
-                pointer.moveRelative(dx, dy)
+                val result = pointer.moveRelative(dx, dy)
+                writePointerResult(frame, result)
+                if (result.status != PointerDelivery.Status.DELIVERED) {
+                    log.warn("Main", "pointer move delivery status=${result.status}")
+                }
             }
             Protocol.TYPE_POINTER_BUTTON -> {
                 val btn = Messages.pointerButton(frame.payload)
-                pointer.button(btn.button, btn.down)
+                val result = pointer.button(btn.button, btn.down)
+                writePointerResult(frame, result)
+                if (result.status != PointerDelivery.Status.DELIVERED) {
+                    log.warn("Main", "pointer button delivery status=${result.status}")
+                }
             }
             Protocol.TYPE_POINTER_SCROLL -> {
                 val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
-                pointer.scroll(horizontal, vertical)
+                val result = pointer.scroll(horizontal, vertical)
+                writePointerResult(frame, result)
+                if (result.status != PointerDelivery.Status.DELIVERED) {
+                    log.warn("Main", "pointer scroll delivery status=${result.status}")
+                }
             }
             Protocol.TYPE_KEY_EVENT -> {
                 keyboard.keyEvent(Messages.keyEvent(frame.payload))
@@ -269,6 +296,21 @@ class Controller(
         }
     }
 
+    private fun writePointerResult(frame: Frame, result: PointerDelivery) {
+        val status = when (result.status) {
+            PointerDelivery.Status.DELIVERED -> 0
+            PointerDelivery.Status.FAILED -> 1
+            PointerDelivery.Status.PARTIALLY_DELIVERED -> 2
+        }
+        writerLock.withLock {
+            it.write(
+                Protocol.TYPE_POINTER_RESULT,
+                frame.requestId,
+                Messages.pointerResult(status, result.deliveredDx, result.deliveredDy),
+            )
+        }
+    }
+
     private fun handleListDisplays(frame: Frame) {
         val displays = discovery.displays()
         log.info("Main", "listing ${displays.size} display(s)")
@@ -303,8 +345,17 @@ class Controller(
             }
             return
         }
-        pointer.selectDisplay(raw)
-        log.info("Main", "selected target display id=$displayId (InputManagerPointerInjector)")
+        if (!pointer.selectDisplay(raw)) {
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_FATAL_ERROR,
+                    frame.requestId,
+                    Messages.fatalError(4, "no pointer backend available"),
+                )
+            }
+            return
+        }
+        log.info("Main", "selected target display id=$displayId")
         writerLock.withLock {
             it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(display))
         }

@@ -1,169 +1,96 @@
 # Architecture Rebaseline Audit and Verification
 
-> Scope: issue #41 / architecture rebaseline. Date: 2026-08-10.
-> This record separates local checks from real-device evidence.
+> Scope: issue #41 / PR #42 follow-up. Updated: 2026-08-11.
+> This record separates implementation checks from real-device evidence.
 
-## 1. Problems found in the previous baseline
+## Implementation boundary
 
-- Product and architecture documents described CrossInput primarily as a DeX
-  switcher even though the helper already supported a phone display.
-- `AppModel` exposed a connection `phase`, an edge `SwitchState`, raw
-  `DisplayInfo`, reconnect subprocesses, target selection, input delivery, and
-  emergency release in one application file.
-- `ConnectionManager` owned both ADB process startup and CXI request/response
-  correlation.
-- Application code selected targets using raw v1 display type/flag values.
-- The Android `Controller` depended directly on the concrete SDK pointer and
-  keyboard backend classes.
-- CXI v1 intentionally exposes Android display IDs, display flags/state, Android
-  key constants, HID descriptors, and HID reports, but this leakage was not
-  listed with a containment boundary.
-- The roadmap mixed completed implementation, accepted decisions, pending
-  device evidence, and future features in one phase table.
+The follow-up completed the code boundaries that were previously only
+described in ADR-0009:
 
-## 2. Boundary changes
+- `SessionController` owns `SessionState`, helper lifecycle, reconnect entry,
+  and stale-session callback rejection.
+- `EdgeSwitchStateMachine` owns only `disabled`, `localActive`, `edgeArmed`,
+  `remoteActive`, and `returning`. External failure is a
+  `remoteUnavailable` control command, not a session state.
+- `ControlHandoffController` owns capture suppression/release and credits the
+  handoff position only after `InputSender` receives the helper's
+  `POINTER_RESULT` accepted movement.
+- `InputSender` is the normal macOS pointer/keyboard path. AppModel no longer
+  owns UHID descriptors, reports, device IDs, or button state.
+- `AdbTransport` owns ADB process and binary channel startup. `RemoteSession`
+  owns CXI handshake, correlation, timeout, and event dispatch.
+- The helper now has `PointerDispatcher`, `UhidPointerInjector`, and
+  `InputManagerPointerInjector`. UHID is preferred; a failed report can fail
+  over, while a partially delivered split movement is never retried.
+- `TargetSelectionController` confirms `DISPLAY_CHANGED` before publishing a
+  selected target and ignores stale A/B responses or disappeared targets.
+- CXI v1 now carries `POINTER_RESULT` delivery status without a version bump;
+  raw HID command compatibility remains unchanged.
+- v1 `CREATE_HID_DEVICE`, `HID_REPORT`, and `DESTROY_HID_DEVICE` remain in the
+  helper compatibility handler. The current Ampersand path sends semantic
+  `POINTER_*` messages and does not use those raw commands.
 
-- Added `SessionState`, `ControlState`, and `TargetState` as independent
-  application lifecycle models.
-- Added `RemoteTargetID`, `RemoteTarget`, and `RemoteTargetCatalog`; the menu
-  bar now consumes normalized targets rather than raw display records.
-- Renamed the session role to `RemoteSession` while retaining a deprecated
-  `ConnectionManager` compatibility alias.
-- Extracted ADB discovery, mDNS endpoint parsing, reconnect, and connected
-  serial lookup into `AdbTransport`.
-- Added Android `PointerInjector` and `KeyboardInjector` seams. The existing
-  SDK pointer implementation is named `InputManagerPointerInjector` with a
-  compatibility typealias.
-- Extracted UHID keyboard lifecycle into `UhidKeyboardInjector` and renamed the
-  reflection implementation to `InputManagerKeyboardInjector`; backend choice
-  remains in `KeyboardBackend`.
-- Changed the Swift package's application target to an explicit executable
-  target and kept the composition root in `App.swift`, resolving the implicit
-  `main.swift` target ambiguity without changing startup behavior.
-
-The existing edge state machine remains the safety-critical serialized
-implementation for hysteresis, transition sequencing, and emergency release.
-Its connection transition methods are a migration seam and are recorded as
-technical debt below; the application-facing lifecycle is now separate.
-
-## 3. State model
-
-| Previous application view | Rebaseline view |
-|---|---|
-| `phase = idle/connecting/ready/error` | `SessionState = disconnected/connecting/ready/reconnecting/failed` |
-| `SwitchState` used as the UI state | `ControlState = local/arming(edge)/remote(targetId)/returning` projection |
-| raw display selection | `TargetState = unavailable/available/selected(targetId)` |
-
-The edge machine still receives connection-loss/fatal signals for fail-safe
-cleanup, but connection status is no longer the menu bar model's source of
-truth. A target disappearing invalidates selection and does not imply session
-loss. A control return does not disconnect the session.
-
-## 4. Connection and composition responsibilities
-
-- `App.swift` creates the menu-bar scene and application model.
-- `AppModel` currently coordinates the lifecycle transition while the split is
-  introduced; its ADB subprocess discovery/reconnect code is now delegated to
-  `AdbTransport`.
-- `RemoteSession` owns CXI framing, pending request correlation, helper stream
-  lifetime, and disconnect callbacks. ADB process ownership remains the next
-  extraction seam inside that type.
-- `AdbTransport` owns ADB-specific endpoint discovery and reconnect commands.
-
-This is deliberately incremental: no speculative dependency-injection layer or
-event bus was introduced.
-
-## 5. Android backend responsibilities
-
-- `PointerInjector` is the semantic pointer boundary used by CXI dispatch.
-- `InputManagerPointerInjector` retains the existing reflection-based pointer
-  injection and display metric behavior.
-- `KeyboardInjector` is the semantic keyboard boundary used by CXI dispatch.
-- `UhidKeyboardInjector` retains pressed-key-state reporting, device cleanup,
-  and report failure handling.
-- `InputManagerKeyboardInjector` retains virtual `KeyEvent` construction and
-  hidden-API failure handling.
-- `KeyboardBackend` retains AUTO/UHID/INPUT_MANAGER selection, fallback policy,
-  metadata-only logging, and virtual-key cleanup.
-
-No UHID descriptor, report format, or InputManager implementation detail is
-exposed to the macOS application model.
-
-## 6. CXI v1 leakage and v2 design
-
-The complete inventory is in [`protocol/v2-design.md`](../../protocol/v2-design.md).
-The important compatibility boundary is:
-
-- v1 `displayId`, `type`, `flags`, and `state` remain decoded as wire fields;
-- v1 `KEY_EVENT` retains Android keyCode/metaState semantics;
-- v1 `CREATE_HID_DEVICE` and `HID_REPORT` remain available;
-- new application code consumes normalized remote targets;
-- CXI v2 is documented only and is not negotiated or shipped here.
-
-## 7. Local regression results
+## Local checks
 
 Commands run from the repository on 2026-08-11:
 
 ```text
-cd apps/macos && swift test
-→ pass: 85 XCTest cases + 28 Swift Testing cases
+cd apps/macos && swift test --disable-sandbox
+-> pass: 40 XCTest cases and 29 Swift Testing cases
 
-JAVA_17_HOME=<JDK 17 installation> \
-ANDROID_HOME=<Android SDK installation> \
-  ./scripts/build-android-helper.sh test
-→ pass: Gradle test and Android helper compilation
+cd android/helper && ./gradlew test
+-> pass: Android helper unit tests and debug/release Kotlin compilation
+
+cd android/helper && ./gradlew assembleDebug
+-> pass: debug APK build
 
 node protocol/scripts/check-fixtures.mjs
-→ pass: 14 v1 fixtures verified
+-> pass: 15 v1 fixtures verified
 
 find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
-→ pass
+-> pass
+
+git diff --check
+-> pass
 ```
 
-The Android build emitted only the existing compileSdk/AGP compatibility
-warning and `Display.getRealMetrics` deprecation warnings. No protocol fixture
-was changed.
+The Android run used the repository's declared JDK 17 / Gradle 8.10.2 toolchain.
+The environment emitted existing compileSdk 35 / AGP 8.5.2 and SDK XML
+compatibility warnings; no source or fixture validation failed.
 
-## 8. Real-device status
+## Device evidence status
 
-A bounded, non-pointer device smoke was performed on 2026-08-11 against the
-available SM-G977N / Android 12 (API 31). The debug helper was rebuilt and
-pushed, then driven through HELLO, LIST_DISPLAYS, and SHUTDOWN. The helper
-reported a v1 handshake, listed two display records, created and destroyed the
-UHID keyboard, and exited cleanly. The metadata-only log excerpt is preserved
-in [`evidence/architecture-rebaseline-2026-08-11/`](evidence/architecture-rebaseline-2026-08-11/).
+The existing 2026-08-10 InputManager keyboard fallback evidence remains valid
+for that unchanged keyboard fallback path. On 2026-08-11, a fresh helper-level
+SM-G977N run also covered semantic pointer move/button/scroll delivery with
+automatic UHID selection and a forced InputManager pointer fallback; both
+returned `POINTER_RESULT` delivered statuses and shut down cleanly.
 
-This smoke did not send pointer or keyboard input, select a target, or provide
-screen confirmation. Therefore this rebaseline does not claim newly verified
-completion for pointer handoff, keyboard delivery, display hot-plug, reconnect,
-InputManager pointer fallback, or emergency recovery.
+The follow-up run on 2026-08-11 did provide one real macOS app edge handoff and
+100 consecutive real event-tap/helper edge handoffs. The diagnostic segment
+contained 100 matching `boundaryCrossed` returns, balanced cursor hide/show
+events, and no watchdog, remote-unavailable, or emergency return. The helper
+also registered `Ampersand Mouse` as `CURSOR | EXTERNAL` during the run.
 
-The pre-existing SM-G977N / Android 12 records remain valid evidence for the
-unchanged UHID and InputManager keyboard behavior, especially
-[`inputmanager-keyboard-fallback-2026-08-10.md`](inputmanager-keyboard-fallback-2026-08-10.md).
-The full rebaseline device matrix still needs to be run using
-[`docs/testing.md`](../testing.md), including target selection, input routing,
-screen confirmation, and 100 repeat edge switches.
+The preserved PR record is [PR #42 device verification comment](https://github.com/luceat-lux-vestra/crossinput/pull/42#issuecomment-5246363534).
 
-## 9. Remaining technical debt
+The run still did not provide secure target-screen pixel confirmation,
+keyboard text/composition regression after the controller split, target
+selection rollback, or reconnect failure-path evidence. `screencap -d 6 -p`
+returned an empty file for the target display. PR #42 must not close #41 or
+claim full completion until the remaining screen-confirmed matrix is attached.
 
-- Extract ADB process/channel ownership from `RemoteSession` into the
-  `AdbTransport` runtime seam.
-- Move application orchestration from `AppModel` into focused session,
-  handoff, and target-selection controllers when tests can preserve the same
-  callback ordering.
-- Remove connection lifecycle cases from the legacy edge machine after the
-  existing transition tests are migrated to the independent control model.
-- Add a true helper-side normalized target message when CXI v2 migration is
-  authorized; do not alter v1 fields during stabilization.
-- Split the generic `HidDeviceManager` lifecycle from semantic pointer delivery
-  if a second pointer backend creates a real change axis.
+The handoff model was also exercised through 100 complete four-edge cycles
+with `swift test --disable-sandbox --filter EdgeSwitchStateMachineTests`. That
+test and the real left-edge event-tap repetition both passed, but neither is a
+substitute for secure target-screen confirmation.
 
-## 10. Next bounded issues
+## Required next verification
 
-- Issue #17: complete the display hot-plug/ON-OFF/reconnect/stale-selection
-  regression matrix.
-- Issue #41 follow-up: extract the remaining `RemoteSession` and `AppModel`
-  orchestration seams, with no behavior change.
-- Future issue: CXI v2 compatibility/migration plan, design first and separate
-  from runtime refactoring.
+Run the remaining matrix in [`docs/testing.md`](../testing.md), including DeX
+and phone targets, semantic pointer movement/buttons/scroll, forced InputManager
+pointer fallback, keyboard and Korean composition, helper/ADB failure recovery,
+target removal/reappearance, and secure target-screen confirmation. Keep logs
+metadata-only and attach the screen confirmation and ADB/logcat excerpts to
+the PR or issue.

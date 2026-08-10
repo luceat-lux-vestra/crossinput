@@ -1,8 +1,9 @@
 # CrossInput Architecture
 
-> Status: rebaseline accepted for v0.1.x stabilization. The current v1
-> implementation remains macOS → Android and keeps the verified ADB,
-> app_process, UHID, and InputManager paths.
+> Status: rebaseline implementation complete for v0.1.x stabilization. The
+> current v1 implementation remains macOS → Android and keeps the ADB,
+> app_process, UHID, and InputManager paths. Fresh device evidence for the
+> semantic pointer path remains a separate completion gate.
 
 CrossInput is an input bridge. It captures semantic input on a local host and
 safely hands control to a selected remote target. The current product is
@@ -58,11 +59,13 @@ Protocol
 └─ CXI v1                   compatibility wire codec
 ```
 
-The current source is being migrated toward these boundaries in small steps.
-`RemoteSession` still contains part of the ADB process-management seam and CXI
-session correlation; its former `ConnectionManager` name is retained only as a
-deprecated compatibility alias. The menu bar composition root creates and wires
-these components; business orchestration belongs in the controllers above.
+These boundaries are implemented in the current source. `SessionController`
+owns the current `SessionState` and replaces stale sessions;
+`TargetSelectionController` confirms `SELECT_DISPLAY` before publishing a selection and rejects
+stale responses; `InputSender` returns a semantic delivery result; and
+`ControlHandoffController` is the thin capture/safety composition boundary.
+The menu bar composition root wires the controllers, while `AppModel` exposes
+their presentation-facing state.
 
 ### Android helper
 
@@ -75,7 +78,7 @@ Target discovery
    └─ Android DisplayManager/reflection adapter
 
 Input dispatcher
-├─ PointerInjector
+├─ PointerDispatcher       UHID primary and deterministic fallback policy
 │  ├─ UhidPointerInjector
 │  └─ InputManagerPointerInjector
 └─ KeyboardInjector
@@ -85,9 +88,13 @@ Input dispatcher
 
 The helper is the only layer that interprets Android display metadata and
 chooses an injection backend. The macOS side receives a v1-compatible display
-record today, but application code should consume a normalized remote-target
-model. UHID descriptors, HID reports, reflection, hidden Android constants, and
-backend failure policy do not cross the application boundary.
+record today, but application code consumes a normalized remote-target model.
+UHID descriptors, HID reports, reflection, hidden Android constants, and
+backend failure policy do not cross the application boundary. The helper's
+`PointerDispatcher` owns semantic pointer backend selection; a failed UHID
+write returns a delivery result and may fail over without retrying a partially
+delivered multi-report move. `POINTER_RESULT` carries the accepted movement
+back to macOS, so handoff accounting never trusts only a successful pipe write.
 
 ## Lifecycle separation
 
@@ -97,7 +104,7 @@ The three lifecycles are related but not interchangeable:
 |---|---|---|
 | Session | `disconnected`, `connecting`, `ready`, `reconnecting`, `failed` | ADB/helper process, CXI handshake, request correlation, disconnect/reconnect |
 | Control | `local`, `arming(edge)`, `remote(target)`, `returning` | Pointer ownership, edge handoff, emergency release, key/button cleanup |
-| Target | `unavailable`, `available`, `selected(targetId)` | Discovery snapshot, selection validity, display disappearance/reappearance |
+| Target | `unavailable`, `available`, `selecting(targetId)`, `selected(targetId)` | Discovery snapshot, confirmed selection validity, display disappearance/reappearance |
 
 Session failure must release local input without waiting for a target refresh.
 A target disappearing invalidates selection without implying that the ADB
@@ -120,6 +127,10 @@ state model.
   adapter until the v2 target model is introduced.
 - macOS owns semantic events (`PointerMove`, `PointerButton`, `Scroll`,
   `KeyDown`, and `KeyUp`), not HID reports.
+- The normal Ampersand pointer path uses `POINTER_MOVE_REL`, `POINTER_BUTTON`,
+  and `POINTER_SCROLL`. v1 `CREATE_HID_DEVICE`, `HID_REPORT`, and
+  `DESTROY_HID_DEVICE` remain decoded and handled by the helper only for
+  legacy compatibility clients.
 - Android-specific discovery and backend selection stay behind helper adapters.
 - Emergency release is local, bounded, and fail-safe on every failure path.
 

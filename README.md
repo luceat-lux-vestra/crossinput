@@ -10,11 +10,11 @@ one-time wireless-debugging setup, the Mac controls the selected Android target.
 
 ```
 ┌─ macOS app (Swift, menu bar) ─┐   ┌─ Android helper (Kotlin) ─┐
-│ pointer + keyboard capture    │   │ UHID virtual mouse+keyboard│
-│ edge switch · shortcut hold   │   │ InputManager inj. fallback │
+│ semantic input + edge handoff │   │ backend dispatcher         │
+│ shortcut suppression          │   │ UHID → InputManager       │
 └───────────┬────────────────────┘   └────────────┬──────────────┘
             │                                     │
-            └──► ADB over Wi-Fi (wireless debugging) ► UHID (no root)
+            └──► ADB over Wi-Fi (wireless debugging) ► Android helper
                                                     ▼
                                     DeX display / Android screen
 ```
@@ -23,7 +23,7 @@ one-time wireless-debugging setup, the Mac controls the selected Android target.
 
 - **Edge switching**: push the pointer past the screen edge to switch between macOS and the selected Android target
 - **Works with any pointer device**: trackpad, wired or wireless mouse — captured at the macOS level (CGEventTap), no device-specific setup
-- **Native mouse behavior**: movement (including pointer acceleration), clicks, and wheel via the UHID kernel interface — the cursor sprite is rendered by Samsung DeX itself
+- **Semantic pointer path**: movement, clicks, and wheel use CXI `POINTER_*` messages; the helper selects the UHID kernel backend and falls back to InputManager — the cursor sprite is rendered by Samsung DeX itself
 - **Two pointer injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and an InputManager injection fallback via reflection (alternative — routes events to windows, scrcpy-style)
 - **Works across Android targets**: DeX external display, phone screen, or another discovered Android display — DeX is not required
 - **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
@@ -31,12 +31,11 @@ one-time wireless-debugging setup, the Mac controls the selected Android target.
 
 ## Status
 
-Verified on device (SM-G977N, Android 12):
-- UHID virtual mouse drives the DeX cursor 1:1 (move/click/scroll) — verified on device
-- UHID virtual keyboard types into DeX fields, including Korean 2-set composition — verified on device
-- System shortcuts are suppressed on the Mac while captured — verified on device
-- The InputManager pointer fallback is implemented (unit/build validated); its on-device verification status is tracked separately from the UHID pointer path and has not yet been exercised on a physical device
-- The InputManager virtual-injection keyboard fallback is implemented and **verified on a physical device** (SM-G977N / Android 12); the verification record is tracked in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33)
+Historical device evidence exists for the pre-rebaseline UHID pointer path,
+UHID keyboard path, shortcut suppression, Korean 2-set composition, and the
+forced InputManager keyboard fallback on SM-G977N / Android 12. The semantic
+pointer/backend path and controller split require a fresh device regression;
+see [docs/testing.md](docs/testing.md) and the audit record.
 
 Released as `Ampersand-0.1.0.dmg` (ad-hoc signed, [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)) — see the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md). Edge-switch stability hardening remains open (issue [#17](https://github.com/luceat-lux-vestra/crossinput/issues/17)).
 

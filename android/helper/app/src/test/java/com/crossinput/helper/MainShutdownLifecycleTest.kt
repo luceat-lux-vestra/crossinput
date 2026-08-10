@@ -22,11 +22,12 @@ class MainShutdownLifecycleTest {
     }
 
     @Test
-    fun cleanupOrdersKeyboardBeforeHidAndRunsOnlyOnce() {
+    fun cleanupOrdersKeyboardPointerBeforeHidAndRunsOnlyOnce() {
         val events = mutableListOf<String>()
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { events += "quit" },
             destroyKeyboard = { events += "keyboard" },
+            destroyPointer = { events += "pointer" },
             destroyHid = { events += "hid" },
             flush = { events += "flush" },
         )
@@ -34,6 +35,6 @@ class MainShutdownLifecycleTest {
         lifecycle.cleanupOnce()
         lifecycle.cleanupOnce()
 
-        assertEquals(listOf("keyboard", "hid", "flush"), events)
+        assertEquals(listOf("keyboard", "pointer", "hid", "flush"), events)
     }
 }

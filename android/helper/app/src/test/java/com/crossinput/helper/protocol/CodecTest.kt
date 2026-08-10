@@ -251,6 +251,15 @@ class CodecTest {
     }
 
     @Test
+    fun pointerResultBuildsAcceptedMovement() {
+        val payload = Messages.pointerResult(0, 12, -8)
+        val bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0, bb.get().toInt())
+        assertEquals(12, bb.int)
+        assertEquals(-8, bb.int)
+    }
+
+    @Test
     fun unknownMessageTypeFailsAfterFatalErrorPath() {
         // sanity: FATAL_ERROR payload parses back
         val fatal = Messages.fatalError(1, "unknown message type 0xffff")

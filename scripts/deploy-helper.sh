@@ -45,6 +45,16 @@ case "$KEYBOARD_BACKEND" in
         ;;
 esac
 
+# Pointer backend override (test-only): auto|uhid|input-manager
+POINTER_BACKEND="${POINTER_BACKEND:-auto}"
+case "$POINTER_BACKEND" in
+    auto | uhid | input-manager) ;;
+    *)
+        echo "invalid POINTER_BACKEND: $POINTER_BACKEND (expected auto|uhid|input-manager)" >&2
+        exit 1
+        ;;
+esac
+
 # CXI frame presets (15-byte little-endian header; AGENTS.md rule 6 — keep in
 # sync with protocol/protocol.md). Header: "CXI" + version u16 + type u16 +
 # requestId u32 + payloadLen u32. Values mirror protocol/fixtures/*.bin.
@@ -91,8 +101,9 @@ start() {
     # adb session ends. tail dies with SIGPIPE when the helper exits.
     # Pass --keyboard-backend override for test-only deterministic selection
     local kb_arg="--keyboard-backend=$KEYBOARD_BACKEND"
+    local pointer_arg="--pointer-backend=$POINTER_BACKEND"
     adb -s "$DEVICE" shell \
-        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
+        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg $pointer_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
     sleep 2
     if ! helper_running; then
         echo "helper failed to start — stderr log:" >&2
@@ -102,6 +113,7 @@ start() {
     echo "device: $DEVICE"
     echo "helper running (stdin <- tail -f $REMOTE_IN; stdout -> $REMOTE_OUT, stderr -> $REMOTE_LOG)"
     echo "keyboard backend: $KEYBOARD_BACKEND"
+    echo "pointer backend: $POINTER_BACKEND"
     echo "next: scripts/deploy-helper.sh list"
 }
 

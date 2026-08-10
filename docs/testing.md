@@ -49,11 +49,15 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 2. `scripts/deploy-helper.sh start` — build + push + launch `app_process` with FIFO stdin.
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
-5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display.
-6. `scripts/deploy-helper.sh send <frame-hex>` with the create-hid fixture frame (`xxd -p protocol/fixtures/create-hid.bin | tr -d '\n'`) — expect HID_CREATED (0x8004).
-7. `scripts/deploy-helper.sh send <frame-hex>` with the hid-report fixture frame (same command on `protocol/fixtures/hid-report.bin`) — pointer must appear/move on the DeX screen.
+5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; the macOS selection controller publishes the target only after this response.
+6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper must select and log the active pointer backend and return `POINTER_RESULT` with status/accepted movement, without logging payloads.
+7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
-9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy UHID devices and exit cleanly (B-07).
+9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy pointer and keyboard UHID devices and exit cleanly (B-07).
+
+For deterministic pointer fallback runs, start the helper with
+`POINTER_BACKEND=input-manager scripts/deploy-helper.sh start`; use the
+discovered display ID from `dumpsys display` when issuing `select` or `pointer`.
 
 Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
@@ -153,17 +157,34 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 2 | LIST_DISPLAYS/DISPLAY_LIST | All displays reported, Desktop display present with correct size/density | ✅ |
 | 3 | SELECT_DISPLAY | Unknown id → FATAL_ERROR; known id → DISPLAY_CHANGED echo | ✅ |
 | 4 | CREATE_HID_DEVICE | HID_CREATED with device id; `/dev/uhid` created (log metadata) | ✅ |
-| 5 | HID_REPORT (pointer, UHID) | Pointer visible + moves on DeX external display | ✅ |
-| 5b | InputManager pointer fallback (InputManagerPointerInjector) | Implemented; UHID pointer path verified on device above. Pointer fallback on-device verification is tracked separately and is pending — no verification claim for the fallback path | ⏳ pending (no on-device record; UHID path verified only) |
+| 5 | Semantic pointer path (UHID primary) | Pointer visible + relative move/click/scroll on DeX external display | ⏳ helper smoke ✅; macOS edge/screen regression pending |
+| 5b | InputManager pointer fallback (`PointerDispatcher`) | Forced fallback routes movement/click/scroll to the selected display | ⏳ helper smoke ✅; macOS app-path screen evidence pending |
 | 6 | UHID keyboard | `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`; single key-down/up yields exactly one character | ✅ |
 | 7 | macOS shortcut suppression | Cmd+Tab / Spotlight do not fire on the Mac while captured | ✅ |
 | 8 | Korean 2-set | Hangul composes in a DeX field via Android IME | ✅ |
 | 9 | SHUTDOWN | Clean exit; UHID devices destroyed; stdout flushed | ✅ |
 | 10 | InputManager virtual-injection fallback | Fallback engaged (forced), single char + modifier, no repeat, no stuck keys, shutdown clean | ✅ verified on device (SM-G977N, 2026-08-10; issue #33) |
 
+## PR #42 mandatory regression matrix
+
+The following is required after the controller and pointer-backend split. A
+local build is not a substitute for the device record.
+
+| Area | Required checks | Evidence status |
+|---|---|---|
+| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, return to macOS | real app handoff + helper routing recorded; target-screen visibility pending |
+| Phone target | phone display selection and pointer routing | pending |
+| Keyboard | key down/up, modifiers, no repeat/stuck key, Korean 2-set, Mac shortcut suppression | pending fresh regression |
+| Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |
+| Failure safety | helper kill, ADB disconnect, emergency hotkey, reconnect, held key/button cleanup, stale callback suppression | pending |
+| Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | pending |
+| Edge stability | 100 consecutive edge switches with no unexpected return or pointer trap | real app 100-cycle event-tap/helper record ✅; target-screen confirmation pending |
+
 ## Edge switching stability (Phase 5)
 
-- Not declared complete until 100 consecutive edge-switch repeat tests pass.
+- The state-machine and real macOS event-tap/helper 100-cycle regressions pass.
+  The requirement is not declared complete until the target screen is
+  confirmed for the same run.
 - For each failure case, verify state machine logs + recovery path.
 
 ### A/B comparison protocol (origin/main vs fix branch, issue #37 / PR #38)
@@ -186,11 +207,12 @@ identically, the root cause is not yet found — do not claim otherwise.
    ```
    Repeat the same steps on the fix branch.
 3. **Capture a real trace**: with `launchctl setenv AMPER_EDGE_DIAG 1`, reproduce
-   the failing maneuver; collect the first 20–50 pointer-move events
-   (`entryEdge=left`, per-event raw dx/dy, axis delta, position, state). Log
-   metadata only (hard rule 4).
-4. **Feed the same trace to both**: run the captured trace through the unit-test
-   fixture on each branch and compare the state transitions. Accept:
+   the failing maneuver; collect the first 20–50 pointer-move event metadata
+   (entry edge, event order/direction, state, and transition reason). Never put
+   raw movement values or input payloads in logs (hard rule 4). If replay is
+   needed, keep the raw synthetic trace in a private test fixture only.
+4. **Feed the same trace to both**: run the same private trace fixture through
+   the unit test on each branch and compare the state transitions. Accept:
    - origin/main: reproduces immediate return (failure)
    - fix branch: stays `remoteActive` while moving into Android; returns only past
      the boundary + hysteresis
@@ -202,11 +224,11 @@ identically, the root cause is not yet found — do not claim otherwise.
 
 ### Four-direction trace collection (top/bottom sign validation)
 
-For each edge (left, right, top, bottom) capture diag.log excerpts covering:
-(1) movement toward Android, (2) movement inside Android, (3) pull-back toward
-macOS, (4) reaching the boundary, (5) crossing the hysteresis threshold,
-(6) `localActive` transition with reason. Validate the invariant on all four
-edges: `axisDelta > 0` while moving into Android, `axisDelta < 0` while
-pulling back toward macOS. The top/bottom directions were inverted in
-origin/main (returning while moving *into* Android); the fix branch must show
-the invariant holds everywhere.
+For each edge (left, right, top, bottom) capture metadata-only diag excerpts
+covering: (1) movement toward Android, (2) movement inside Android, (3)
+pull-back toward macOS, (4) reaching the boundary, (5) crossing the hysteresis
+threshold, and (6) the `localActive` transition with reason. Validate the
+direction invariant with the private trace fixture/unit assertions, not by
+logging raw deltas: movement toward Android must increase the virtual position
+and movement toward macOS must decrease it. The top/bottom directions were
+inverted in origin/main; the fix branch must hold the invariant everywhere.

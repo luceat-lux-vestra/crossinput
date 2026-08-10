@@ -82,11 +82,32 @@ Negative:
 - Real-device verification is still required after the refactor; green local
   tests are insufficient for completion.
 
+## Implementation status
+
+The rebaseline boundaries are implemented in the current v1 code:
+
+- `SessionController` is the single owner of `SessionState` transitions and
+  stale `RemoteSession` replacement.
+- `EdgeSwitchStateMachine` contains only control handoff and pointer-safety
+  states. External failures arrive through `forceReturn(.remoteUnavailable)`.
+- `ControlHandoffController` combines capture with handoff safety, while
+  `InputSender` sends semantic pointer and keyboard messages.
+- `AdbTransport` owns ADB process/channel startup; `RemoteSession` owns CXI
+  correlation, timeouts, and event dispatch.
+- The helper's `PointerDispatcher` selects `UhidPointerInjector` first and
+  fails over to `InputManagerPointerInjector`. v1 raw HID handlers remain only
+  for compatibility and are not used by the normal Ampersand pointer path.
+- `TargetSelectionController` publishes a selection only after a matching
+  `DISPLAY_CHANGED` response and ignores stale selection responses.
+
+This implementation status is separate from device verification status below.
+
 ## Validation
 
 - Documentation baseline: `product.md`, `architecture.md`, `roadmap.md`, and
   `protocol/v2-design.md`.
-- Existing CXI v1 fixtures and protocol tests remain unchanged.
+- Existing CXI v1 command fixtures remain unchanged; the new v1
+  `POINTER_RESULT` response has its own golden fixture and protocol test.
 - macOS and Android build/test gates must pass after each code slice.
 - On-device regression evidence must cover connection, pointer, keyboard,
   target selection, display disappearance/reappearance, backend paths, and

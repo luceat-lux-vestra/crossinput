@@ -24,5 +24,6 @@ enum ControlState: Equatable {
 enum TargetState: Equatable {
     case unavailable
     case available
+    case selecting(RemoteTargetID)
     case selected(RemoteTargetID)
 }

@@ -1,10 +1,56 @@
 import Foundation
 
-/// ADB-specific discovery and reconnect operations. The application/session
-/// layer asks this transport for endpoints; it does not construct ADB
-/// subprocesses or parse ADB output itself.
+/// ADB-specific process and endpoint transport. The application/session layer
+/// asks this type to launch a binary helper channel or discover endpoints; it
+/// does not construct ADB subprocesses or own their byte streams.
 public struct AdbTransport: Sendable {
     public let configuredPath: String?
+
+    public struct LaunchConfiguration: Sendable {
+        public let serial: String
+        public let apkPath: String
+        public let helperClass: String
+        public let stderrHandler: (@Sendable (String) -> Void)?
+        public let terminationHandler: (@Sendable () -> Void)?
+
+        public init(serial: String,
+                    apkPath: String,
+                    helperClass: String,
+                    stderrHandler: (@Sendable (String) -> Void)? = nil,
+                    terminationHandler: (@Sendable () -> Void)? = nil) {
+            self.serial = serial
+            self.apkPath = apkPath
+            self.helperClass = helperClass
+            self.stderrHandler = stderrHandler
+            self.terminationHandler = terminationHandler
+        }
+    }
+
+    /// The binary-safe stdin/stdout/stderr channel owned by ADB transport.
+    /// RemoteSession only consumes the handles and closes the channel; it does
+    /// not spawn or terminate the ADB process itself.
+    public final class Channel: @unchecked Sendable {
+        public let process: Process
+        public let input: FileHandle
+        public let output: FileHandle
+        public let error: FileHandle
+        private let lock = NSLock()
+
+        init(process: Process, input: FileHandle, output: FileHandle, error: FileHandle) {
+            self.process = process
+            self.input = input
+            self.output = output
+            self.error = error
+        }
+
+        public var isRunning: Bool { process.isRunning }
+
+        public func close() {
+            lock.withLock {
+                if process.isRunning { process.terminate() }
+            }
+        }
+    }
 
     public init(path: String? = nil) {
         configuredPath = path
@@ -13,6 +59,53 @@ public struct AdbTransport: Sendable {
     public static func locate() -> String? {
         let candidates = ["/usr/local/bin/adb", "/opt/homebrew/bin/adb", "/usr/bin/adb"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Starts the app_process helper and returns its binary stream channel.
+    /// Cleanup of stale helper instances and ADB process ownership stay here.
+    public func launch(_ configuration: LaunchConfiguration) throws -> Channel {
+        let adb = configuredPath ?? Self.locate() ?? "/usr/local/bin/adb"
+        guard FileManager.default.isExecutableFile(atPath: adb) else {
+            throw AdbTransportError.adbMissing
+        }
+
+        let cleanup = Process()
+        cleanup.executableURL = URL(fileURLWithPath: adb)
+        cleanup.arguments = ["-s", configuration.serial, "shell",
+                             "pkill -f 'crossinput-[h]elper.apk' 2>/dev/null || true"]
+        try? cleanup.run()
+        cleanup.waitUntilExit()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adb)
+        process.arguments = ["-s", configuration.serial, "shell", "-T",
+                             "app_process", "-cp", configuration.apkPath, configuration.helperClass]
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        do {
+            try process.run()
+        } catch {
+            throw AdbTransportError.processSpawnFailed(error.localizedDescription)
+        }
+        let channel = Channel(process: process,
+                               input: inputPipe.fileHandleForWriting,
+                               output: outputPipe.fileHandleForReading,
+                               error: errorPipe.fileHandleForReading)
+        process.terminationHandler = { _ in configuration.terminationHandler?() }
+        channel.error.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            configuration.stderrHandler?(String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return channel
     }
 
     public func reconnect(serial: String) {
@@ -85,4 +178,9 @@ public struct AdbTransport: Sendable {
     private var adbPath: String {
         configuredPath ?? Self.locate() ?? "/usr/local/bin/adb"
     }
+}
+
+public enum AdbTransportError: Error, Sendable {
+    case adbMissing
+    case processSpawnFailed(String)
 }

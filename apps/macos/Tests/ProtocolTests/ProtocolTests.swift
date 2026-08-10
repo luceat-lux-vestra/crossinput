@@ -130,6 +130,14 @@ struct ProtocolTests {
         #expect(payload.isEmpty)
     }
 
+    @Test func pointerResultDecodesAcceptedMovementFromFixture() throws {
+        let payload = payloadOf(fixture("pointer-result.bin"))
+        let result = try Messages.decodePointerResult(payload)
+        #expect(result.status == .delivered)
+        #expect(result.deliveredDx == 12)
+        #expect(result.deliveredDy == -8)
+    }
+
     // MARK: - FrameParser robustness
 
     @Test func parserHandlesSplitFrames() {

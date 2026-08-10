@@ -107,6 +107,13 @@ object Messages {
         return bb.array()
     }
 
+    fun pointerResult(status: Int, deliveredDx: Int = 0, deliveredDy: Int = 0): ByteArray =
+        ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
+            .put(status.toByte())
+            .putInt(deliveredDx)
+            .putInt(deliveredDy)
+            .array()
+
     // ---- helpers ----
 
     private fun le(payload: ByteArray, off: Int): ByteBuffer =

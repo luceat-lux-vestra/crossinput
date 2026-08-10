@@ -21,7 +21,8 @@ Samsung DeX is a supported target, not the product definition.
 - CGEventTap pointer and keyboard capture with screen-edge handoff.
 - ADB wireless transport and app_process helper startup.
 - Android display discovery without a hardcoded display ID.
-- UHID pointer and keyboard paths verified on SM-G977N / Android 12.
+- Historical UHID pointer and keyboard paths were verified on SM-G977N / Android 12;
+  the post-rebaseline semantic pointer path requires fresh evidence.
 - InputManager keyboard fallback verified on SM-G977N / Android 12; evidence is
   recorded under `docs/research/inputmanager-keyboard-fallback-2026-08-10.md`.
 - macOS shortcut suppression, modifier cleanup, reconnect handling, stale
@@ -40,6 +41,11 @@ The architecture rebaseline is the current bounded work stream (issue #41):
 - CXI v1 leakage record and v2 design-only document.
 - Behavior-preserving regression coverage and real-device evidence.
 
+The implementation boundary is complete in PR #42 when local gates pass; the
+PR does not close #41 until the remaining screen-confirmed device matrix is
+attached. The real macOS event-tap/helper 100-cycle record is now attached,
+but target-screen visibility is still pending.
+
 The rebaseline does not include a protocol migration, reverse input, a new
 transport, an installed APK, or a broad repository rewrite.
 
@@ -52,7 +58,7 @@ transport, an installed APK, or a broad repository rewrite.
 - Diagnostics that expose lifecycle metadata without input payloads.
 - Packaging/distribution follow-up: bundled ADB, Homebrew path, and notarization
   when their ADR gates are satisfied.
-- Fresh 100-repeat edge-switch stability record.
+- Screen-confirmed edge-switch stability and remaining regression matrix.
 
 ## Future
 

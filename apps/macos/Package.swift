@@ -17,11 +17,12 @@ let package = Package(
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
         .target(name: "InputCapture", dependencies: ["EdgeSwitch", "Diagnostics"]),
-        .target(name: "EdgeSwitch", dependencies: ["AndroidBridge", "Diagnostics"]),
+        .target(name: "EdgeSwitch", dependencies: ["Diagnostics"]),
         .target(name: "Diagnostics", dependencies: []),
         .target(name: "AppSettings", dependencies: []),
         .testTarget(name: "ProtocolTests", dependencies: ["Protocol"]),
         .testTarget(name: "AndroidBridgeTests", dependencies: ["AndroidBridge", "Protocol"]),
+        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
         .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"])
