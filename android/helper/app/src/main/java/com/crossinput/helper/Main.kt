@@ -33,7 +33,12 @@ object Main {
         val writerLock = WriterLock(writer)
         val log = Logger(writerLock)
 
-        val mode = parseKeyboardBackendMode(args, log)
+        val mode = KeyboardBackendMode.fromArgs(args).getOrElse {
+            log.error("Main", it.message ?: "invalid ${KeyboardBackendMode.FLAG} argument")
+            System.exit(2)
+            return
+        }
+        log.info("Main", "keyboard backend mode=${mode.token}")
 
         val context = systemContext()
         if (context == null) {
@@ -78,40 +83,6 @@ object Main {
     }
 
     /**
-     * Parses the --keyboard-backend command-line argument.
-     * Default: auto (UHID preferred, fallback to InputManager on failure).
-     * Values: auto | uhid | input-manager
-     */
-    private fun parseKeyboardBackendMode(args: Array<out String>, log: Logger): KeyboardBackendMode {
-        var mode = KeyboardBackendMode.AUTO
-        var i = 0
-        while (i < args.size) {
-            val arg = args[i]
-            if (arg == "--keyboard-backend") {
-                i++
-                if (i >= args.size) {
-                    log.error("Main", "--keyboard-backend requires a value (auto|uhid|input-manager)")
-                    System.exit(1)
-                }
-                val value = args[i].lowercase()
-                mode = when (value) {
-                    "auto" -> KeyboardBackendMode.AUTO
-                    "uhid" -> KeyboardBackendMode.UHID
-                    "input-manager" -> KeyboardBackendMode.INPUT_MANAGER
-                    else -> {
-                        log.error("Main", "invalid --keyboard-backend value: $value (expected auto|uhid|input-manager)")
-                        System.exit(1)
-                        KeyboardBackendMode.AUTO // unreachable
-                    }
-                }
-            }
-            i++
-        }
-        log.info("Main", "keyboard backend mode=$mode")
-        return mode
-    }
-
-    /**
      * ActivityThread is not in the public SDK; obtain the system context via
      * reflection (app_process shell execution, as proven by scrcpy).
      */
@@ -131,10 +102,56 @@ object Main {
  * Keyboard backend selection mode.
  * Test-only deterministic override; not a user-facing preference.
  */
-enum class KeyboardBackendMode {
-    AUTO,           // UHID preferred, fallback to InputManager on failure (production default)
-    UHID,           // Force UHID; fail safely if unavailable
-    INPUT_MANAGER   // Force InputManager virtual injection; fail safely if unavailable
+enum class KeyboardBackendMode(val token: String) {
+    /** UHID preferred, automatic fallback to virtual injection (production default). */
+    AUTO("auto"),
+
+    /** Force UHID; never falls back to virtual injection. */
+    UHID("uhid"),
+
+    /** Force InputManager virtual injection; never uses UHID. */
+    INPUT_MANAGER("input-manager");
+
+    companion object {
+        const val FLAG = "--keyboard-backend"
+
+        private val EXPECTED = entries.joinToString("|") { it.token }
+
+        /** Resolves one value token; null when it names no mode. */
+        fun fromToken(token: String): KeyboardBackendMode? =
+            entries.firstOrNull { it.token == token.lowercase() }
+
+        /**
+         * Reads the mode from helper arguments, accepting both
+         * `--keyboard-backend=<value>` and `--keyboard-backend <value>`.
+         * Absent flag means [AUTO]; a missing or unknown value is a failure so
+         * the helper refuses to run under a silently wrong backend (a forced
+         * backend that quietly degrades to AUTO would invalidate a test run).
+         */
+        fun fromArgs(args: Array<out String>): Result<KeyboardBackendMode> {
+            var mode = AUTO
+            var i = 0
+            while (i < args.size) {
+                val arg = args[i]
+                val token = when {
+                    arg.startsWith("$FLAG=") -> arg.substringAfter('=')
+                    arg == FLAG -> args.getOrNull(++i)
+                        ?: return failure("$FLAG requires a value ($EXPECTED)")
+                    else -> {
+                        i++
+                        continue
+                    }
+                }
+                mode = fromToken(token)
+                    ?: return failure("invalid $FLAG value: $token (expected $EXPECTED)")
+                i++
+            }
+            return Result.success(mode)
+        }
+
+        private fun failure(message: String): Result<KeyboardBackendMode> =
+            Result.failure(IllegalArgumentException(message))
+    }
 }
 
 /** Frame dispatch. All writes go through [WriterLock]. */
@@ -226,8 +243,8 @@ class Controller(
 
     private fun handleSelectDisplay(frame: Frame) {
         val displayId = Messages.selectDisplayId(frame.payload)
-        val displayInfo = discovery.find(displayId)
-        if (displayInfo == null) {
+        val display = discovery.find(displayId)
+        if (display == null) {
             log.error("Main", "unknown display id=$displayId")
             writerLock.withLock {
                 it.write(
@@ -253,7 +270,7 @@ class Controller(
         sdkPointer.selectDisplay(raw)
         log.info("Main", "selected display id=$displayId (SDK pointer backend)")
         writerLock.withLock {
-            it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(displayInfo))
+            it.write(Protocol.TYPE_DISPLAY_CHANGED, frame.requestId, Messages.displayChanged(display))
         }
     }
 

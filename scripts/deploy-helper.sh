@@ -27,6 +27,7 @@
 # Canonical frame bytes for fixtures live in protocol/fixtures/*.bin
 # (e.g. `xxd -p protocol/fixtures/create-hid.bin | tr -d '\n'`).
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 REMOTE_APK="/data/local/tmp/crossinput-helper.apk"
@@ -36,6 +37,13 @@ REMOTE_LOG="/data/local/tmp/cxi-helper.log"
 
 # Keyboard backend override (test-only): auto|uhid|input-manager
 KEYBOARD_BACKEND="${KEYBOARD_BACKEND:-auto}"
+case "$KEYBOARD_BACKEND" in
+    auto | uhid | input-manager) ;;
+    *)
+        echo "invalid KEYBOARD_BACKEND: $KEYBOARD_BACKEND (expected auto|uhid|input-manager)" >&2
+        exit 1
+        ;;
+esac
 
 # CXI frame presets (15-byte little-endian header; AGENTS.md rule 6 — keep in
 # sync with protocol/protocol.md). Header: "CXI" + version u16 + type u16 +
@@ -73,6 +81,7 @@ deploy() {
     adb -s "$DEVICE" push "$APK" "$REMOTE_APK" >/dev/null
     echo "deployed: $REMOTE_APK"
 }
+
 start() {
     kill_orphans
     deploy
@@ -94,6 +103,7 @@ start() {
     echo "helper running (stdin <- tail -f $REMOTE_IN; stdout -> $REMOTE_OUT, stderr -> $REMOTE_LOG)"
     echo "keyboard backend: $KEYBOARD_BACKEND"
     echo "next: scripts/deploy-helper.sh list"
+}
 
 helper_running() {
     adb -s "$DEVICE" shell "ps -A -o ARGS" | grep -q "crossinput-helper.apk"
@@ -191,4 +201,3 @@ case "$mode" in
         exit 1
         ;;
 esac
-

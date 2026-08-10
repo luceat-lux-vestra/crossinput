@@ -1,257 +1,276 @@
 package com.crossinput.helper
 
+import android.content.Context
 import android.view.KeyEvent
 import com.crossinput.helper.protocol.Messages
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import org.mockito.Mockito.mockingDetails
+import org.mockito.kotlin.any
+import org.mockito.kotlin.atLeastOnce
+import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.eq
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
+import org.mockito.kotlin.times
+import org.mockito.kotlin.verify
+import org.mockito.kotlin.whenever
 
 /**
- * Unit tests for KeyboardBackend backend selection and failure behavior.
- * Tests cover:
- * - Default/no override -> AUTO selection
- * - Forced UHID -> UHID selected
- * - Forced InputManager -> InputManager selected
- * - Forced backend does not silently become the other backend
- * - InputManager failure scenarios (API unavailable, SecurityException, etc.)
+ * Backend-selection and failure behavior of [KeyboardBackend].
+ *
+ * The virtual-injection path is exercised through a fake [VirtualKeyInjector]:
+ * the real hidden API is absent from the unit-test android.jar, so without the
+ * seam every test would take the "unavailable" branch and prove nothing.
+ *
+ * HID usage mapping is covered by KeyboardHidMapperTest; KEY_EVENT payload
+ * parsing by protocol/CodecTest.
  */
 class KeyboardBackendTest {
 
-    @Test
-    fun defaultModeAutoCreatesUhidOnInit() {
-        // AUTO mode: should attempt UHID creation
-        // We can't easily mock HidDeviceManager, so this test verifies the mode is passed correctly
-        // by checking the logged message
-        assertTrue("AUTO mode should be the default", true)
-    }
+    private val log: Logger = mock()
+    private val context: Context = mock()
+    private val hid: HidDeviceManager = mock()
 
-    @Test
-    fun keyboardBackendModeEnumValues() {
-        // Verify enum values exist and have correct names
-        assertEquals("AUTO", KeyboardBackendMode.AUTO.name)
-        assertEquals("UHID", KeyboardBackendMode.UHID.name)
-        assertEquals("INPUT_MANAGER", KeyboardBackendMode.INPUT_MANAGER.name)
-    }
+    private class FakeInjector(
+        override val available: Boolean = true,
+        private val accepts: Boolean = true,
+        private val failWith: Throwable? = null,
+    ) : VirtualKeyInjector {
+        val events = mutableListOf<Messages.KeyEvent>()
 
-    @Test
-    fun keyboardBackendModeOrdinals() {
-        assertEquals(0, KeyboardBackendMode.AUTO.ordinal)
-        assertEquals(1, KeyboardBackendMode.UHID.ordinal)
-        assertEquals(2, KeyboardBackendMode.INPUT_MANAGER.ordinal)
-    }
-
-    @Test
-    fun messagesKeyEventParsing() {
-        // Test that KeyEvent payload parsing works correctly
-        val payload = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            .putShort(KeyEvent.KEYCODE_A.toShort())
-            .putInt(0) // metaState
-            .put(0.toByte()) // action DOWN
-            .put(0.toByte()) // repeatCount
-            .array()
-
-        val event = Messages.keyEvent(payload)
-        assertEquals(KeyEvent.KEYCODE_A, event.keyCode)
-        assertEquals(0, event.metaState)
-        assertEquals(0, event.action)
-        assertEquals(0, event.repeatCount)
-    }
-
-    @Test
-    fun messagesKeyEventParsingUp() {
-        val payload = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            .putShort(KeyEvent.KEYCODE_A.toShort())
-            .putInt(0)
-            .put(1.toByte()) // action UP
-            .put(0.toByte())
-            .array()
-
-        val event = Messages.keyEvent(payload)
-        assertEquals(1, event.action)
-    }
-
-    @Test
-    fun messagesKeyEventWithMetaState() {
-        val payload = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            .putShort(KeyEvent.KEYCODE_A.toShort())
-            .putInt(KeyEvent.META_SHIFT_ON) // metaState with Shift
-            .put(0.toByte())
-            .put(0.toByte())
-            .array()
-
-        val event = Messages.keyEvent(payload)
-        assertEquals(KeyEvent.META_SHIFT_ON, event.metaState)
-    }
-
-    @Test
-    fun keyboardHidMapperUsageOf() {
-        // Test that key codes map to HID usages (matching KeyboardHidMapperTest)
-        assertEquals(0x04, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_A))
-        assertEquals(0x1D, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_Z))
-        assertEquals(0x0A, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_G))
-        assertEquals(0x1E, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_1))
-        assertEquals(0x27, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_0))
-        assertEquals(0x28, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_ENTER))
-        assertEquals(0x29, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_ESCAPE))
-        assertEquals(0x2A, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_DEL))
-        assertEquals(0x2C, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_SPACE))
-        assertEquals(0x39, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_CAPS_LOCK))
-        assertEquals(0x3A, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_F1))
-        assertEquals(0x45, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_F12))
-        assertEquals(0x4F, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_DPAD_RIGHT))
-        assertEquals(0x59, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_NUMPAD_1))
-        assertEquals(0x61, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_NUMPAD_9))
-        assertEquals(0x62, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_NUMPAD_0))
-        assertEquals(0x63, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_NUMPAD_DOT))
-        assertEquals(0x54, KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_NUMPAD_DIVIDE))
-    }
-
-    @Test
-    fun keyboardHidMapperUnmappedReturnsNull() {
-        // Keys not in USAGE map should return null
-        assertNull(KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_VOLUME_UP))
-        assertNull(KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_BACK))
-        assertNull(KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_ASSIST))
-        assertNull(KeyboardHidMapper.usageOf(0)) // KEYCODE_UNKNOWN
-        assertNull(KeyboardHidMapper.usageOf(999)) // Invalid key code
-    }
-
-    @Test
-    fun keyboardHidMapperModifierOf() {
-        assertEquals(0x00, KeyboardHidMapper.modifierOf(0))
-        assertEquals(0x01, KeyboardHidMapper.modifierOf(KeyEvent.META_CTRL_ON))
-        assertEquals(0x02, KeyboardHidMapper.modifierOf(KeyEvent.META_SHIFT_ON))
-        assertEquals(0x04, KeyboardHidMapper.modifierOf(KeyEvent.META_ALT_ON))
-        assertEquals(0x08, KeyboardHidMapper.modifierOf(KeyEvent.META_META_ON))
-        assertEquals(0x10, KeyboardHidMapper.modifierOf(KeyEvent.META_CTRL_RIGHT_ON))
-        assertEquals(0x20, KeyboardHidMapper.modifierOf(KeyEvent.META_SHIFT_RIGHT_ON))
-        assertEquals(0x40, KeyboardHidMapper.modifierOf(KeyEvent.META_ALT_RIGHT_ON))
-        assertEquals(0x80, KeyboardHidMapper.modifierOf(KeyEvent.META_META_RIGHT_ON))
-        assertEquals(0x03, KeyboardHidMapper.modifierOf(KeyEvent.META_SHIFT_ON or KeyEvent.META_CTRL_ON))
-    }
-
-    @Test
-    fun keyboardHidMapperBuildReportLayout() {
-        val report = KeyboardHidMapper.buildReport(0x02, 0x04) // Shift + A
-        assertEquals(8, report.size)
-        assertEquals(0x02, report[0].toInt() and 0xFF)
-        assertEquals(0x00, report[1].toInt() and 0xFF)
-        assertEquals(0x04, report[2].toInt() and 0xFF)
-        for (i in 3 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
-    }
-
-    @Test
-    fun keyboardHidMapperBuildReportMultiKeyLayout() {
-        val report = KeyboardHidMapper.buildReport(0x03, listOf(0x04, 0x1D, 0x28)) // Ctrl+Shift+A+Z+Enter
-        assertEquals(8, report.size)
-        assertEquals(0x03, report[0].toInt() and 0xFF)
-        assertEquals(0x04, report[2].toInt() and 0xFF)
-        assertEquals(0x1D, report[3].toInt() and 0xFF)
-        assertEquals(0x28, report[4].toInt() and 0xFF)
-        for (i in 5 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
-    }
-
-    @Test
-    fun keyboardHidMapperBuildReportEmptyReportIsAllZero() {
-        val report = KeyboardHidMapper.buildReport(0, emptyList())
-        assertEquals(8, report.size)
-        for (i in 0 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
-    }
-
-    @Test
-    fun keyboardHidMapperBuildReportTruncatesToSixSlots() {
-        val report = KeyboardHidMapper.buildReport(0, (0x04..0x20).toList()) // 29 usages > 6 slots
-        assertEquals(8, report.size)
-        for (i in 0 until KeyboardHidMapper.MAX_KEY_SLOTS) {
-            assertEquals(0x04 + i, report[2 + i].toInt() and 0xFF)
+        override fun inject(event: Messages.KeyEvent): Boolean {
+            events += event
+            failWith?.let { throw it }
+            return accepts
         }
-        assertEquals(0x04 + KeyboardHidMapper.MAX_KEY_SLOTS - 1, report[7].toInt() and 0xFF)
+    }
+
+    private fun backend(
+        mode: KeyboardBackendMode,
+        injector: VirtualKeyInjector = FakeInjector(),
+        uhidId: Int? = UHID_ID,
+        reportSucceeds: Boolean = true,
+    ): KeyboardBackend {
+        whenever(hid.create(any(), any())).thenReturn(
+            if (uhidId != null) Result.success(uhidId) else Result.failure(IllegalStateException("no uhid")),
+        )
+        whenever(hid.sendReport(any(), any())).thenReturn(reportSucceeds)
+        return KeyboardBackend(log, context, hid, mode, injector)
+    }
+
+    /** Every message passed to the [Logger] mock, across all levels. */
+    private fun logged(): List<String> =
+        mockingDetails(log).invocations.map { it.arguments[1] as String }
+
+    private fun sentReports(): List<ByteArray> {
+        val reports = argumentCaptor<ByteArray>()
+        verify(hid, atLeastOnce()).sendReport(any(), reports.capture())
+        return reports.allValues
+    }
+
+    // --- AUTO (production default) ---------------------------------------
+
+    @Test
+    fun autoUsesUhidWhenAvailable() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.AUTO, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+
+        verify(hid).sendReport(eq(UHID_ID), any())
+        assertTrue("virtual injection must not run while UHID works", injector.events.isEmpty())
+        assertTrue(logged().contains("keyboard backend selected backend=uhid mode=auto"))
     }
 
     @Test
-    fun keyboardBackendDescriptorExists() {
-        // Verify the keyboard descriptor is defined
-        assertNotNull(KeyboardBackend.KEYBOARD_DESCRIPTOR)
-        assertTrue(KeyboardBackend.KEYBOARD_DESCRIPTOR.size > 0)
-    }
-    @Test
-    fun forcedUhidModeNeverFallsBackToVirtual() {
-        // Forced UHID mode: if UHID creation fails, the backend stays broken
-        // and does NOT fall back to virtual injection
-        // This test validates the mode semantics - the actual UHID creation
-        // requires device, but the mode logic is: uhidBroken=true means
-        // subsequent key events are dropped with error log, not silently
-        // falling back to virtual
-        assertEquals("UHID", KeyboardBackendMode.UHID.name)
-        assertEquals(1, KeyboardBackendMode.UHID.ordinal)
+    fun autoReportsKeyStateSoAKeyDoesNotRepeatAfterRelease() {
+        val backend = backend(KeyboardBackendMode.AUTO)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+
+        val reports = sentReports()
+        assertEquals(2, reports.size)
+        assertEquals(0x04, reports[0][2].toInt() and 0xFF) // A held
+        assertEquals(0x00, reports[1][2].toInt() and 0xFF) // released: empty state report
     }
 
     @Test
-    fun forcedInputManagerModeNeverUsesUhid() {
-        // Forced InputManager mode: UHID is never created (uhidBroken=true
-        // from init) and all key events go to injectVirtual
-        // If InputManager is unavailable, key events are dropped with error
-        // but NEVER silently fall back to UHID
-        assertEquals("INPUT_MANAGER", KeyboardBackendMode.INPUT_MANAGER.name)
-        assertEquals(2, KeyboardBackendMode.INPUT_MANAGER.ordinal)
+    fun autoFallsBackToVirtualWhenUhidCreationFails() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.AUTO, injector, uhidId = null)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+
+        verify(hid, never()).sendReport(any(), any())
+        assertEquals(1, injector.events.size)
+        assertTrue(logged().contains("keyboard backend selected backend=input-manager mode=auto"))
     }
 
     @Test
-    fun autoModeFallsBackToVirtualOnUhidFailure() {
-        // AUTO mode: UHID is tried first, but on any failure (creation or
-        // report write) the backend switches to virtual injection for the
-        // rest of the session. This is the production default behavior.
-        assertEquals("AUTO", KeyboardBackendMode.AUTO.name)
-        assertEquals(0, KeyboardBackendMode.AUTO.ordinal)
+    fun autoFallsBackToVirtualAfterAReportFailureAndStaysThere() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.AUTO, injector, reportSucceeds = false)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+
+        // UHID is retried only once; after the failure the session is virtual.
+        verify(hid, times(1)).sendReport(any(), any())
+        assertEquals(2, injector.events.size)
     }
 
     @Test
-    fun inputManagerUnavailableFailsSafely() {
-        // When InputManager.injectInputEvent is unavailable (reflection
-        // lookup failed), the backend marks inputManagerUnavailable=true
-        // and logs error (metadata only). Key events are dropped but
-        // no crash occurs and session continues.
-        // This test validates the failure mode exists and is handled.
-        assertTrue("InputManager failure is handled safely", true)
+    fun autoRoutesUnmappableKeyCodesToVirtualInjection() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.AUTO, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_VOLUME_UP)) // no HID usage
+
+        verify(hid, never()).sendReport(any(), any())
+        assertEquals(1, injector.events.size)
+    }
+
+    // --- forced UHID ------------------------------------------------------
+
+    @Test
+    fun forcedUhidNeverFallsBackToVirtual() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.UHID, injector, uhidId = null)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+
+        assertTrue("forced uhid must not silently become virtual", injector.events.isEmpty())
+        assertTrue(logged().contains("keyboard backend selected backend=uhid mode=forced"))
     }
 
     @Test
-    fun securityExceptionOnInjectionFailsSafely() {
-        // If injectInputEvent throws SecurityException, the backend
-        // catches it, logs error (metadata only: exception class name),
-        // and drops the event. No session abort, no crash.
-        assertTrue("SecurityException is caught and handled", true)
+    fun forcedUhidDropsUnmappableKeyCodeInsteadOfInjecting() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.UHID, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_VOLUME_UP))
+
+        verify(hid, never()).sendReport(any(), any())
+        assertTrue(injector.events.isEmpty())
     }
 
     @Test
-    fun injectVirtualUnmappableKeyCodeStillInjected() {
-        // In AUTO mode, if a keyCode is not mappable to HID usage
-        // (usageOf returns null), the event still falls through to
-        // injectVirtual - this is the correct behavior for IME keys
-        // and other non-US-layout keys.
-        assertNull("Volume keys are unmappable", KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_VOLUME_UP))
-        assertNull("Back key is unmappable", KeyboardHidMapper.usageOf(KeyEvent.KEYCODE_BACK))
+    fun forcedUhidSurvivesReportFailure() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.UHID, injector, reportSucceeds = false)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A)) // must not throw
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+
+        assertTrue(injector.events.isEmpty())
+    }
+
+    // --- forced InputManager (the path issue #33 verifies) ----------------
+
+    @Test
+    fun forcedInputManagerNeverCreatesOrUsesUhid() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+
+        verify(hid, never()).create(any(), any())
+        verify(hid, never()).sendReport(any(), any())
+        assertEquals(listOf(0, 1), injector.events.map { it.action }) // exactly one down, one up
+        assertTrue(logged().contains("keyboard backend selected backend=input-manager mode=forced"))
     }
 
     @Test
-    fun destroyReleasesAllPressedKeys() {
-        // destroy() sends an empty report (all keys released) before
-        // destroying the UHID device, ensuring no stuck key state
-        // remains after shutdown. This is verified by the empty report
-        // being all zeros.
-        val report = KeyboardHidMapper.buildReport(0, emptyList())
-        assertEquals(8, report.size)
-        for (i in 0 until 8) assertEquals(0x00, report[i].toInt() and 0xFF)
+    fun forcedInputManagerPassesKeyCodeAndModifiersThrough() {
+        val injector = FakeInjector()
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A, KeyEvent.META_SHIFT_ON or KeyEvent.META_CTRL_ON))
+
+        val event = injector.events.single()
+        assertEquals(KeyEvent.KEYCODE_A, event.keyCode)
+        assertEquals(KeyEvent.META_SHIFT_ON or KeyEvent.META_CTRL_ON, event.metaState)
     }
 
     @Test
-    fun modeIsExplicitInLogs() {
-        // Backend selection logs must include mode (auto|forced) so
-        // verification can confirm which backend is active without
-        // exposing key data (AGENTS.md rule 4).
-        // Log format: "keyboard backend selected backend=uhid|input-manager mode=auto|forced"
-        assertTrue("Log format documented", true)
+    fun unavailableInjectionApiFailsSafeAndLogsOnce() {
+        val injector = FakeInjector(available = false)
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        repeat(3) { backend.keyEvent(down(KeyEvent.KEYCODE_A)) } // must not throw
+
+        assertTrue(injector.events.isEmpty())
+        val unavailable = logged().filter { it.contains("virtual key injection unavailable") }
+        assertEquals("unavailable API must not spam the log", 1, unavailable.size)
     }
 
+    @Test
+    fun securityExceptionIsContainedAndTheSessionKeepsAcceptingEvents() {
+        val injector = FakeInjector(failWith = SecurityException("INJECT_EVENTS denied"))
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A)) // must not throw
+        backend.keyEvent(up(KeyEvent.KEYCODE_A))
+
+        assertEquals("session must stay alive and keep delivering", 2, injector.events.size)
+        assertTrue(logged().any { it.contains("SecurityException") })
+    }
+
+    @Test
+    fun rejectedInjectionIsLoggedWithoutAborting() {
+        val injector = FakeInjector(accepts = false)
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A))
+
+        assertTrue(logged().any { it.contains("rejected") })
+    }
+
+    // --- shutdown ---------------------------------------------------------
+
+    @Test
+    fun destroyReleasesHeldKeysBeforeDestroyingTheDevice() {
+        val backend = backend(KeyboardBackendMode.AUTO)
+
+        backend.keyEvent(down(KeyEvent.KEYCODE_A)) // left held
+        backend.destroy()
+
+        val last = sentReports().last()
+        assertTrue("shutdown must leave no stuck key", last.all { it.toInt() == 0 })
+        verify(hid).destroy(UHID_ID)
+    }
+
+    // --- AGENTS.md rule 4 -------------------------------------------------
+
+    @Test
+    fun logsCarryMetadataOnlyAndNeverKeyCodes() {
+        val injector = FakeInjector(failWith = SecurityException("denied"))
+        val backend = backend(KeyboardBackendMode.INPUT_MANAGER, injector)
+        val secret = KeyEvent.KEYCODE_NUMPAD_7 // distinctive value: 151
+
+        backend.keyEvent(down(secret, KeyEvent.META_CTRL_ON))
+        backend.keyEvent(up(secret, KeyEvent.META_CTRL_ON))
+        backend.destroy()
+
+        val messages = logged()
+        assertTrue("expected the failure path to log at all", messages.isNotEmpty())
+        for (message in messages) {
+            assertFalse("key code leaked: $message", message.contains(secret.toString()))
+            assertFalse("meta state leaked: $message", message.contains(KeyEvent.META_CTRL_ON.toString()))
+            assertFalse("payload leaked: $message", message.contains("keyCode"))
+            assertFalse("payload leaked: $message", message.contains("usage"))
+        }
+    }
+
+    private companion object {
+        const val UHID_ID = 7
+
+        fun down(keyCode: Int, metaState: Int = 0) = Messages.KeyEvent(keyCode, metaState, 0, 0)
+        fun up(keyCode: Int, metaState: Int = 0) = Messages.KeyEvent(keyCode, metaState, 1, 0)
+    }
 }
