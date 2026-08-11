@@ -99,6 +99,55 @@ final class InputSenderTests: XCTestCase {
         sender.waitForDrain()
     }
 
+    func testQueuedPointerOnReplacedSessionIsNotSentToNewSession() {
+        let oldSession = FakeSession(delay: 200_000_000)
+        let newSession = FakeSession()
+        let reference = SessionReference()
+        reference.set(oldSession)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 1)
+        let firstResult = ResultBox<PointerDeliveryResult>()
+        let queuedResult = ResultBox<PointerDeliveryResult>()
+        let firstDone = DispatchSemaphore(value: 0)
+        let queuedDone = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.move(dx: 10, dy: 0))) {
+            firstResult.set($0)
+            firstDone.signal()
+        }
+        XCTAssertEqual(oldSession.requestStarted.wait(timeout: .now() + 1), .success)
+
+        sender.enqueuePointer(PointerEvent(.move(dx: 20, dy: 0))) {
+            queuedResult.set($0)
+            queuedDone.signal()
+        }
+        reference.set(newSession)
+        sender.waitForDrain()
+
+        XCTAssertEqual(firstDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(queuedDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(firstResult.get(), .cancelled)
+        XCTAssertEqual(queuedResult.get(), .cancelled)
+        XCTAssertEqual(newSession.requestCount, 0)
+    }
+
+    func testQueuedKeyboardOnReplacedSessionIsDropped() {
+        let oldSession = FakeSession(sendDelay: 200_000_000)
+        let newSession = FakeSession()
+        let reference = SessionReference()
+        reference.set(oldSession)
+        let sender = InputSender(session: reference)
+        let key = CapturedKeyEvent(keyCode: 29, metaState: 0, action: 1, repeatCount: 0)
+
+        sender.enqueueKey(key)
+        XCTAssertEqual(oldSession.sendStarted.wait(timeout: .now() + 1), .success)
+        sender.enqueueKey(key)
+        reference.set(newSession)
+        sender.waitForDrain()
+
+        XCTAssertEqual(oldSession.sendCount, 1)
+        XCTAssertEqual(newSession.sendCount, 0)
+    }
+
     private final class ResultBox<Value>: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Value?
@@ -111,6 +160,7 @@ final class InputSenderTests: XCTestCase {
         let serial = "fake"
         let response: CxiFrame?
         let delay: UInt64
+        let sendDelay: UInt64
         private let lock = NSLock()
         var requestCount = 0
         var isConnected = true
@@ -119,15 +169,19 @@ final class InputSenderTests: XCTestCase {
         private(set) var acceptedMovement: (Int32, Int32) = (0, 0)
         private(set) var requestTypes: [MessageType] = []
         private(set) var sendCount = 0
+        let requestStarted = DispatchSemaphore(value: 0)
+        let sendStarted = DispatchSemaphore(value: 0)
 
-        init(response: CxiFrame? = nil, delay: UInt64 = 0) {
+        init(response: CxiFrame? = nil, delay: UInt64 = 0, sendDelay: UInt64 = 0) {
             self.response = response
             self.delay = delay
+            self.sendDelay = sendDelay
         }
 
         func connect() async throws {}
 
         func request(_ type: MessageType, payload: Data, timeout: TimeInterval?) async throws -> CxiFrame {
+            requestStarted.signal()
             lock.withLock {
                 requestCount += 1
                 requestTypes.append(type)
@@ -156,7 +210,13 @@ final class InputSenderTests: XCTestCase {
                             payload: Messages.pointerResult(status: .delivered))
         }
 
-        func send(_ frame: CxiFrame) throws { lock.withLock { sendCount += 1 } }
+        func send(_ frame: CxiFrame) throws {
+            sendStarted.signal()
+            lock.withLock { sendCount += 1 }
+            if sendDelay > 0 {
+                Thread.sleep(forTimeInterval: Double(sendDelay) / 1_000_000_000)
+            }
+        }
         func shutdownAndWait() { isConnected = false }
     }
 }

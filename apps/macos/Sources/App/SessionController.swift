@@ -6,12 +6,31 @@ import Diagnostics
 /// Thread-safe reference used by capture/input delivery callbacks. The
 /// session controller remains the only owner that replaces the current
 /// session; input delivery never reaches into AppModel for a mutable handle.
+struct SessionSnapshot: Sendable {
+    let connection: (any SessionConnection)?
+    let generation: UInt64
+}
+
 final class SessionReference: @unchecked Sendable {
     private let lock = NSLock()
     private var session: (any SessionConnection)?
+    private var generation: UInt64 = 0
 
-    func set(_ session: (any SessionConnection)?) { lock.withLock { self.session = session } }
-    func current() -> (any SessionConnection)? { lock.withLock { session } }
+    /// Replacing or clearing the session advances the epoch. Queued input
+    /// captures this value and can therefore never be redirected to a later
+    /// connection.
+    func set(_ session: (any SessionConnection)?) {
+        lock.withLock {
+            self.session = session
+            generation &+= 1
+        }
+    }
+
+    func snapshot() -> SessionSnapshot {
+        lock.withLock { SessionSnapshot(connection: session, generation: generation) }
+    }
+
+    func current() -> (any SessionConnection)? { snapshot().connection }
 }
 
 /// Owns connection/helper lifecycle, reconnect callbacks, and the current

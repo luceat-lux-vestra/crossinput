@@ -31,7 +31,8 @@ final class InputSender: @unchecked Sendable {
     private struct PendingPointer {
         let event: PointerEvent
         let completion: @Sendable (PointerDeliveryResult) -> Void
-        let generation: UInt64
+        let pointerGeneration: UInt64
+        let sessionGeneration: UInt64
     }
 
     init(session: SessionReference,
@@ -44,11 +45,12 @@ final class InputSender: @unchecked Sendable {
 
     func enqueuePointer(_ event: PointerEvent,
                         completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
+        let sessionSnapshot = session.snapshot()
         var dropped: [(@Sendable (PointerDeliveryResult) -> Void, PointerDeliveryResult)] = []
         var shouldSchedule = false
         stateLock.withLock {
-            let generation = pointerGeneration
             if let last = pendingPointers.last,
+               last.sessionGeneration == sessionSnapshot.generation,
                case let .move(lastDX, lastDY) = last.event.kind,
                case let .move(dx, dy) = event.kind {
                 let merged = PointerEvent(.move(dx: saturatingAdd(lastDX, dx),
@@ -56,11 +58,13 @@ final class InputSender: @unchecked Sendable {
                 pendingPointers[pendingPointers.count - 1] = PendingPointer(
                     event: merged,
                     completion: last.completion,
-                    generation: last.generation)
+                    pointerGeneration: last.pointerGeneration,
+                    sessionGeneration: last.sessionGeneration)
             } else if pendingPointers.count < maxPendingPointerItems {
                 pendingPointers.append(PendingPointer(event: event,
                                                        completion: completion,
-                                                       generation: generation))
+                                                       pointerGeneration: pointerGeneration,
+                                                       sessionGeneration: sessionSnapshot.generation))
             } else {
                 // A move cannot displace an ordered button/scroll boundary.
                 // Rejecting it is safer than growing an unbounded backlog.
@@ -86,8 +90,9 @@ final class InputSender: @unchecked Sendable {
     }
 
     func enqueueKey(_ event: CapturedKeyEvent) {
+        let sessionSnapshot = session.snapshot()
         keyboardQueue.async { [weak self] in
-            self?.deliverKey(event)
+            self?.deliverKey(event, snapshot: sessionSnapshot)
         }
     }
 
@@ -121,14 +126,17 @@ final class InputSender: @unchecked Sendable {
                 return pendingPointers.removeFirst()
             }
             guard let item else { return }
-            let result = deliverPointer(item.event)
-            let stillCurrent = stateLock.withLock { pointerGeneration == item.generation }
+            let result = deliverPointer(item)
+            let stillCurrent = stateLock.withLock { pointerGeneration == item.pointerGeneration }
             item.completion(stillCurrent ? result : .cancelled)
         }
     }
 
-    private func deliverPointer(_ event: PointerEvent) -> PointerDeliveryResult {
-        guard let connection = session.current() else { return .failed }
+    private func deliverPointer(_ item: PendingPointer) -> PointerDeliveryResult {
+        let snapshot = session.snapshot()
+        guard snapshot.generation == item.sessionGeneration,
+              let connection = snapshot.connection else { return .cancelled }
+        let event = item.event
         do {
             let type: MessageType
             let payload: Data
@@ -151,6 +159,12 @@ final class InputSender: @unchecked Sendable {
             let response = try connection.requestBlocking(type,
                                                            payload: payload,
                                                            timeout: pointerRequestTimeout)
+            // The response may belong to a connection that was replaced
+            // while the request was in flight. Never credit that response to
+            // the current handoff position.
+            guard session.snapshot().generation == item.sessionGeneration else {
+                return .cancelled
+            }
             guard response.type == .pointerResult else { return .failed }
             let result = try Messages.decodePointerResult(response.payload)
             switch result.status {
@@ -170,8 +184,9 @@ final class InputSender: @unchecked Sendable {
         }
     }
 
-    private func deliverKey(_ event: CapturedKeyEvent) {
-        guard let connection = session.current() else { return }
+    private func deliverKey(_ event: CapturedKeyEvent, snapshot: SessionSnapshot) {
+        guard snapshot.generation == session.snapshot().generation,
+              let connection = snapshot.connection else { return }
         do {
             try connection.send(CxiFrame(type: .keyEvent,
                                           requestId: 1,
