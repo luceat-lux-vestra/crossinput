@@ -57,11 +57,26 @@ git diff --check: PASS
 
 ## Physical verification
 
-NOT VERIFIED — the CLI cannot observe the actual macOS multi-display pointer
-or GUI behavior. The following require a GUI-capable agent or user observation:
+Date: 2026-08-12
+Runtime code verified: `a07e0714710b6d767bf2c22e6d1b665e960e8b33`
+Observation: user-confirmed on the real macOS multi-display setup.
 
-- non-target display left/right/upper/lower edges do not hand off;
-- configured target display edge hands off normally;
-- cross-display movement in both directions remains ordinary navigation;
-- gaps and vertically offset boundaries do not trap the pointer or hand off;
-- no repeated movement eventually triggers Android from a non-target edge.
+The host had five active displays. Display ID `1` (Built-in Retina) was the
+configured Android edge display with the left edge selected; display IDs
+`2`, `3`, `4`, and `5` had no Android edge configured.
+
+Results:
+
+- PASS — non-target display edges remained ordinary macOS navigation and did
+  not hand off to Android;
+- PASS — the configured display's left edge handed off to Android and returned
+  to macOS normally;
+- PASS — movement between displays worked in both directions;
+- PASS — offset/gap boundary movement did not hand off or trap the pointer;
+- PASS — repeated movement at non-target edges did not hide, hold, or later
+  hand off the pointer.
+
+The diagnostic log also recorded capture activation, dynamic target selection,
+edge entry, and `boundaryCrossed` return transitions. Those metadata logs do
+not replace the user's direct screen and pointer observation; both evidence
+types are retained here.
