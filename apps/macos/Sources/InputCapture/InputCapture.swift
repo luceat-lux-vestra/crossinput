@@ -36,6 +36,84 @@ public struct CapturedKeyEvent: Sendable {
     }
 }
 
+private final class ProcessIdentityCache: @unchecked Sendable {
+    private struct Entry {
+        let source: ExternalControlEventSource?
+        let expiresAt: Date
+    }
+
+    private let lock = NSLock()
+    private var entries: [Int32: Entry] = [:]
+    private let ttl: TimeInterval = 2
+    private let maximumEntries = 128
+
+    func resolve(_ processID: Int32,
+                 using resolver: @Sendable (Int32) -> ExternalControlEventSource?)
+        -> ExternalControlEventSource? {
+        let now = Date()
+        lock.lock()
+        if let entry = entries[processID], entry.expiresAt > now {
+            lock.unlock()
+            return entry.source
+        }
+        lock.unlock()
+
+        // Resolve outside the lock: NSRunningApplication can consult process
+        // services and must never block another event-tap callback.
+        let source = resolver(processID)
+        lock.lock()
+        entries[processID] = Entry(source: source, expiresAt: now.addingTimeInterval(ttl))
+        if entries.count > maximumEntries {
+            let expired = entries.compactMap { key, entry in
+                entry.expiresAt <= now ? key : nil
+            }
+            for key in expired { entries.removeValue(forKey: key) }
+            while entries.count > maximumEntries {
+                guard let oldest = entries.min(by: { $0.value.expiresAt < $1.value.expiresAt })?.key else { break }
+                entries.removeValue(forKey: oldest)
+            }
+        }
+        lock.unlock()
+        return source
+    }
+}
+
+private final class ExternalControlSourceDiagnostics: @unchecked Sendable {
+    private struct Key: Hashable {
+        let eventType: UInt32
+        let source: ExternalControlEventSource
+    }
+
+    private let enabled: Bool
+    private let lock = NSLock()
+    private var lastLogged: [Key: Date] = [:]
+    private let interval: TimeInterval = 1
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    var isEnabled: Bool { enabled }
+
+    func record(eventType: CGEventType, source: ExternalControlEventSource) {
+        guard enabled else { return }
+        let key = Key(eventType: eventType.rawValue, source: source)
+        let now = Date()
+        lock.lock()
+        let shouldLog = lastLogged[key].map { now.timeIntervalSince($0) >= interval } ?? true
+        if shouldLog { lastLogged[key] = now }
+        lock.unlock()
+        guard shouldLog else { return }
+
+        Diagnostics.log(
+            "event-source type=\(eventType.rawValue) pid=\(source.processID) "
+                + "bundle=\(source.bundleIdentifier ?? "unknown") "
+                + "executable=\(source.executablePath ?? "unknown") "
+                + "process=\(source.processName ?? "unknown")"
+        )
+    }
+}
+
 /// Why suppression ended. Logged (metadata only) so traces distinguish the
 /// intended boundary-crossing return from fail-safe paths — the root-cause
 /// question for the left-edge instant-return bug (issue #37).
@@ -58,6 +136,10 @@ public final class InputCapture: @unchecked Sendable {
     public var onPointerEvent: (@Sendable (PointerEvent) -> Void)?
     /// Called on the capture thread for every keyboard transition while suppressed.
     public var onKeyEvent: (@Sendable (CapturedKeyEvent) -> Void)?
+    /// Called synchronously during an external-control takeover so the helper
+    /// can release any captured pointer buttons before the triggering event is
+    /// passed through to macOS.
+    public var onPointerStateReset: (@Sendable () -> Void)?
     /// Called when the pointer reaches a screen edge while listening.
     /// 0=left 1=right 2=top 3=bottom (ScreenEdge rawValue).
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
@@ -76,6 +158,10 @@ public final class InputCapture: @unchecked Sendable {
     private var screenFrame: CGRect = .zero
     private var currentScreen: NSScreen?
     private var isSuppressing = false
+    private let externalControlClassifier: ExternalControlEventClassifier
+    private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
+    private let sourceIdentityCache = ProcessIdentityCache()
+    private let sourceDiagnostics: ExternalControlSourceDiagnostics
 
     /// Monotonically increasing counter identifying the current suppression session.
     /// Incremented on each suppress() call. Passed to onSuppressionReleased so
@@ -95,7 +181,16 @@ public final class InputCapture: @unchecked Sendable {
     /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
     private var keysDown: Set<Int> = []
 
-    public init() {}
+    public init(
+        externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
+        sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil
+    ) {
+        self.externalControlClassifier = externalControlClassifier
+        self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
+        self.sourceDiagnostics = ExternalControlSourceDiagnostics(
+            enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
+        )
+    }
 
     // MARK: - Lifecycle
 
@@ -193,10 +288,18 @@ public final class InputCapture: @unchecked Sendable {
         if wasSuppressing {
             showCursor()
             flushStuckKeys()
-            // Physically return the pointer to the crossing edge point the user
-            // pushed through, so Android->macOS continues seamlessly instead of
-            // jumping to the screen center.
-            restorePointerAtEdge()
+            if !SuppressionReleasePolicy.restoresPointer(for: reason) {
+                // External control owns the pointer position. Do not warp it
+                // back to the edge or center; the triggering event is returned
+                // to macOS immediately after this synchronous cleanup.
+                onPointerStateReset?()
+                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+            } else {
+                // Physically return the pointer to the crossing edge point the user
+                // pushed through, so Android->macOS continues seamlessly instead of
+                // jumping to the screen center.
+                restorePointerAtEdge()
+            }
             onSuppressionReleased?(reason, generation)
         }
     }
@@ -224,9 +327,24 @@ public final class InputCapture: @unchecked Sendable {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
+        default:
+            // Source resolution is unnecessary on the hot path while local
+            // control is active, unless the opt-in characterization probe is on.
+            if suppressionIsActive || sourceDiagnostics.isEnabled {
+                let source = externalControlSource(for: event)
+                sourceDiagnostics.record(eventType: type, source: source)
+                if takeOverForExternalControlIfNeeded(source: source) {
+                    // Returning the original event is essential: the first remote
+                    // move/click/key event must reach macOS, not just later events.
+                    return Unmanaged.passUnretained(event)
+                }
+            }
+        }
+
+        switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
-            if isSuppressing {
+            if suppressionIsActive {
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 onPointerEvent?(PointerEvent(.move(dx: dx, dy: dy)))
@@ -237,7 +355,7 @@ public final class InputCapture: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            if isSuppressing {
+            if suppressionIsActive {
                 let button = Self.buttonIndex(for: type)
                 let down: Bool
                 switch type {
@@ -249,7 +367,7 @@ public final class InputCapture: @unchecked Sendable {
             }
             return Unmanaged.passUnretained(event)
         case .scrollWheel:
-            if isSuppressing {
+            if suppressionIsActive {
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
                 let horizontal = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
                 onPointerEvent?(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)))
@@ -263,6 +381,13 @@ public final class InputCapture: @unchecked Sendable {
         }
     }
 
+    /// Exercises the event-tap decision path without installing a system tap.
+    /// This is internal so the macOS regression tests can verify synchronous
+    /// takeover and same-event pass-through without generating user input.
+    internal func handleForTesting(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        handle(proxy: OpaquePointer(bitPattern: 1)!, type: type, event: event)
+    }
+
     /// Handles keyboard events while suppressed. When suppressed, key events are
     /// consumed (never reach the macOS system) — this is what blocks Cmd+Tab,
     /// Spotlight, Mission Control, etc. while the user is typing on the Android
@@ -274,7 +399,7 @@ public final class InputCapture: @unchecked Sendable {
     /// Emergency fail-safe: ⌘⇧X (RegisterEventHotKey) keeps working because hot
     /// keys are read by the Carbon event dispatcher before/independent of the tap.
     private func handleKeyboard(event: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
-        guard isSuppressing else { return Unmanaged.passUnretained(event) }
+        guard suppressionIsActive else { return Unmanaged.passUnretained(event) }
         let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let metaState = KeyCodeMapper.androidMetaState(ofFlags: event.flags)
         let keyCode = KeyCodeMapper.androidKeyCode(ofVirtualKey: virtualKey)
@@ -449,6 +574,50 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public static let suppressionTimeout: TimeInterval = 30
+
+    // MARK: - External-control source resolution
+
+    private var suppressionIsActive: Bool {
+        stateLock.withLock { isSuppressing }
+    }
+
+    private func externalControlSource(for event: CGEvent) -> ExternalControlEventSource {
+        let rawProcessID = event.getIntegerValueField(.eventSourceUnixProcessID)
+        guard rawProcessID > 0, rawProcessID <= Int64(Int32.max) else {
+            return ExternalControlEventSource(processID: Int32(clamping: rawProcessID))
+        }
+        let processID = Int32(rawProcessID)
+        let resolved = sourceIdentityCache.resolve(processID, using: sourceIdentityResolver)
+        return ExternalControlEventSource(
+            processID: processID,
+            bundleIdentifier: resolved?.bundleIdentifier,
+            executablePath: resolved?.executablePath,
+            processName: resolved?.processName
+        )
+    }
+
+    private func takeOverForExternalControlIfNeeded(source: ExternalControlEventSource) -> Bool {
+        guard suppressionIsActive,
+              let provider = externalControlClassifier.provider(for: source) else {
+            return false
+        }
+        Diagnostics.log("external-control takeover provider=\(provider)")
+        release(reason: .externalControl)
+        return true
+    }
+
+    private static func resolveProcessIdentity(_ processID: Int32) -> ExternalControlEventSource? {
+        guard processID > 0,
+              let application = NSRunningApplication(processIdentifier: pid_t(processID)) else {
+            return nil
+        }
+        return ExternalControlEventSource(
+            processID: processID,
+            bundleIdentifier: application.bundleIdentifier,
+            executablePath: application.executableURL?.path,
+            processName: application.localizedName
+        )
+    }
 
     // MARK: - Emergency shortcut (⇧⌘X) — always works, independent of the Android link
 
