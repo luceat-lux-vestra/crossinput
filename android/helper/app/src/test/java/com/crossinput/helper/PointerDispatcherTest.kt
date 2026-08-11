@@ -66,6 +66,7 @@ class PointerDispatcherTest {
     @Test
     fun forcedInputManagerAdvertisesExplicitRoutingWhenAvailable() {
         whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.supportsExplicitDisplayRouting).thenReturn(true)
 
         val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.INPUT_MANAGER)
 
@@ -76,6 +77,7 @@ class PointerDispatcherTest {
     fun autoAdvertisesExplicitRoutingWhenInputManagerIsAvailable() {
         whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
         whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.supportsExplicitDisplayRouting).thenReturn(true)
 
         val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.AUTO)
 
