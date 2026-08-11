@@ -24,6 +24,19 @@ final class SuppressionPhasePolicyTests: XCTestCase {
             .ready)
     }
 
+    func testExternalControlWithLiveConnectionIsReady() {
+        XCTAssertEqual(
+            SuppressionPhasePolicy.nextPhase(after: .externalControl, isConnected: true),
+            .ready)
+    }
+
+    func testExternalControlNeverRestoresPointer() {
+        XCTAssertFalse(SuppressionReleasePolicy.restoresPointer(for: .externalControl))
+        XCTAssertTrue(SuppressionReleasePolicy.restoresPointer(for: .normalReturn))
+        XCTAssertTrue(SuppressionReleasePolicy.restoresPointer(for: .watchdogTimeout))
+        XCTAssertTrue(SuppressionReleasePolicy.restoresPointer(for: .emergencyHotkey))
+    }
+
     func testNormalReleaseWithoutConnectionIsIdleNotReady() {
         XCTAssertEqual(
             SuppressionPhasePolicy.nextPhase(after: .normalReturn, isConnected: false),

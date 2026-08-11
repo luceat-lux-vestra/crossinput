@@ -401,6 +401,16 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(collector.reasons, [.watchdogTimeout, .watchdogTimeout])
     }
 
+    func testExternalControlTakeoverReasonIsReported() {
+        let machine = makeDexActive(edge: .left)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0) }
+        machine.emergencyReturn(reason: .externalControlTakeover)
+        machine.flushCallbacks()
+        XCTAssertEqual(collector.reasons, [.externalControlTakeover, .externalControlTakeover])
+        XCTAssertEqual(machine.state, .macActive)
+    }
+
     func testEdgeEnteredReasonIsReported() {
         let machine = EdgeSwitchStateMachine()
         machine.activate()
