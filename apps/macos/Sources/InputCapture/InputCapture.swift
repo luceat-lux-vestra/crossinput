@@ -155,8 +155,10 @@ public final class InputCapture: @unchecked Sendable {
     private var watchdog: DispatchSourceTimer?
     private let stateLock = NSLock()
     private var currentPosition: CGPoint = .zero
-    private var screenFrame: CGRect = .zero
-    private var currentScreen: NSScreen?
+    /// The display containing the most recently handled pointer event. This is
+    /// cleared before every resolution attempt; it is never carried forward
+    /// across a gap or out-of-frame event.
+    private var currentEventDisplay: DisplayEdgeConfiguration?
     private var isSuppressing = false
     private let externalControlClassifier: ExternalControlEventClassifier
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
@@ -443,35 +445,44 @@ public final class InputCapture: @unchecked Sendable {
 
     private func updatePosition(_ event: CGEvent) {
         currentPosition = event.location
-        if let screen = NSScreen.screens.first(where: { $0.frame.contains(currentPosition) }) {
-            screenFrame = screen.frame
-            currentScreen = screen
+        currentEventDisplay = nil
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(currentPosition) }),
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return
         }
+        currentEventDisplay = DisplayEdgeConfiguration(
+            displayID: CGDirectDisplayID(number.uint32Value),
+            frame: screen.frame,
+            configuredEdge: nil
+        )
     }
 
     private var currentDisplayID: CGDirectDisplayID? {
-        guard let num = currentScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
-        else { return nil }
-        return CGDirectDisplayID(num.uint32Value)
+        currentEventDisplay?.displayID
     }
 
     private func detectEdge() {
         // After a return-to-macOS warp, briefly ignore the edge so the pointer
         // sitting on the crossing point does not instantly switch back.
         guard CFAbsoluteTimeGetCurrent() >= edgeCooldownUntil else { return }
-        guard screenFrame != .zero, let displayID = currentDisplayID else { return }
-        let p = currentPosition
-        let f = screenFrame
-        let edge: ScreenEdge
-        if p.x <= f.minX + edgeThreshold { edge = .left }
-        else if p.x >= f.maxX - edgeThreshold { edge = .right }
-        else if p.y <= f.minY + edgeThreshold { edge = .bottom }
-        else if p.y >= f.maxY - edgeThreshold { edge = .top }
-        else { return }
-        // Only the configured Android edge of this display triggers a switch;
-        // other screens/edges are ordinary macOS multi-monitor navigation.
-        guard stateLock.withLock({ androidEdgeByDisplay[displayID] }) == edge else { return }
-        onScreenEdge?(edge)
+        guard let display = currentEventDisplay,
+              let configuredEdge = stateLock.withLock({ androidEdgeByDisplay[display.displayID] }) else {
+            return
+        }
+        let currentDisplay = DisplayEdgeConfiguration(
+            displayID: display.displayID,
+            frame: display.frame,
+            configuredEdge: configuredEdge
+        )
+        // Only the configured Android edge of the display containing this
+        // event triggers a switch. An unresolved gap/out-of-frame event has no
+        // candidate and therefore remains ordinary macOS navigation.
+        guard let candidate = DisplayEdgeResolver.candidate(
+            at: currentPosition,
+            displays: [currentDisplay],
+            threshold: edgeThreshold
+        ) else { return }
+        onScreenEdge?(candidate.edge)
     }
 
     private func centerPointer() {
@@ -485,9 +496,9 @@ public final class InputCapture: @unchecked Sendable {
     /// so there is no feedback loop). Keeps the cursor visually at the edge
     /// instead of drifting with the deltas forwarded to Android.
     private func holdPointerAtEdge() {
-        guard screenFrame != .zero, let displayID = currentDisplayID,
+        guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
-        let f = screenFrame
+        let f = display.frame
         let p = currentPosition
         let hold: CGPoint
         switch edge {
@@ -503,14 +514,14 @@ public final class InputCapture: @unchecked Sendable {
     /// pushed through, so Android→macOS continues seamlessly instead of
     /// jumping to the screen center.
     private func restorePointerAtEdge() {
-        guard screenFrame != .zero, let displayID = currentDisplayID,
+        guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
             if let screen = NSScreen.main {
                 CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
             }
             return
         }
-        let f = screenFrame
+        let f = display.frame
         let p = currentPosition
         let hold: CGPoint
         switch edge {
