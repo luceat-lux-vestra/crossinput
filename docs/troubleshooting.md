@@ -26,3 +26,30 @@ Issues found during development and verification, with causes and fixes. Work in
 | "Change keyboard settings / set the language and layout" popup when Ampersand first connects | Android guides users when a new physical keyboard (the UHID device) registers — a harmless one-time system prompt; dismiss it. It may reappear whenever the helper restarts (the UHID `inputDeviceId` changes) |
 | Keys repeat forever (one key press → continuous input) | Was the UHID key-state-reporting bug; fixed in v0.1.0 (report pressed-key sets, not raw key events). If it reappears, confirm the installed helper build is ≥ v0.1.0 |
 | Korean (2-set) not composing | Composition happens in the Android IME — make sure a physical-keyboard-aware IME (e.g. Samsung Korean) is active on the phone/DeX |
+
+## External remote-control takeover
+
+When Android owns input, a recognized external-control event requests local
+macOS control. CrossInput releases suppression, restores cursor visibility,
+cleans up captured key/button state, skips the normal edge-return pointer warp,
+and passes the triggering event through to macOS. RustDesk is the initially
+verified provider; physical source characterization and takeover behavior must
+be confirmed on the target Mac before treating the provider as verified.
+
+To opt in to metadata-only event-source diagnostics, set the environment before
+launching the app:
+
+```sh
+launchctl setenv CROSSINPUT_DIAG_EVENT_SOURCE 1
+```
+
+The diagnostic records event type, source PID, resolved bundle identifier, and
+resolved executable/process identity. It never records key codes, text,
+clipboard data, coordinates, or HID/input payloads. Reproduce physical local
+input, CrossInput-generated synthetic input, and each external-control input
+kind separately, then preserve the resulting metadata log with the physical
+verification record. Clear the opt-in variable after characterization:
+
+```sh
+launchctl unsetenv CROSSINPUT_DIAG_EVENT_SOURCE
+```
