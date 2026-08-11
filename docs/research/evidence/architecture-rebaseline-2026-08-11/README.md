@@ -107,6 +107,27 @@ pointer visibility and click/scroll effect on the external DeX screen remain
 `not verified` by pixel evidence. The original real app 100-cycle record is
 preserved below and at the linked PR comment.
 
+## Final correctness hardening after `a14bac8`
+
+The final follow-up adds two correctness guards without changing the
+architecture boundary:
+
+- `SessionReference` now advances a monotonic generation whenever a session is
+  installed or cleared. `InputSender` captures that generation when pointer or
+  keyboard work is queued, rejects work from an older generation, and treats a
+  late pointer result as cancelled so it cannot advance handoff accounting.
+- `PointerDispatcher.supportsExplicitDisplayRouting` is mode-aware. Forced UHID
+  no longer advertises the InputManager capability; forced InputManager and
+  AUTO advertise explicit routing only when the selected backend can provide
+  it.
+
+The new macOS session-isolation tests and Android dispatcher capability tests
+pass in the corresponding hosted build. This section does not convert the
+following device items into a pass: current-path screen confirmation on DeX or
+phone, a fresh current-path 100-cycle run, fresh keyboard observation, or
+helper/ADB failure recovery. Those remain `NOT VERIFIED` unless a person
+observes the physical screens and recovery behavior and records the result.
+
 ## Automated handoff-model repetition
 
 The control-handoff state machine was exercised independently of the macOS

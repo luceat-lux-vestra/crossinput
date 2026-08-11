@@ -1,6 +1,6 @@
 # CrossInput Roadmap
 
-> Updated: 2026-08-10. This roadmap distinguishes accepted decisions,
+> Updated: 2026-08-11. This roadmap distinguishes accepted decisions,
 > implemented behavior, and evidence status. A green local build is not an
 > on-device completion record.
 
@@ -47,6 +47,9 @@ The architecture rebaseline is the current bounded work stream (issue #41):
 - Pointer delivery uses a bounded, coalescing movement queue; button, scroll,
   keyboard, and safety events are not allowed to wait behind an unbounded move
   backlog.
+- Queued semantic input is tagged with a session generation so replacement
+  connections cannot receive stale pointer or keyboard work; late pointer
+  results cannot change handoff accounting.
 
 The implementation boundary is complete in PR #42 when local gates pass; the
 PR does not close #41 until the remaining screen-confirmed device matrix is

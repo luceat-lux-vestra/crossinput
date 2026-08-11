@@ -2,6 +2,7 @@ package com.crossinput.helper
 
 import android.view.Display
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
@@ -48,6 +49,36 @@ class PointerDispatcherTest {
         whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
         val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.UHID)
 
+        assertFalse(dispatcher.supportsExplicitDisplayRouting)
         assertTrue(!dispatcher.selectDisplay(display))
+    }
+
+    @Test
+    fun forcedUhidDoesNotAdvertiseInputManagerRoutingCapability() {
+        whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+
+        val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.UHID)
+
+        assertFalse(dispatcher.supportsExplicitDisplayRouting)
+    }
+
+    @Test
+    fun forcedInputManagerAdvertisesExplicitRoutingWhenAvailable() {
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+
+        val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.INPUT_MANAGER)
+
+        assertTrue(dispatcher.supportsExplicitDisplayRouting)
+    }
+
+    @Test
+    fun autoAdvertisesExplicitRoutingWhenInputManagerIsAvailable() {
+        whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+
+        val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.AUTO)
+
+        assertTrue(dispatcher.supportsExplicitDisplayRouting)
     }
 }

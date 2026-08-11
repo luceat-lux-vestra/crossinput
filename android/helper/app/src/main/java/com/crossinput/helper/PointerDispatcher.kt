@@ -46,7 +46,12 @@ class PointerDispatcher(
     private val mode: PointerBackendMode = PointerBackendMode.AUTO,
 ) : PointerInjector {
     override val supportsExplicitDisplayRouting: Boolean
-        get() = inputManager.supportsExplicitDisplayRouting
+        get() = when (mode) {
+            PointerBackendMode.UHID -> uhid.supportsExplicitDisplayRouting
+            PointerBackendMode.INPUT_MANAGER -> inputManager.supportsExplicitDisplayRouting
+            PointerBackendMode.AUTO ->
+                uhid.supportsExplicitDisplayRouting || inputManager.supportsExplicitDisplayRouting
+        }
 
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
