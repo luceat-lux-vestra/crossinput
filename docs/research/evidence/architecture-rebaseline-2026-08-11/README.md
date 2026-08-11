@@ -128,14 +128,16 @@ phone, a fresh current-path 100-cycle run, fresh keyboard observation, or
 helper/ADB failure recovery. Those remain `NOT VERIFIED` unless a person
 observes the physical screens and recovery behavior and records the result.
 
-## Final verification matrix for `25c778c`
+## Final verification matrix
 
-Recorded: 2026-08-11. The final PR HEAD is
-`25c778cec5eef72930c802a36b7c12502b8ea84a`.
+Recorded: 2026-08-11. The immutable final PR HEAD and the CI run attached to
+that exact SHA are recorded in the final PR verification comment. This
+evidence document deliberately does not embed its own commit hash, because a
+commit containing the hash of itself would be self-referential.
 
 | Check | Result | Evidence boundary |
 |---|---|---|
-| Final-head hosted CI | PASS | macOS, Android, documentation, and shell jobs all passed for `25c778c` in [CI run 31454343075](https://github.com/luceat-lux-vestra/crossinput/actions/runs/31454343075) |
+| Final-head hosted CI | PASS | macOS, Android, documentation, and shell jobs passed for the exact final SHA; job URLs are recorded in the final PR verification comment |
 | Local macOS tests | PASS | 50 XCTest cases and 30 Swift Testing cases passed; release binary also built with `swift build -c release --disable-sandbox` |
 | Protocol fixtures and shell/diff gates | PASS | 15 fixtures verified; all shell scripts passed `bash -n`; `git diff --check` passed |
 | Helper target/routing smoke | PASS | Installed helper listed phone `0`, Desktop/DeX `2`, and HDMI `6`; AUTO selected InputManager and returned eight delivered pointer results across DeX/phone move, button, and scroll sequences |
