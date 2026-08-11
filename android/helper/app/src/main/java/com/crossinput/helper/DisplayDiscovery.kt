@@ -43,13 +43,39 @@ class DisplayDiscovery(
         log.info("DisplayDiscovery", "display removed id=$displayId")
     }
 
-    fun displays(): List<DisplayInfo> = displayManager.displays.mapNotNull { buildInfo(it) }
+    fun displays(): List<DisplayInfo> = allDisplays().mapNotNull { buildInfo(it) }
 
     fun find(displayId: Int): DisplayInfo? = displays().firstOrNull { it.displayId == displayId }
         ?: buildInfo(displayManager.getDisplay(displayId))
 
     /** Raw [Display] handle for the given id (needed by input backends). */
     fun display(displayId: Int): Display? = displayManager.getDisplay(displayId)
+
+    /**
+     * Returns the public display list plus system-visible displays that the
+     * public list filters out on some Samsung builds (notably the DeX
+     * Desktop virtual display). The hidden API is optional and isolated here;
+     * when unavailable, the public list remains the safe fallback.
+     */
+    private fun allDisplays(): List<Display> {
+        val displays = displayManager.displays.toMutableList()
+        val ids = hiddenDisplayIds() ?: return displays
+        for (id in ids) {
+            val display = displayManager.getDisplay(id) ?: continue
+            if (displays.none { it.displayId == id }) displays += display
+        }
+        return displays
+    }
+
+    private fun hiddenDisplayIds(): IntArray? = try {
+        val globalClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
+        val global = globalClass.getMethod("getInstance").invoke(null)
+        val method = globalClass.getMethod("getDisplayIds")
+        method.invoke(global) as? IntArray
+    } catch (e: Throwable) {
+        log.info("DisplayDiscovery", "all-display enumeration unavailable: ${e.javaClass.simpleName}")
+        null
+    }
 
     private fun notifyChanged(displayId: Int) {
         val info = buildInfo(displayManager.getDisplay(displayId)) ?: return

@@ -19,8 +19,8 @@ macOS host
                  └─ CXI v1 over ADB
                       └─ Android target display
                            └─ Android input dispatcher
-                                ├─ UHID backend (primary)
-                                └─ InputManager backend (fallback)
+                                ├─ InputManager backend (explicit target routing)
+                                └─ UHID backend (system-routed compatibility/use)
 ```
 
 An Android phone display, a Samsung DeX desktop display, and another Android
@@ -76,11 +76,12 @@ Session
 Target discovery
 └─ AndroidDisplayDiscovery
    └─ Android DisplayManager/reflection adapter
+      └─ optional runtime-detected system display IDs
 
 Input dispatcher
-├─ PointerDispatcher       UHID primary and deterministic fallback policy
-│  ├─ UhidPointerInjector
-│  └─ InputManagerPointerInjector
+├─ PointerDispatcher       target-routing policy and failure handling
+│  ├─ InputManagerPointerInjector (explicit display routing)
+│  └─ UhidPointerInjector (system-routed)
 └─ KeyboardInjector
    ├─ UhidKeyboardInjector
    └─ InputManagerKeyboardInjector
@@ -91,10 +92,18 @@ chooses an injection backend. The macOS side receives a v1-compatible display
 record today, but application code consumes a normalized remote-target model.
 UHID descriptors, HID reports, reflection, hidden Android constants, and
 backend failure policy do not cross the application boundary. The helper's
-`PointerDispatcher` owns semantic pointer backend selection; a failed UHID
-write returns a delivery result and may fail over without retrying a partially
-delivered multi-report move. `POINTER_RESULT` carries the accepted movement
-back to macOS, so handoff accounting never trusts only a successful pipe write.
+`PointerDispatcher` owns semantic pointer backend selection. UHID reports are
+system-routed and do not carry a selected display ID, so the normal selected-
+target path uses `InputManagerPointerInjector`, which sets the event display ID
+explicitly and fails closed when that API is unavailable. `POINTER_RESULT`
+carries the accepted movement back to macOS, so handoff accounting never
+trusts only a successful pipe write.
+
+On Samsung builds where the public `DisplayManager.displays` list omits a
+system-visible DeX virtual display, the helper's discovery adapter optionally
+reflects `DisplayManagerGlobal.getDisplayIds()` at runtime and merges those
+handles into `DISPLAY_LIST`. If that hidden API is unavailable, the public
+display list remains the bounded fallback.
 
 ## Lifecycle separation
 
@@ -116,6 +125,11 @@ return. Its implementation is a handoff component; connection lifecycle is
 owned by the application/session layer and must not be added to the handoff
 state model.
 
+`DisplayDiscovery` currently reports display removal as helper diagnostics and
+does not emit a dedicated v1 removal frame. Selected-target invalidation and
+display reappearance propagation remain follow-up work in issue #17; this is a
+known verification boundary, not a completed current capability.
+
 ## Dependency rules
 
 - Edge switching calls a remote-session/input-sender boundary; it does not run
@@ -132,6 +146,9 @@ state model.
   `DESTROY_HID_DEVICE` remain decoded and handled by the helper only for
   legacy compatibility clients.
 - Android-specific discovery and backend selection stay behind helper adapters.
+- Selected-target pointer delivery requires an explicit-display backend. UHID
+  remains available for system-routed use but is not reported as a successful
+  target-specific backend.
 - Emergency release is local, bounded, and fail-safe on every failure path.
 
 ## Safety invariant
@@ -150,8 +167,9 @@ payloads.
 - Swift native macOS menu bar application and native macOS APIs.
 - CGEventTap pointer/keyboard capture and screen-edge handoff.
 - ADB transport with `app_process` helper execution.
-- UHID as the primary Android injection path.
-- InputManager injection as the Android fallback where available.
+- UHID semantic pointer injection as a system-routed backend.
+- InputManager semantic pointer injection as the explicit-display backend for
+  selected-target delivery.
 - macOS → Android one-way input for the current scope.
 - CXI v1 compatibility during the rebaseline.
 

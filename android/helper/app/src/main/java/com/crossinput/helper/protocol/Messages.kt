@@ -60,8 +60,14 @@ object Messages {
 
     // ---- Android → Mac (builders) ----
 
-    fun helloAck(version: Int): ByteArray =
-        ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN).putShort(version.toShort()).array()
+    fun helloAck(version: Int, capabilities: Int = Cxi.CAPABILITIES): ByteArray =
+        ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN)
+            .putShort(version.toShort())
+            .putInt(capabilities)
+            .array()
+
+    fun helloAckCapabilities(payload: ByteArray): Int =
+        if (payload.size >= 6) le(payload, 2).int else 0
 
     fun displayList(displays: List<DisplayInfo>): ByteArray {
         val bodies = displays.map { it.encode() }

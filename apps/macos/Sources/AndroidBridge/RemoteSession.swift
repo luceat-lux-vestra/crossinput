@@ -9,6 +9,22 @@ public enum ConnectionError: Error, Sendable {
     case timeout(String)
     case streamClosed
     case protocolError(String)
+    case incompatibleHelper(String)
+}
+
+extension ConnectionError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .adbMissing: return "ADB executable is unavailable"
+        case let .processSpawnFailed(message): return "Unable to start helper: \(message)"
+        case let .processExited(code): return "Helper exited with code \(code)"
+        case let .handshakeFailed(message): return "Helper handshake failed: \(message)"
+        case let .timeout(message): return "Helper request timed out: \(message)"
+        case .streamClosed: return "Helper stream closed"
+        case let .protocolError(message): return "Helper protocol error: \(message)"
+        case let .incompatibleHelper(message): return "Incompatible helper: \(message)"
+        }
+    }
 }
 
 /// Transport-independent session surface used by the macOS orchestration
@@ -106,6 +122,7 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
     }
 
     public private(set) var serial: String
+    public private(set) var helperCapabilities: HelperCapabilities = []
     public var onEvent: (@Sendable (CxiFrame) -> Void)?
     public var onDisconnect: (@Sendable () -> Void)?
 
@@ -174,6 +191,7 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
             guard ack.type == .helloAck else {
                 throw ConnectionError.handshakeFailed("expected HELLO_ACK, got \(ack.type)")
             }
+            helperCapabilities = try Self.validateHelloAck(ack)
         } catch {
             await disconnect()
             throw error
@@ -220,6 +238,26 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
 
     public func disconnect() async {
         disconnectSync()
+    }
+
+    static func validateHelloAck(_ ack: CxiFrame) throws -> HelperCapabilities {
+        guard ack.type == .helloAck else {
+            throw ConnectionError.handshakeFailed("expected HELLO_ACK, got \(ack.type)")
+        }
+        let info = try Messages.decodeHelloAckInfo(ack.payload)
+        guard info.version == Protocol.version else {
+            throw ConnectionError.handshakeFailed("expected v\(Protocol.version), got v\(info.version)")
+        }
+        let required: [HelperCapabilities] = [
+            .semanticPointerResult,
+            .explicitPointerRouting,
+        ]
+        let missing = required.filter { !info.capabilities.contains($0) }
+        guard missing.isEmpty else {
+            let names = missing.map { capabilityName($0) }.joined(separator: ", ")
+            throw ConnectionError.incompatibleHelper("missing capability: \(names)")
+        }
+        return info.capabilities
     }
 
     private func disconnectSync() {
@@ -287,6 +325,14 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
         for request in all {
             request.timeout.cancel()
             request.continuation.resume(throwing: error)
+        }
+    }
+
+    private static func capabilityName(_ capability: HelperCapabilities) -> String {
+        switch capability {
+        case .semanticPointerResult: return "semanticPointerResult"
+        case .explicitPointerRouting: return "explicitPointerRouting"
+        default: return "unknown"
         }
     }
 }

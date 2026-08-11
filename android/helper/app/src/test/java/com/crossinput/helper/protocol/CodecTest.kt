@@ -170,6 +170,8 @@ class CodecTest {
         val payload = Messages.helloAck(Cxi.VERSION)
         val bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(Cxi.VERSION, bb.short.toInt() and 0xFFFF)
+        assertEquals(Cxi.CAPABILITIES, bb.int)
+        assertEquals(0, Messages.helloAckCapabilities(byteArrayOf(1, 0)))
     }
 
     @Test

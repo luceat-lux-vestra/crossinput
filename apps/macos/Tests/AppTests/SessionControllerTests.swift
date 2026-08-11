@@ -51,6 +51,25 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(unavailableReason, "helper session ended")
     }
 
+    func testReplacedSessionEventIsIgnoredWhileCurrentSessionEventIsAccepted() async throws {
+        let first = FakeSession(serial: "first")
+        let second = FakeSession(serial: "second")
+        let factory = SessionFactoryBox([first, second])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+        var received: [MessageType] = []
+        controller.onEvent = { frame in received.append(frame.type) }
+
+        _ = try await controller.connect(serial: "first")
+        _ = try await controller.connect(serial: "second")
+
+        first.triggerEvent(CxiFrame(type: .displayChanged, requestId: 1))
+        first.triggerEvent(CxiFrame(type: .fatalError, requestId: 2))
+        second.triggerEvent(CxiFrame(type: .logEvent, requestId: 3))
+        for _ in 0..<3 { await Task.yield() }
+
+        XCTAssertEqual(received, [.logEvent])
+    }
+
     private final class SessionFactoryBox: @unchecked Sendable {
         private let lock = NSLock()
         private var sessions: [FakeSession]
@@ -99,6 +118,10 @@ final class SessionControllerTests: XCTestCase {
 
         func triggerDisconnect() {
             onDisconnect?()
+        }
+
+        func triggerEvent(_ frame: CxiFrame) {
+            onEvent?(frame)
         }
     }
 

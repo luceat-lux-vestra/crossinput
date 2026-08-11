@@ -6,7 +6,7 @@ import org.junit.Test
 
 class PointerBackendModeTest {
     @Test
-    fun absentModeUsesAutomaticUhidPreferredSelection() {
+    fun absentModeUsesAutomaticSelection() {
         assertEquals(PointerBackendMode.AUTO, PointerBackendMode.fromArgs(emptyArray()).getOrThrow())
     }
 

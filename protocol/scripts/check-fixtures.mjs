@@ -73,8 +73,12 @@ function decodeDisplay(buf, off) {
 function decodePayload(type, payload) {
   switch (type) {
     case "HELLO":
-    case "HELLO_ACK":
       return { version: u16(payload, 0) };
+    case "HELLO_ACK": {
+      const result = { version: u16(payload, 0) };
+      if (payload.length >= 6) result.capabilities = u32(payload, 2);
+      return result;
+    }
     case "LIST_DISPLAYS":
     case "PING":
     case "PONG":

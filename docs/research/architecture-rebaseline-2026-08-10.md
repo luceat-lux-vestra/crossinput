@@ -21,8 +21,12 @@ described in ADR-0009:
 - `AdbTransport` owns ADB process and binary channel startup. `RemoteSession`
   owns CXI handshake, correlation, timeout, and event dispatch.
 - The helper now has `PointerDispatcher`, `UhidPointerInjector`, and
-  `InputManagerPointerInjector`. UHID is preferred; a failed report can fail
-  over, while a partially delivered split movement is never retried.
+  `InputManagerPointerInjector`. UHID is system-routed and cannot claim a
+  selected display; selected-target delivery uses explicit InputManager
+  routing, while a partially delivered split movement is never retried.
+- `DisplayDiscovery` merges runtime-detected system display IDs so the DeX
+  virtual display is present in `DISPLAY_LIST` on Samsung builds that omit it
+  from the public list.
 - `TargetSelectionController` confirms `DISPLAY_CHANGED` before publishing a
   selected target and ignores stale A/B responses or disappeared targets.
 - CXI v1 now carries `POINTER_RESULT` delivery status without a version bump;
@@ -37,7 +41,7 @@ Commands run from the repository on 2026-08-11:
 
 ```text
 cd apps/macos && swift test --disable-sandbox
--> pass: 40 XCTest cases and 29 Swift Testing cases
+-> pass: 48 XCTest cases and 30 Swift Testing cases
 
 cd android/helper && ./gradlew test
 -> pass: Android helper unit tests and debug/release Kotlin compilation
@@ -64,11 +68,13 @@ compatibility warnings; no source or fixture validation failed.
 The existing 2026-08-10 InputManager keyboard fallback evidence remains valid
 for that unchanged keyboard fallback path. On 2026-08-11, a fresh helper-level
 SM-G977N run also covered semantic pointer move/button/scroll delivery with
-automatic UHID selection and a forced InputManager pointer fallback; both
-returned `POINTER_RESULT` delivered statuses and shut down cleanly.
+explicit InputManager routing in auto and forced modes; the final forced run
+returned 8 `POINTER_RESULT` frames, all delivered, across DeX and phone
+targets, and shut down cleanly. A forced UHID selected-target run was rejected
+immediately because system-routed UHID cannot guarantee the selected display.
 
-The follow-up run on 2026-08-11 did provide one real macOS app edge handoff and
-100 consecutive real event-tap/helper edge handoffs. The diagnostic segment
+The historical follow-up run on 2026-08-11 did provide one real macOS app edge
+handoff and 100 consecutive real event-tap/helper edge handoffs. The diagnostic segment
 contained 100 matching `boundaryCrossed` returns, balanced cursor hide/show
 events, and no watchdog, remote-unavailable, or emergency return. The helper
 also registered `Ampersand Mouse` as `CURSOR | EXTERNAL` during the run.
@@ -78,8 +84,10 @@ The preserved PR record is [PR #42 device verification comment](https://github.c
 The run still did not provide secure target-screen pixel confirmation,
 keyboard text/composition regression after the controller split, target
 selection rollback, or reconnect failure-path evidence. `screencap -d 6 -p`
-returned an empty file for the target display. PR #42 must not close #41 or
-claim full completion until the remaining screen-confirmed matrix is attached.
+returned an empty file for the historical secure target display. The follow-up
+DeX capture was readable, but the pointer sprite was not visible in screencap.
+PR #42 must not close #41 or claim full completion until the remaining
+screen-confirmed matrix is attached.
 
 The handoff model was also exercised through 100 complete four-edge cycles
 with `swift test --disable-sandbox --filter EdgeSwitchStateMachineTests`. That

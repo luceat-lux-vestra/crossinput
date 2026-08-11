@@ -12,7 +12,9 @@ CrossInput is a macOS-to-Android input bridge. The current path is:
 macOS host → ADB/app_process → Android helper → selected display target
 ```
 
-UHID remains the primary input backend and InputManager remains the fallback.
+UHID remains available for system-routed pointer use. The normal selected-target
+pointer path uses InputManager explicit-display routing because a UHID report
+cannot name an Android display.
 Samsung DeX is a supported target, not the product definition.
 
 ## Completed
@@ -40,6 +42,11 @@ The architecture rebaseline is the current bounded work stream (issue #41):
 - Android pointer/keyboard injection backend boundary.
 - CXI v1 leakage record and v2 design-only document.
 - Behavior-preserving regression coverage and real-device evidence.
+- HELLO capability negotiation rejects helpers that cannot return
+  `POINTER_RESULT` or guarantee explicit selected-target routing.
+- Pointer delivery uses a bounded, coalescing movement queue; button, scroll,
+  keyboard, and safety events are not allowed to wait behind an unbounded move
+  backlog.
 
 The implementation boundary is complete in PR #42 when local gates pass; the
 PR does not close #41 until the remaining screen-confirmed device matrix is
@@ -59,6 +66,8 @@ transport, an installed APK, or a broad repository rewrite.
 - Packaging/distribution follow-up: bundled ADB, Homebrew path, and notarization
   when their ADR gates are satisfied.
 - Screen-confirmed edge-switch stability and remaining regression matrix.
+- Matching-helper packaging/deployment for the shipped Mac application; the
+  current runtime rejects an incompatible pre-existing helper instead.
 
 ## Future
 

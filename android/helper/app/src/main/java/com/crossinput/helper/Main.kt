@@ -290,9 +290,15 @@ class Controller(
             shutdownRequested = true
             return
         }
-        log.info("Main", "handshake ok (v$version)")
+        val capabilities = Cxi.CAPABILITY_SEMANTIC_POINTER_RESULT or
+            if (pointer.supportsExplicitDisplayRouting) {
+                Cxi.CAPABILITY_EXPLICIT_POINTER_ROUTING
+            } else {
+                0
+            }
+        log.info("Main", "handshake ok (v$version capabilities=$capabilities)")
         writerLock.withLock {
-            it.write(Protocol.TYPE_HELLO_ACK, frame.requestId, Messages.helloAck(Cxi.VERSION))
+            it.write(Protocol.TYPE_HELLO_ACK, frame.requestId, Messages.helloAck(Cxi.VERSION, capabilities))
         }
     }
 

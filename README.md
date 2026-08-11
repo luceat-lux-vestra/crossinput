@@ -23,10 +23,10 @@ one-time wireless-debugging setup, the Mac controls the selected Android target.
 
 - **Edge switching**: push the pointer past the screen edge to switch between macOS and the selected Android target
 - **Works with any pointer device**: trackpad, wired or wireless mouse — captured at the macOS level (CGEventTap), no device-specific setup
-- **Semantic pointer path**: movement, clicks, and wheel use CXI `POINTER_*` messages; the helper selects the UHID kernel backend and falls back to InputManager — the cursor sprite is rendered by Samsung DeX itself
-- **Two pointer injection backends**: UHID virtual mouse (primary — moves the DeX cursor) and an InputManager injection fallback via reflection (alternative — routes events to windows, scrcpy-style)
+- **Semantic pointer path**: movement, clicks, and wheel use CXI `POINTER_*` messages; the helper returns accepted movement through `POINTER_RESULT` and never claims a target-specific UHID route it cannot provide
+- **Two pointer injection backends**: UHID virtual mouse remains available for system-routed use, while the selected-target application path uses InputManager injection via reflection to set the explicit display ID
 - **Works across Android targets**: DeX external display, phone screen, or another discovered Android display — DeX is not required
-- **No app install on the phone**: the Android helper is pushed and run via ADB (scrcpy-style) — no home-screen icon, no dialogs. The only app you install is Ampersand itself on your Mac (see Installation below)
+- **No app install on the phone**: development tooling pushes and runs the helper via ADB (scrcpy-style). The packaged Mac app launches the helper artifact already present at its configured path and rejects an incompatible helper during HELLO; automatic helper packaging/deployment is a follow-up.
 - **Keyboard**: mac → Android keyboard delivery — UHID keyboard backend plus an InputManager virtual-injection fallback via reflection (both implemented and verified on SM-G977N / Android 12), with macOS system-shortcut suppression while captured and Korean 2-set composition on Android — [ADR-0007](docs/adr/ADR-0007-keyboard-delivery.md)
 
 ## Status
@@ -47,7 +47,7 @@ Download `Ampersand-0.1.0.dmg` from the [latest release](https://github.com/luce
 
 > **First launch (Gatekeeper)**: the app is ad-hoc signed (no Apple Developer ID — see [ADR-0008](docs/adr/ADR-0008-v0.1.0-release-packaging.md)), so on first `open` macOS may refuse with "cannot be opened because the developer cannot be verified". To run it: **right-click (or Control-click) the app in Finder → Open → Open** (confirm once). From then on it launches normally.
 
-Ampersand needs `adb` 37+ (with mDNS wireless debugging support) on `PATH`; install it via Homebrew (`brew install android-platform-tools`) or Android SDK. The one-time phone setup: **Settings → Developer options → Wireless debugging** (pair once; the app then auto-discovers the phone).
+Ampersand needs `adb` 37+ (with mDNS wireless debugging support) on `PATH`; install it via Homebrew (`brew install android-platform-tools`) or Android SDK. The one-time phone setup: **Settings → Developer options → Wireless debugging** (pair once; the app then auto-discovers the phone). A matching helper artifact must be deployed to `/data/local/tmp/crossinput-helper.apk`; use `scripts/deploy-helper.sh` during development.
 
 ## Requirements
 

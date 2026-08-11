@@ -49,6 +49,7 @@ class FixtureTest {
         assertEquals(1, frame.requestId)
         val version = le(frame.payload).short.toInt() and 0xFFFF
         assertEquals(1, version)
+        assertEquals(Cxi.CAPABILITIES, Messages.helloAckCapabilities(frame.payload))
     }
 
     @Test

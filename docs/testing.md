@@ -50,14 +50,16 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
 5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; the macOS selection controller publishes the target only after this response.
-6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper must select and log the active pointer backend and return `POINTER_RESULT` with status/accepted movement, without logging payloads.
+6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper must select an explicit-display backend for the selected target and return `POINTER_RESULT` with status/accepted movement, without logging payloads. In normal `auto` mode this is InputManager; UHID is system-routed and must not be reported as a successful selected-target backend.
 7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
 9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy pointer and keyboard UHID devices and exit cleanly (B-07).
 
-For deterministic pointer fallback runs, start the helper with
+For deterministic pointer backend runs, start the helper with
 `POINTER_BACKEND=input-manager scripts/deploy-helper.sh start`; use the
 discovered display ID from `dumpsys display` when issuing `select` or `pointer`.
+`POINTER_BACKEND=uhid` is expected to reject selected-display routing rather
+than silently route to a different display.
 
 Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
@@ -157,8 +159,8 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 2 | LIST_DISPLAYS/DISPLAY_LIST | All displays reported, Desktop display present with correct size/density | ✅ |
 | 3 | SELECT_DISPLAY | Unknown id → FATAL_ERROR; known id → DISPLAY_CHANGED echo | ✅ |
 | 4 | CREATE_HID_DEVICE | HID_CREATED with device id; `/dev/uhid` created (log metadata) | ✅ |
-| 5 | Semantic pointer path (UHID primary) | Pointer visible + relative move/click/scroll on DeX external display | ⏳ helper smoke ✅; macOS edge/screen regression pending |
-| 5b | InputManager pointer fallback (`PointerDispatcher`) | Forced fallback routes movement/click/scroll to the selected display | ⏳ helper smoke ✅; macOS app-path screen evidence pending |
+| 5 | Semantic pointer path (explicit target routing) | Pointer visible + relative move/click/scroll on the selected display; helper returns accepted movement | ⏳ helper routing smoke; macOS edge/screen regression pending |
+| 5b | InputManager pointer backend (`PointerDispatcher`) | Forced/auto InputManager routes movement/click/scroll to the selected display | ⏳ helper routing smoke; macOS app-path screen evidence pending |
 | 6 | UHID keyboard | `Ampersand Keyboard` registered as `KEYBOARD | ALPHAKEY | EXTERNAL`; single key-down/up yields exactly one character | ✅ |
 | 7 | macOS shortcut suppression | Cmd+Tab / Spotlight do not fire on the Mac while captured | ✅ |
 | 8 | Korean 2-set | Hangul composes in a DeX field via Android IME | ✅ |
@@ -172,12 +174,12 @@ local build is not a substitute for the device record.
 
 | Area | Required checks | Evidence status |
 |---|---|---|
-| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, return to macOS | real app handoff + helper routing recorded; target-screen visibility pending |
-| Phone target | phone display selection and pointer routing | pending |
+| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, return to macOS | helper routing recorded; target-screen visibility and fresh app path pending |
+| Phone target | phone display selection and pointer routing | pending; requires screen confirmation |
 | Keyboard | key down/up, modifiers, no repeat/stuck key, Korean 2-set, Mac shortcut suppression | pending fresh regression |
 | Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |
 | Failure safety | helper kill, ADB disconnect, emergency hotkey, reconnect, held key/button cleanup, stale callback suppression | pending |
-| Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | pending |
+| Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | selection/stale-response tests pass; removal/reappearance deferred to issue #17 |
 | Edge stability | 100 consecutive edge switches with no unexpected return or pointer trap | real app 100-cycle event-tap/helper record ✅; target-screen confirmation pending |
 
 ## Edge switching stability (Phase 5)

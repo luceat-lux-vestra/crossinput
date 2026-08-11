@@ -26,7 +26,9 @@ Android application.
 - Keyboard: key down/up, modifiers, repeat, and Android IME composition.
 - Handoff: configured macOS screen edge.
 - Transport: ADB over the existing wireless-debugging workflow.
-- Android injection: UHID primary, InputManager fallback.
+- Android injection: UHID remains available for system-routed use, while
+  target-specific application input requires InputManager explicit-display
+  routing. The helper owns this policy.
 
 Samsung DeX is a supported Android target/use case. A phone display and other
 Android displays discovered by the helper use the same remote-target model.
@@ -58,6 +60,10 @@ axes, not current commitments.
   the leakage and containment plan are recorded in [CXI v2 design](../protocol/v2-design.md).
 - Display hot-plug and state changes need the complete failure-case regression
   matrix in issue #17.
-- The InputManager pointer fallback remains a separate on-device verification
-  item unless a current evidence record says otherwise.
+- The packaged Mac application does not yet auto-deploy a matching helper;
+  `HELLO_ACK` capability negotiation rejects an old/incompatible helper before
+  input begins. Deployment packaging remains follow-up work.
+- A target selection is not confirmed by a system-routed UHID backend. The
+  current helper requires explicit-display InputManager routing for the normal
+  selected-target pointer path.
 - The architecture rebaseline does not itself certify a fresh real-device run.

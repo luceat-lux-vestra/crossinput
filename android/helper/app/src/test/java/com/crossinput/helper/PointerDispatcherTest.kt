@@ -15,19 +15,22 @@ class PointerDispatcherTest {
     private val display: Display = mock()
 
     @Test
-    fun autoPrefersUhid() {
-        whenever(uhid.create()).thenReturn(true)
-        whenever(uhid.selectDisplay(any())).thenReturn(true)
+    fun autoUsesExplicitRoutingWhenUhidIsSystemRouted() {
+        whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
 
         val dispatcher = PointerDispatcher(log, uhid, inputManager)
 
         assertTrue(dispatcher.selectDisplay(display))
-        whenever(uhid.moveRelative(5, 6)).thenReturn(PointerDelivery.DELIVERED)
+        whenever(inputManager.moveRelative(5, 6)).thenReturn(PointerDelivery.DELIVERED)
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
     }
 
     @Test
     fun uhidFailureRetriesOnceOnInputManagerFallback() {
+        whenever(uhid.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
         whenever(uhid.create()).thenReturn(true)
         whenever(uhid.selectDisplay(any())).thenReturn(true)
         whenever(uhid.moveRelative(5, 6)).thenReturn(PointerDelivery.FAILED)
@@ -38,5 +41,13 @@ class PointerDispatcherTest {
         dispatcher.selectDisplay(display)
 
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
+    }
+
+    @Test
+    fun forcedUhidRejectsTargetSelectionWithoutExplicitRouting() {
+        whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
+        val dispatcher = PointerDispatcher(log, uhid, inputManager, PointerBackendMode.UHID)
+
+        assertTrue(!dispatcher.selectDisplay(display))
     }
 }

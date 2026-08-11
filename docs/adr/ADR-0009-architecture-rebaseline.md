@@ -94,11 +94,25 @@ The rebaseline boundaries are implemented in the current v1 code:
   `InputSender` sends semantic pointer and keyboard messages.
 - `AdbTransport` owns ADB process/channel startup; `RemoteSession` owns CXI
   correlation, timeouts, and event dispatch.
-- The helper's `PointerDispatcher` selects `UhidPointerInjector` first and
-  fails over to `InputManagerPointerInjector`. v1 raw HID handlers remain only
-  for compatibility and are not used by the normal Ampersand pointer path.
+- The helper's `PointerDispatcher` owns pointer backend selection. UHID is
+  system-routed and cannot claim a selected display; the normal selected-target
+  path therefore requires `InputManagerPointerInjector` explicit-display
+  routing. v1 raw HID handlers remain only for compatibility and are not used
+  by the normal Ampersand pointer path.
 - `TargetSelectionController` publishes a selection only after a matching
   `DISPLAY_CHANGED` response and ignores stale selection responses.
+- `SessionController` ignores events as well as disconnect callbacks from a
+  replaced `RemoteSession`.
+- `HELLO_ACK` advertises additive v1 capabilities. The current app rejects an
+  old helper before input begins when semantic `POINTER_RESULT` or explicit
+  target routing is unavailable. The packaged app does not yet auto-deploy a
+  matching helper.
+- `InputSender` bounds and coalesces pointer movement, keeps keyboard and
+  release paths independent, and cancels stale movement on local return.
+- `DisplayDiscovery` merges the public display list with optionally detected
+  system-visible display IDs so a Samsung DeX virtual display is selectable;
+  the hidden API is isolated behind the existing runtime-reflection adapter
+  and falls back to the public list when unavailable.
 
 This implementation status is separate from device verification status below.
 
@@ -108,10 +122,13 @@ This implementation status is separate from device verification status below.
   `protocol/v2-design.md`.
 - Existing CXI v1 command fixtures remain unchanged; the new v1
   `POINTER_RESULT` response has its own golden fixture and protocol test.
+- A legacy two-byte `HELLO_ACK` remains decodable for v1 compatibility tooling,
+  but the current application rejects it as feature-incompatible.
 - macOS and Android build/test gates must pass after each code slice.
 - On-device regression evidence must cover connection, pointer, keyboard,
   target selection, display disappearance/reappearance, backend paths, and
-  emergency recovery before this ADR can be marked fully verified.
+  emergency recovery before this ADR can be marked fully verified. The current
+  display-removal propagation is explicitly deferred to issue #17.
 
 ## Revisit conditions
 

@@ -62,6 +62,7 @@ final class ControlHandoffController: @unchecked Sendable {
         // Release while the session reference is still live so held keys and
         // buttons get their best-effort cleanup before the caller tears down
         // the transport.
+        sender.cancelPendingPointerEvents()
         capture.release(reason: .captureStopped)
         sender.waitForDrain()
         switchMachine.deactivate()
@@ -69,10 +70,12 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     func emergencyReturn() {
+        sender.cancelPendingPointerEvents()
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
+        sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
@@ -89,13 +92,17 @@ final class ControlHandoffController: @unchecked Sendable {
             switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
         case let .partiallyDeliveredMovement(dx, dy):
             switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+            sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
+        case .cancelled:
+            break
         case .delivered:
             break
         case .failed:
             // A helper-side failure is a control-oriented availability loss;
             // the state machine does not need to know whether ADB, UHID, or
             // InputManager was the underlying cause.
+            sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
     }
@@ -107,6 +114,7 @@ final class ControlHandoffController: @unchecked Sendable {
                 currentSuppressionGeneration = generation
             }
         case .localActive, .returning, .disabled:
+            sender.cancelPendingPointerEvents()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
             break

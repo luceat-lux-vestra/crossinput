@@ -22,14 +22,10 @@ POINTER_BACKEND=input-manager KEYBOARD_BACKEND=input-manager \
 ./scripts/deploy-helper.sh stop
 ```
 
-Result: debug helper build/push succeeded. The helper reported two display
-records; the selected external target was the ID returned by discovery. In the
-automatic run, UHID keyboard and pointer backends were selected, the semantic
-move/button/scroll sequence returned `POINTER_RESULT` frames with delivered
-status, and SHUTDOWN destroyed both UHID devices. In the forced run, the
-InputManager keyboard and pointer backends were selected, the same semantic
-pointer sequence returned delivered `POINTER_RESULT` frames, and SHUTDOWN
-completed cleanly.
+Result: debug helper build/push succeeded. This section preserves the earlier
+helper smoke record; the target-routing follow-up below supersedes its pointer
+backend selection policy. The current selected-target path does not report
+system-routed UHID as target-specific delivery.
 
 Metadata-only stderr excerpt:
 
@@ -56,6 +52,60 @@ Metadata-only stderr excerpt:
 This first record is helper-level evidence for semantic pointer delivery and
 backend selection. The follow-up below adds the real macOS event-tap run; it
 does not replace the required screen confirmation.
+
+## Target-routing follow-up
+
+Follow-up run: 2026-08-11, after the c22d04c hardening changes. The device was
+SM-G977N / Android 12 / API 31 on the explicit ADB serial
+`192.168.0.224:40577`. Display IDs were discovered from `dumpsys display`:
+
+| Target | Discovered ID | Source metadata |
+|---|---:|---|
+| Phone | 0 | `Built-in Screen` |
+| DeX | 2 | `Desktop`, `virtual:android,1000,Desktop,0` |
+| External HDMI | 6 | `HDMI Screen` |
+
+After the DisplayDiscovery fix, `LIST_DISPLAYS` returned all three records.
+The macOS smoke tool selected the DeX record by its normalized Desktop marker:
+
+```text
+HELLO handshake OK
+displays: 3
+id=2 ... name='Desktop' ... desktop=true
+SELECT_DISPLAY(2) -> Desktop
+PING -> pong
+SMOKE OK
+```
+
+The helper's `auto` and forced `input-manager` runs selected the target display
+with explicit display routing and returned delivered `POINTER_RESULT` frames
+for relative move, left button down/up, and scroll on both DeX and phone
+targets. Metadata-only helper logs included:
+
+```text
+[Main] handshake ok (v1 capabilities=3)
+[Main] listing 3 display(s)
+[InputManagerPointerInjector] selected target 2 (1920x1080)
+[PointerDispatcher] pointer backend selected backend=input-manager mode=auto
+[InputManagerPointerInjector] selected target 0 (1440x3040)
+[PointerDispatcher] pointer backend selected backend=input-manager mode=input-manager
+```
+
+In the final forced-InputManager run, a metadata-only frame summary counted 8
+`POINTER_RESULT` responses across the DeX and phone move/button/scroll
+sequences, all with status `DELIVERED` (`status=0`). Shutdown then completed
+gracefully and the helper process was gone.
+
+Forcing `POINTER_BACKEND=uhid` while selecting the discovered DeX target was
+rejected immediately with `UHID cannot guarantee explicit target routing in
+forced mode`; no false `DISPLAY_CHANGED` success was emitted.
+
+The current phone screenshot was black because the built-in display reported
+an off/locked state. A reduced DeX screenshot was successfully captured, but
+the pointer sprite was not visible in screencap output. Direct physical
+pointer visibility and click/scroll effect on the external DeX screen remain
+`not verified` by pixel evidence. The original real app 100-cycle record is
+preserved below and at the linked PR comment.
 
 ## Automated handoff-model repetition
 

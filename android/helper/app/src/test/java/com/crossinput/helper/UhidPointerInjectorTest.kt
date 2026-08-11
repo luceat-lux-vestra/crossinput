@@ -27,7 +27,7 @@ class UhidPointerInjectorTest {
     @Test
     fun largeDeltaIsSplitWithoutLosingMovement() {
         val pointer = injector()
-        assertTrue(pointer.selectDisplay(display))
+        assertTrue(pointer.create())
 
         val result = pointer.moveRelative(300, 0)
         assertEquals(PointerDelivery.Status.DELIVERED, result.status)
@@ -41,7 +41,7 @@ class UhidPointerInjectorTest {
     @Test
     fun buttonStateAndWheelAreEncodedAndCleanupReleasesButtons() {
         val pointer = injector()
-        pointer.selectDisplay(display)
+        pointer.create()
 
         assertEquals(PointerDelivery.DELIVERED, pointer.button(0, true))
         assertEquals(PointerDelivery.DELIVERED, pointer.scroll(0f, -1f))
@@ -58,9 +58,17 @@ class UhidPointerInjectorTest {
     @Test
     fun failedReportDoesNotPretendToDeliverMovement() {
         val pointer = injector(sendSucceeds = false)
-        pointer.selectDisplay(display)
+        pointer.create()
 
         assertEquals(PointerDelivery.FAILED, pointer.moveRelative(10, 0))
         verify(hid).destroy(9)
+    }
+
+    @Test
+    fun selectedDisplayCannotBeClaimedBySystemRoutedUhid() {
+        val pointer = injector()
+
+        assertTrue(!pointer.selectDisplay(display))
+        assertEquals(PointerRouting.SYSTEM_ROUTED, pointer.routing)
     }
 }

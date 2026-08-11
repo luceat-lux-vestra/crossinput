@@ -1,5 +1,6 @@
 {
   "type": "HELLO_ACK",
   "requestId": 1,
-  "version": 1
+  "version": 1,
+  "capabilities": 3
 }

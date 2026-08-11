@@ -39,12 +39,25 @@ data class PointerDelivery(
 }
 
 interface PointerInjector {
+    /** Whether this backend can honor the selected display explicitly. */
+    val routing: PointerRouting
+        get() = PointerRouting.SYSTEM_ROUTED
+
+    val supportsExplicitDisplayRouting: Boolean
+        get() = routing == PointerRouting.EXPLICIT_DISPLAY
+
     fun selectDisplay(display: Display): Boolean
     fun refreshMetrics(displayId: Int)
     fun moveRelative(dx: Int, dy: Int): PointerDelivery
     fun button(button: Int, down: Boolean): PointerDelivery
     fun scroll(horizontal: Float, vertical: Float): PointerDelivery
     fun close()
+}
+
+enum class PointerRouting {
+    SYSTEM_ROUTED,
+    EXPLICIT_DISPLAY,
+    UNAVAILABLE,
 }
 
 /**
@@ -60,6 +73,12 @@ class InputManagerPointerInjector(
     private val log: Logger,
     private val context: Context,
 ) : PointerInjector {
+    override val routing: PointerRouting
+        get() = if (setDisplayIdMethod != null) {
+            PointerRouting.EXPLICIT_DISPLAY
+        } else {
+            PointerRouting.UNAVAILABLE
+        }
     private val inputManager: InputManager = context.getSystemService(Context.INPUT_SERVICE) as InputManager
     private var selectedDisplayId: Int = -1
     private var selectedDisplay: Display? = null
@@ -91,6 +110,11 @@ class InputManagerPointerInjector(
     }
 
     override fun selectDisplay(display: Display): Boolean {
+        if (setDisplayIdMethod == null) {
+            log.error("InputManagerPointerInjector", "explicit display routing API unavailable")
+            initialized = false
+            return false
+        }
         selectedDisplayId = display.displayId
         selectedDisplay = display
         initialized = true
@@ -174,7 +198,10 @@ class InputManagerPointerInjector(
         }
         val newButtons = if (down) buttons or btn else buttons and btn.inv()
         val event = buildEvent(action, newButtons)
-        setDisplayId(event)
+        if (!setDisplayId(event)) {
+            event.recycle()
+            return PointerDelivery.FAILED
+        }
         val accepted = injectEvent(event)
         event.recycle()
 
@@ -202,7 +229,10 @@ class InputManagerPointerInjector(
             this.x = x
             this.y = y
         })
-        setDisplayId(event)
+        if (!setDisplayId(event)) {
+            event.recycle()
+            return false
+        }
         val accepted = injectEvent(event)
         event.recycle()
         return accepted
@@ -216,7 +246,10 @@ class InputManagerPointerInjector(
             if (vertical != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vertical)
         }
         val event = buildEvent(MotionEvent.ACTION_SCROLL, buttons, coords)
-        setDisplayId(event)
+        if (!setDisplayId(event)) {
+            event.recycle()
+            return false
+        }
         val accepted = injectEvent(event)
         event.recycle()
         return accepted
@@ -254,15 +287,15 @@ class InputManagerPointerInjector(
         )
     }
 
-    private fun setDisplayId(event: MotionEvent) {
-        if (selectedDisplayId >= 0) {
-            setDisplayIdMethod?.let { method ->
-                try {
-                    method.invoke(event, selectedDisplayId)
-                } catch (e: Exception) {
-                    log.warn("InputManagerPointerInjector", "target routing metadata update failed: ${e.message}")
-                }
-            }
+    private fun setDisplayId(event: MotionEvent): Boolean {
+        val method = setDisplayIdMethod ?: return false
+        if (selectedDisplayId < 0) return false
+        return try {
+            method.invoke(event, selectedDisplayId)
+            true
+        } catch (e: Exception) {
+            log.warn("InputManagerPointerInjector", "target routing metadata update failed: ${e.message}")
+            false
         }
     }
 

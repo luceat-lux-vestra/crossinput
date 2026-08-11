@@ -52,7 +52,7 @@ Every message is a single frame; all integers are **little-endian**:
 
 | messageType | Name | payload |
 |---|---|---|
-| 0x8001 | HELLO_ACK | version u16 |
+| 0x8001 | HELLO_ACK | version u16 + optional capabilities u32 |
 | 0x8002 | DISPLAY_LIST | count u32 + [display] |
 | 0x8003 | DISPLAY_CHANGED | display (below) |
 | 0x8004 | HID_CREATED | deviceId u32 |
@@ -67,11 +67,23 @@ Every message is a single frame; all integers are **little-endian**:
 the selected backend. A partial UHID write is never retried; macOS accounts
 only for `deliveredDx`/`deliveredDy` and returns control locally.
 
+`HELLO_ACK` capability bits are additive within v1. A legacy two-byte ACK has
+no advertised features and must be rejected by an application that requires
+the current semantic pointer path. The current helper advertises:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
+| 1 | `explicitPointerRouting` | target selection is enforced by an explicit-display backend |
+
 ## Application path and v1 compatibility
 
 The normal Ampersand application path uses the semantic `POINTER_*` messages
-after `SELECT_DISPLAY`. The Android helper's `PointerDispatcher` selects UHID
-or InputManager internally; macOS does not construct a descriptor or report.
+after `SELECT_DISPLAY`. The Android helper's `PointerDispatcher` owns backend
+selection. UHID is system-routed and cannot claim a selected display; the
+targeted application path therefore requires the InputManager backend, which
+sets the event display ID explicitly. macOS does not construct a descriptor or
+report.
 
 `CREATE_HID_DEVICE`, `HID_REPORT`, and `DESTROY_HID_DEVICE` remain implemented
 by the helper as a CXI v1 compatibility path for existing clients and fixtures.
@@ -173,8 +185,8 @@ LIST_DISPLAYS (req 2)            │
 SELECT_DISPLAY (req 3)           │   (routes subsequent semantic POINTER_*
                                  │    messages to the selected display)
                                  ├─► DISPLAY_CHANGED (req 3)
-POINTER_MOVE_REL / BUTTON /      │   (helper selects UHID primary or
-SCROLL (req 4..n)                │    InputManager fallback)
+POINTER_MOVE_REL / BUTTON /      │   (helper enforces explicit target
+SCROLL (req 4..n)                │    routing; UHID is system-routed)
                                  ├─► POINTER_RESULT (same req; accepted delta)
 PING (req m)                     │
                                  ├─► PONG (req m)
@@ -192,7 +204,7 @@ sequenceDiagram
     participant Mac
     participant Helper
     Mac->>Helper: HELLO(version)
-    Helper-->>Mac: HELLO_ACK(version)
+    Helper-->>Mac: HELLO_ACK(version, capabilities)
     Mac->>Helper: LIST_DISPLAYS
     Helper-->>Mac: DISPLAY_LIST(displays)
     Mac->>Helper: SELECT_DISPLAY(id)
@@ -216,7 +228,11 @@ sequenceDiagram
 
 ## Version rules
 
-- v1: initial definition. Later changes: field additions (backward compatible) keep the version; removals/meaning changes bump the version.
+- v1: initial definition. Later field additions (such as the optional
+  `HELLO_ACK` capabilities) keep the version; removals/meaning changes bump
+  the version. Wire compatibility and runtime feature compatibility are
+  separate: an older helper may speak v1 framing but still lack the features
+  required by the current application.
 
 ## Reference: leap-scrcpy protocol (research)
 

@@ -8,6 +8,24 @@ public enum Protocol {
     public static let headerLength: Int = 15 // magic(3) + version(2) + type(2) + requestId(4) + payloadLen(4)
 }
 
+/// Feature capabilities advertised by the v1 HELLO_ACK payload. The wire
+/// version remains v1; capabilities distinguish additive runtime features
+/// from the base framing compatibility.
+public struct HelperCapabilities: OptionSet, Sendable, Equatable {
+    public let rawValue: UInt32
+
+    public init(rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    public static let semanticPointerResult = Self(rawValue: 1 << 0)
+    public static let explicitPointerRouting = Self(rawValue: 1 << 1)
+    public static let currentPointerPath: Self = [
+        .semanticPointerResult,
+        .explicitPointerRouting,
+    ]
+}
+
 public enum MessageType: UInt16, Sendable {
     // Mac -> Android
     case hello = 0x0001
@@ -213,7 +231,14 @@ public struct DisplayInfo: Sendable, Equatable {
         self.layerStack = layerStack
     }
 
-    public var isDesktop: Bool { (flags & 0x40) != 0 } // Display.FLAG_DESKTOP
+    /// Samsung Android 12 exposes the DeX virtual display with a raw virtual
+    /// type and a build-specific flag combination. Keep the compatibility
+    /// heuristics here; application code consumes RemoteTarget instead.
+    public var isDesktop: Bool {
+        (flags & 0x40) != 0 || type == 7 ||
+            name.caseInsensitiveCompare("Desktop") == .orderedSame ||
+            uniqueId.range(of: ",Desktop,", options: .caseInsensitive) != nil
+    }
 }
 
 public enum DecodeError: Error, Equatable, Sendable {
@@ -232,6 +257,8 @@ public enum PointerDeliveryStatus: UInt8, Sendable, Equatable {
 struct Decoder {
     var data: Data
     var offset = 0
+
+    var remaining: Int { data.count - offset }
 
     init(_ data: Data) { self.data = data }
 
@@ -271,9 +298,15 @@ struct Decoder {
 }
 
 public extension Messages {
-    static func decodeHelloAck(_ payload: Data) throws -> UInt16 {
+    static func decodeHelloAckInfo(_ payload: Data) throws -> (version: UInt16, capabilities: HelperCapabilities) {
         var d = Decoder(payload)
-        return try d.u16()
+        let version = try d.u16()
+        let capabilities = d.remaining >= 4 ? HelperCapabilities(rawValue: try d.u32()) : []
+        return (version, capabilities)
+    }
+
+    static func decodeHelloAck(_ payload: Data) throws -> UInt16 {
+        try decodeHelloAckInfo(payload).version
     }
 
     static func decodeKeyEvent(_ payload: Data) throws -> (keyCode: UInt16, metaState: UInt32, action: UInt8, repeatCount: UInt8) {

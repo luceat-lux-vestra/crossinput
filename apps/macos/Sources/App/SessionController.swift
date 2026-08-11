@@ -56,8 +56,11 @@ final class SessionController {
         var configuration = RemoteSession.Configuration(transport: adbTransport, serial: serial)
         configuration.stderrHandler = { text in Diagnostics.log("helper: \(text)") }
         let manager = sessionFactory(configuration)
-        manager.onEvent = { [weak self] frame in
-            Task { @MainActor in self?.onEvent?(frame) }
+        manager.onEvent = { [weak self, weak manager] frame in
+            Task { @MainActor in
+                guard let self, let manager, self.session === manager else { return }
+                self.onEvent?(frame)
+            }
         }
         manager.onDisconnect = { [weak self, weak manager] in
             Task { @MainActor in

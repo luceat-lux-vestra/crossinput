@@ -45,15 +45,21 @@ class PointerDispatcher(
     private val inputManager: InputManagerPointerInjector,
     private val mode: PointerBackendMode = PointerBackendMode.AUTO,
 ) : PointerInjector {
+    override val supportsExplicitDisplayRouting: Boolean
+        get() = inputManager.supportsExplicitDisplayRouting
+
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
 
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
         val selected = when (mode) {
-            PointerBackendMode.UHID -> if (uhid.create()) uhid else null
+            PointerBackendMode.UHID -> if (uhid.routing == PointerRouting.EXPLICIT_DISPLAY && uhid.create()) uhid else null
             PointerBackendMode.INPUT_MANAGER -> inputManager
-            PointerBackendMode.AUTO -> if (uhid.create()) uhid else null
+            // UHID cannot carry a selected display ID. For a target-selection
+            // request, prefer only a backend that can make that routing
+            // explicit; otherwise use InputManager directly.
+            PointerBackendMode.AUTO -> if (uhid.routing == PointerRouting.EXPLICIT_DISPLAY && uhid.create()) uhid else null
         }
         if (selected != null && selected.selectDisplay(display)) {
             active = selected
@@ -63,11 +69,11 @@ class PointerDispatcher(
 
         if (mode == PointerBackendMode.UHID) {
             active = null
-            log.error(TAG, "UHID pointer backend unavailable in forced mode")
+            log.error(TAG, "UHID cannot guarantee explicit target routing in forced mode")
             return false
         }
         if (selected !== inputManager) uhid.close()
-        if (!inputManager.selectDisplay(display)) {
+        if (inputManager.routing != PointerRouting.EXPLICIT_DISPLAY || !inputManager.selectDisplay(display)) {
             active = null
             log.error(TAG, "InputManager pointer backend unavailable")
             return false
@@ -121,7 +127,7 @@ class PointerDispatcher(
             return
         }
         uhid.close()
-        if (inputManager.selectDisplay(display)) {
+        if (inputManager.routing == PointerRouting.EXPLICIT_DISPLAY && inputManager.selectDisplay(display)) {
             active = inputManager
             log.warn(TAG, "pointer backend failover backend=input-manager")
         } else {

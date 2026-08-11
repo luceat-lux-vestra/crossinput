@@ -13,6 +13,7 @@ class UhidPointerInjector(
     private val log: Logger,
     private val hid: HidDeviceManager,
 ) : PointerInjector {
+    override val routing: PointerRouting = PointerRouting.SYSTEM_ROUTED
     private var deviceId: Int? = null
     private var selectedDisplayId: Int = -1
     private var buttons: Int = 0
@@ -38,8 +39,15 @@ class UhidPointerInjector(
 
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplayId = display.displayId
-        // UHID is a system input device. Android routes it through the
-        // selected display context; no display ID is hardcoded here.
+        // UHID is a system input device and this API has no per-report display
+        // selector. Never claim a target-specific selection succeeded.
+        log.warn(TAG, "UHID is system-routed; explicit target selection unavailable")
+        return false
+    }
+
+    /** Allows a caller without target-selection semantics to use system routing. */
+    fun selectSystemRoute(): Boolean {
+        selectedDisplayId = -1
         return create()
     }
 

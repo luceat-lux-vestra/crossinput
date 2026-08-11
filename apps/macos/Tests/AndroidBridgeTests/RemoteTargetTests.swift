@@ -26,6 +26,25 @@ final class RemoteTargetTests: XCTestCase {
         XCTAssertEqual(target.width, 1920)
     }
 
+    func testAndroid12VirtualDesktopRecordIsRecognizedWithoutDesktopFlag() {
+        let display = DisplayInfo(
+            displayId: 2,
+            type: 5,
+            flags: 0x20000182,
+            state: 2,
+            width: 1920,
+            height: 1080,
+            densityDpi: 160,
+            rotation: 0,
+            name: "Desktop",
+            uniqueId: "virtual:android,1000,Desktop,0",
+            layerStack: 2
+        )
+
+        XCTAssertTrue(display.isDesktop)
+        XCTAssertEqual(RemoteTargetCatalog.normalize(display).kind, .external)
+    }
+
     func testSelectionPreservesOverrideThenExternalThenFirstPolicy() {
         let phone = makeTarget(id: 0, kind: .phone)
         let external = makeTarget(id: 6, kind: .external)
@@ -44,21 +63,31 @@ final class RemoteTargetTests: XCTestCase {
         )
     }
 
+    func testDesktopIsPreferredWhenBothExternalRecordsArePresent() {
+        let hdmi = makeTarget(id: 6, kind: .external, name: "HDMI Screen", uniqueId: "local:1")
+        let desktop = makeTarget(id: 2, kind: .external, name: "Desktop", uniqueId: "virtual:android,1000,Desktop,0")
+
+        XCTAssertEqual(RemoteTargetCatalog.preferredTarget(in: [hdmi, desktop])?.id, desktop.id)
+    }
+
     func testEmptyCatalogHasNoSelection() {
         XCTAssertNil(RemoteTargetCatalog.preferredTarget(in: []))
     }
 
-    private func makeTarget(id: UInt32, kind: RemoteTargetKind) -> RemoteTarget {
+    private func makeTarget(id: UInt32,
+                            kind: RemoteTargetKind,
+                            name: String = "target",
+                            uniqueId: String? = nil) -> RemoteTarget {
         RemoteTarget(
             id: RemoteTargetID(rawValue: id),
-            name: "target",
+            name: name,
             kind: kind,
             availability: .available,
             width: 1,
             height: 1,
             densityDpi: 1,
             rotation: 0,
-            uniqueId: "local:\(id)"
+            uniqueId: uniqueId ?? "local:\(id)"
         )
     }
 }

@@ -68,7 +68,8 @@ public enum RemoteTargetCatalog {
     private static let v1DesktopFlag: UInt32 = 0x40
 
     public static func normalize(_ display: DisplayInfo) -> RemoteTarget {
-        let isDesktop = display.type == v1DesktopType || (display.flags & v1DesktopFlag) != 0
+        let isDesktop = display.isDesktop || display.type == v1DesktopType ||
+            (display.flags & v1DesktopFlag) != 0
         let kind: RemoteTargetKind
         if isDesktop || display.type == v1HdmiType {
             kind = .external
@@ -107,6 +108,12 @@ public enum RemoteTargetCatalog {
            let rawOverride = UInt32(exactly: override),
            let match = targets.first(where: { $0.id.rawValue == rawOverride }) {
             return match
+        }
+        if let desktop = targets.first(where: {
+            $0.name.caseInsensitiveCompare("Desktop") == .orderedSame ||
+                $0.uniqueId.range(of: ",Desktop,", options: .caseInsensitive) != nil
+        }) {
+            return desktop
         }
         if let external = targets.first(where: { $0.kind == .external }) {
             return external
