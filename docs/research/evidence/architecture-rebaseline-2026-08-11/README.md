@@ -128,14 +128,14 @@ phone, a fresh current-path 100-cycle run, fresh keyboard observation, or
 helper/ADB failure recovery. Those remain `NOT VERIFIED` unless a person
 observes the physical screens and recovery behavior and records the result.
 
-## Final verification matrix for `b1bf2c1`
+## Final verification matrix for `488ded3`
 
 Recorded: 2026-08-11. The final PR HEAD is
-`b1bf2c19939bda74ecc4358f1099485630f4adee`.
+`488ded331a4f97089d9cd82223276fa79b21b156`.
 
 | Check | Result | Evidence boundary |
 |---|---|---|
-| Final-head hosted CI | PASS | macOS, Android, documentation, and shell jobs all passed for `b1bf2c1` in [CI run 31452130863](https://github.com/luceat-lux-vestra/crossinput/actions/runs/31452130863) |
+| Final-head hosted CI | PASS | macOS, Android, documentation, and shell jobs all passed for `488ded3` in [CI run 31454181120](https://github.com/luceat-lux-vestra/crossinput/actions/runs/31454181120) |
 | Local macOS tests | PASS | 50 XCTest cases and 30 Swift Testing cases passed; release binary also built with `swift build -c release --disable-sandbox` |
 | Protocol fixtures and shell/diff gates | PASS | 15 fixtures verified; all shell scripts passed `bash -n`; `git diff --check` passed |
 | Helper target/routing smoke | PASS | Installed helper listed phone `0`, Desktop/DeX `2`, and HDMI `6`; AUTO selected InputManager and returned eight delivered pointer results across DeX/phone move, button, and scroll sequences |
