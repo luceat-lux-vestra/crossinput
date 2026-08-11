@@ -43,6 +43,10 @@ final class InputSender: @unchecked Sendable {
         self.pointerRequestTimeout = max(0.05, pointerRequestTimeout)
     }
 
+    /// Enqueues one semantic delivery batch. Adjacent movement events for the
+    /// same session may be coalesced; the completion is for that delivered
+    /// batch, not a per-original-event acknowledgement. The aggregate result
+    /// is therefore credited to handoff accounting exactly once.
     func enqueuePointer(_ event: PointerEvent,
                         completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
         let sessionSnapshot = session.snapshot()

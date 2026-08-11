@@ -128,6 +128,28 @@ phone, a fresh current-path 100-cycle run, fresh keyboard observation, or
 helper/ADB failure recovery. Those remain `NOT VERIFIED` unless a person
 observes the physical screens and recovery behavior and records the result.
 
+## Final verification matrix for `b1bf2c1`
+
+Recorded: 2026-08-11. The final PR HEAD is
+`b1bf2c19939bda74ecc4358f1099485630f4adee`.
+
+| Check | Result | Evidence boundary |
+|---|---|---|
+| Final-head hosted CI | PASS | macOS, Android, documentation, and shell jobs all passed for `b1bf2c1` in [CI run 31452130863](https://github.com/luceat-lux-vestra/crossinput/actions/runs/31452130863) |
+| Local macOS tests | PASS | 50 XCTest cases and 30 Swift Testing cases passed; release binary also built with `swift build -c release --disable-sandbox` |
+| Protocol fixtures and shell/diff gates | PASS | 15 fixtures verified; all shell scripts passed `bash -n`; `git diff --check` passed |
+| Helper target/routing smoke | PASS | Installed helper listed phone `0`, Desktop/DeX `2`, and HDMI `6`; AUTO selected InputManager and returned eight delivered pointer results across DeX/phone move, button, and scroll sequences |
+| DeX actual pointer screen | NOT VERIFIED | DeX screencap showed the desktop but no pointer sprite; no direct external-monitor observation was available |
+| Phone actual pointer screen | NOT VERIFIED | Phone capture was black/off; no direct phone-screen observation was available |
+| Current InputManager 100-cycle edge run | NOT VERIFIED | The automated handoff model passed 100 cycles and the historical UHID event-tap run remains preserved, but a fresh current-path physical 100-cycle run was not observed |
+| Fresh keyboard regression | NOT VERIFIED | Existing keyboard evidence is preserved; fresh physical key, Korean composition, and shortcut-suppression observation was not performed |
+| Helper kill / ADB loss / emergency return | NOT VERIFIED | Safety unit tests passed, but final-head physical recovery was not directly observed |
+
+The helper smoke used the APK already present on the connected device, while the
+final-head Android source was built and tested by hosted CI. Therefore the
+helper-level routing result is not presented as final-head packaged-app screen
+evidence. No item marked `NOT VERIFIED` is treated as a merge acceptance.
+
 ## Automated handoff-model repetition
 
 The control-handoff state machine was exercised independently of the macOS
