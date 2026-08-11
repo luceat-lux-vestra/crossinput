@@ -16,6 +16,8 @@ public enum SuppressionReleaseReason: String, Sendable {
     case captureStopped
     /// Suppression released because the helper reported a fatal error.
     case fatalError
+    /// Recognized external-control input explicitly took ownership back for macOS.
+    case externalControl
 }
 
 /// App connection phase after a suppression release (pure, testable policy).
@@ -23,6 +25,15 @@ public enum SuppressionPhaseOutcome: String, Sendable {
     case idle
     case ready
     case error
+}
+
+/// Whether a suppression release owns the normal edge-return pointer restore.
+/// An external-control takeover must leave the pointer at the position chosen
+/// by the remote controller and therefore never warps it.
+public enum SuppressionReleasePolicy {
+    public static func restoresPointer(for reason: SuppressionReleaseReason) -> Bool {
+        reason != .externalControl
+    }
 }
 
 /// Pure reducer deciding the app phase after a suppression release.
@@ -39,7 +50,7 @@ public enum SuppressionPhasePolicy {
             return .idle
         case .fatalError:
             return .error
-        case .normalReturn, .watchdogTimeout, .emergencyHotkey:
+        case .normalReturn, .watchdogTimeout, .emergencyHotkey, .externalControl:
             return isConnected ? .ready : .idle
         }
     }

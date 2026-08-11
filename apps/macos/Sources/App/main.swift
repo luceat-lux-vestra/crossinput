@@ -132,7 +132,10 @@ final class AppModel: ObservableObject {
         capture.onKeyEvent = { [weak self] keyEvent in
             self?.onCapturedKeyEvent(keyEvent)
         }
-capture.onSuppressionReleased = { [weak self] reason, generation in
+        capture.onPointerStateReset = { [weak self] in
+            self?.resetCapturedPointerState()
+        }
+        capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
                 // Suppression was lifted. The phase must reflect the actual
                 // cause: a dead connection stays disconnected (idle/reconnect),
@@ -161,6 +164,7 @@ capture.onSuppressionReleased = { [weak self] reason, generation in
                 case .connectionLost: machineReason = .connectionLost
                 case .captureStopped: machineReason = .deactivated
                 case .fatalError: machineReason = .fatalError
+                case .externalControl: machineReason = .externalControlTakeover
                 }
                 self.switchMachine.emergencyReturn(reason: machineReason)
                 Diagnostics.log("suppression released reason=\(reason.rawValue) phase=\(self.phase) gen=\(generation)")
@@ -460,6 +464,7 @@ capture.onSuppressionReleased = { [weak self] reason, generation in
         case .fatalError: return .fatalError
         case .deactivated: return .captureStopped
         case .emergencyReturn: return .emergencyHotkey
+        case .externalControlTakeover: return .externalControl
         case .boundaryCrossed, .suppressionReleased, .edgeEntered,
              .activation, .connectionBegan, .connectionReady:
             return .normalReturn
@@ -598,6 +603,8 @@ capture.onSuppressionReleased = { [weak self] reason, generation in
                     Diagnostics.log("pointerMoveRel send failed, movement not credited: \(error)")
                 }
             case let .button(button, down):
+                let bit = Self.hidButtonBit(for: button)
+                if down { hidButtons |= bit } else { hidButtons &= ~bit }
                 try? connection.send(CxiFrame(type: .pointerButton, requestId: 1,
                                               payload: Messages.pointerButton(button: button, down: down)))
             case let .scroll(horizontal, vertical):
@@ -605,6 +612,30 @@ capture.onSuppressionReleased = { [weak self] reason, generation in
                                               payload: Messages.pointerScroll(horizontal: horizontal, vertical: vertical)))
             }
         }
+    }
+
+    /// Releases any button state that was held on Android when an external
+    /// controller takes ownership. This runs synchronously before the
+    /// triggering CGEvent is returned to macOS.
+    nonisolated func resetCapturedPointerState() {
+        let heldButtons = hidButtons
+        hidButtons = 0
+        guard heldButtons != 0, let connection else { return }
+
+        if let deviceId = hidDeviceId {
+            let report = Self.hidReport(buttons: 0, dx: 0, dy: 0, wheel: 0)
+            try? connection.send(CxiFrame(type: .hidReport, requestId: 1,
+                                          payload: Messages.hidReport(deviceId: deviceId, report: report)))
+        } else {
+            for (bit, button) in [(UInt8(0x01), UInt32(0)),
+                                   (UInt8(0x02), UInt32(1)),
+                                   (UInt8(0x04), UInt32(2))]
+            where heldButtons & bit != 0 {
+                try? connection.send(CxiFrame(type: .pointerButton, requestId: 1,
+                                              payload: Messages.pointerButton(button: button, down: false)))
+            }
+        }
+        Diagnostics.log("external-control pointer state reset buttons=\(heldButtons.nonzeroBitCount)")
     }
 
     nonisolated func handleUnsolicited(_ frame: CxiFrame) {

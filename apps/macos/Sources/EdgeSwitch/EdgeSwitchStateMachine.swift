@@ -30,6 +30,7 @@ public enum TransitionReason: String, Sendable {
     case emergencyReturn
     case watchdogTimeout
     case suppressionReleased
+    case externalControlTakeover
     case fatalError
     case deactivated
 }
