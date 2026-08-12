@@ -12,6 +12,22 @@ then evaluated that stale frame and its display-specific Android edge. A gap,
 offset layout, or out-of-frame event could therefore reuse a configured edge
 from a different display.
 
+### 2026-08-13 reopened finding
+
+The original fix still resolved `CGEvent.location` against `NSScreen.frame`.
+Those values use different global coordinate systems: Quartz event locations
+and `CGDisplayBounds` place displays below the primary at increasing positive
+Y, while AppKit represents displays below the primary with negative Y. The
+original implementation therefore worked by coincidence on the primary
+display but could not resolve the configured Built-in Retina display in the
+five-display physical layout.
+
+The 2026-08-12 physical record below is superseded for the configured-edge
+success claim by the direct 2026-08-13 reproduction. The non-target stale-state
+coverage remains valid. The runtime fix now resolves the display and all
+handoff/return geometry with CoreGraphics APIs, matching the event coordinate
+space.
+
 ## Implementation
 
 - Resolve the display from each pointer event location and clear the current
@@ -23,6 +39,8 @@ from a different display.
   covered without depending on the host's current monitor arrangement.
 - Preserve the existing per-display edge settings and the external-control
   takeover hotfix from `main`.
+- Resolve `CGEvent.location` with `CGGetDisplaysWithPoint` and use
+  `CGDisplayBounds` for edge detection, suppression holding, and return warps.
 
 ## Automated verification
 
@@ -80,3 +98,34 @@ The diagnostic log also recorded capture activation, dynamic target selection,
 edge entry, and `boundaryCrossed` return transitions. Those metadata logs do
 not replace the user's direct screen and pointer observation; both evidence
 types are retained here.
+
+## Reopened physical verification
+
+Date: 2026-08-13
+Device: SM-G977N, Android 12 / API 31
+Host layout: five active macOS displays
+
+The packaged app from this branch connected over the paired wireless ADB
+transport, listed three Android displays, and dynamically selected the Desktop
+display at runtime (display ID 2 in this run). `dumpsys display` recorded the
+Desktop as a 1920 x 1080 virtual display in state ON; this numeric ID is
+observational and is not assumed by the app.
+
+The configured host display was the non-primary Built-in Retina display
+(CoreGraphics display ID 1) with its left edge selected. Its geometry in the
+physical layout demonstrated the coordinate mismatch directly:
+
+```text
+NSScreen frame:       x=909, y=-1586, width=2454, height=1586
+CGDisplayBounds:      x=909, y=2160,  width=2454, height=1586
+```
+
+Before the fix, the user directly confirmed that the pointer did not hand off
+at that edge. After resolving the event against `CGDisplayBounds`, the user
+directly confirmed that the same edge handed off successfully. Metadata-only
+diagnostics recorded `localActive -> edgeArmed -> remoteActive`, balanced
+cursor hide/show, and `boundaryCrossed` return transitions.
+
+The Android pointer sprite was not visible during this successful routing
+test. That observation remains tracked by issue #46 and is not claimed as
+fixed by this coordinate-space correction.
