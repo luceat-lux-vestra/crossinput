@@ -40,6 +40,13 @@ No CXI frame or fixture changed in this follow-up.
 6. The smoke tool used deprecated transport configuration and did not require a
    semantic pointer acknowledgement. It now uses `AdbTransport` directly and
    requires a delivered `POINTER_RESULT`.
+7. The rebaseline composition-root rewrite accidentally omitted the existing
+   host-display edge picker even though persisted edge settings and capture
+   application remained active. This made a stored edge effective but
+   invisible and unchangeable in the menu. The application now publishes an
+   explicit host-display snapshot and restores the per-display
+   `None`/`Left`/`Right`/`Top`/`Bottom` picker. Regression tests cover multiple
+   host displays, persisted edges, labels, and invalid stored values.
 
 ## Safety and compatibility boundary
 
@@ -68,18 +75,18 @@ git diff --check
 
 Results:
 
-- macOS: 73 XCTest cases and 30 Swift Testing cases passed; the release app
+- macOS: 75 XCTest cases and 30 Swift Testing cases passed; the release app
   and `cxi-smoke` built successfully.
 - Android: debug and release unit-test/compile tasks passed; the debug APK
   assembled successfully.
 - Protocol: all 15 CXI v1 fixtures matched.
 - Shell syntax and whitespace validation passed.
 
-The macOS suite includes handshake publication, superseded-handshake cleanup,
-terminal session failure, stale-session input, confirmed target selection,
-external takeover cleanup, and 100 handoff cycles. Android tests cover display
-discovery, backend selection/failure, injection, and cleanup. Passing these
-gates demonstrates source-level consistency only.
+The macOS suite includes host-display edge presentation, handshake publication,
+superseded-handshake cleanup, terminal session failure, stale-session input,
+confirmed target selection, external takeover cleanup, and 100 handoff cycles.
+Android tests cover display discovery, backend selection/failure, injection,
+and cleanup. Passing these gates demonstrates source-level consistency only.
 
 Toolchain used: Apple Swift 6.3.3, Amazon Corretto JDK 17.0.18, Gradle 8.10.2,
 Kotlin 1.9.24, Android Gradle Plugin 8.5.2, compileSdk 35, Node.js 26.7.0, and
@@ -88,10 +95,23 @@ through compileSdk 34; no build or test failed.
 
 ## Physical verification status
 
-`adb devices -l` reported no attached device. Fresh SM-G977N ADB logs and
-target-screen confirmation were therefore unavailable. The semantic pointer
-visibility, click/scroll routing,
-keyboard composition, failure recovery, and target lifecycle matrix therefore
-remain **NOT VERIFIED** on the rebased head. Historical evidence is retained,
-but it is not promoted to fresh-head evidence. Issue #41 and PR #42 must remain
-open until the outstanding matrix in `docs/testing.md` is recorded.
+The initial ADB check used an obsolete wireless endpoint and incorrectly
+reported no attached device. After using the device's current connection port,
+the physical SM-G977N was confirmed as Android 12 / API 31. The exact locally
+built helper APK matched the pushed APK by SHA-256. A fresh semantic session
+completed HELLO, discovered the built-in display plus dynamically assigned
+HDMI and Desktop targets, selected the Desktop target, received delivered
+`POINTER_RESULT` responses through the explicit InputManager backend, answered
+PING, and shut down cleanly. A forced InputManager run independently confirmed
+selection and accepted movement on the dynamically discovered Desktop target.
+
+The rebuilt menu was also inspected directly and confirmed to expose every
+current macOS host display with the restored per-display edge choices. This is
+physical host UI evidence, not target-screen pointer evidence.
+
+The Desktop display returned a readable ADB screen capture, but the static
+capture did not contain the cursor sprite. Semantic pointer visibility,
+click/scroll observation, keyboard composition, full failure recovery, and the
+screen-confirmed 100-cycle matrix therefore remain **NOT VERIFIED** on this
+head. Historical evidence is retained but is not promoted to fresh-head
+evidence.

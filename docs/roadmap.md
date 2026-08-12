@@ -59,6 +59,8 @@ The architecture rebaseline is the current bounded work stream (issue #41):
   queued key releases, and releases accepted held pointer buttons.
 - Android target selection, metric refresh, pointer injection, and shutdown
   are serialized across helper threads.
+- The macOS menu preserves its per-host-display handoff-edge picker separately
+  from the normalized Android remote-target list.
 
 The implementation boundary was re-audited in PR #42 after rebasing onto the
 current main branch. The PR does not close #41 until the remaining

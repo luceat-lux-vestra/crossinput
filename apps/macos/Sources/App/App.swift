@@ -62,6 +62,7 @@ final class AppModel: ObservableObject {
     @Published var targetState: TargetState = .unavailable
     @Published var targets: [RemoteTarget] = []
     @Published var selectedTarget: RemoteTarget?
+    @Published private(set) var hostDisplays: [HostDisplayEdgeOption] = []
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
 
@@ -95,6 +96,7 @@ final class AppModel: ObservableObject {
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
         }
+        refreshHostDisplays()
     }
 
     // MARK: - Session
@@ -230,26 +232,37 @@ final class AppModel: ObservableObject {
     // MARK: - Per-display edge configuration
 
     func applyEdgeConfig() {
-        for screen in NSScreen.screens {
-            let id = Self.displayID(of: screen)
-            let stored = AppSettings.Settings.androidEdge(displayID: id)
-            capture.setAndroidEdge(Self.screenEdge(from: stored), forDisplay: id)
+        refreshHostDisplays()
+        for display in hostDisplays {
+            capture.setAndroidEdge(display.edge, forDisplay: display.id)
         }
     }
 
-    static func displayID(of screen: NSScreen) -> CGDirectDisplayID {
-        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return 0 }
-        return CGDirectDisplayID(number.uint32Value)
+    func refreshHostDisplays() {
+        let snapshots = NSScreen.screens.compactMap(Self.hostDisplaySnapshot)
+        hostDisplays = HostDisplayEdgeCatalog.options(from: snapshots) { displayID in
+            AppSettings.Settings.androidEdge(displayID: displayID)
+        }
     }
 
-    static func screenEdge(from string: String?) -> ScreenEdge? {
-        switch string {
-        case "left": return .left
-        case "right": return .right
-        case "top": return .top
-        case "bottom": return .bottom
-        default: return nil
+    func setAndroidEdge(_ edge: ScreenEdge?, for displayID: CGDirectDisplayID) {
+        AppSettings.Settings.setAndroidEdge(edge?.rawValue, displayID: displayID)
+        capture.setAndroidEdge(edge, forDisplay: displayID)
+        if let index = hostDisplays.firstIndex(where: { $0.id == displayID }) {
+            hostDisplays[index].edge = edge
         }
+        Diagnostics.log("remote edge for host display \(displayID) = \(edge?.rawValue ?? "none")")
+    }
+
+    private static func hostDisplaySnapshot(_ screen: NSScreen) -> HostDisplaySnapshot? {
+        guard let number = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else { return nil }
+        return HostDisplaySnapshot(
+            id: CGDirectDisplayID(number.uint32Value),
+            name: screen.localizedName,
+            width: Int(screen.frame.width.rounded()),
+            height: Int(screen.frame.height.rounded()))
     }
 }
 
@@ -257,36 +270,59 @@ private struct AppMenu: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        Text("Ampersand")
-        Text(statusText).foregroundStyle(.secondary)
+        Group {
+            Text("Ampersand")
+            Text(statusText).foregroundStyle(.secondary)
 
-        if model.isDisconnected {
-            Button("Connect") { Task { await model.connectDefault() } }
-            Button("Grant Accessibility…") { model.openAccessibilitySettings() }
-            Button("Enable Edge Switch") { _ = model.enable() }
-        }
+            if model.isDisconnected {
+                Button("Connect") { Task { await model.connectDefault() } }
+                Button("Grant Accessibility…") { model.openAccessibilitySettings() }
+                Button("Enable Edge Switch") { _ = model.enable() }
+            }
 
-        if !model.targets.isEmpty {
-            Divider()
-            ForEach(model.targets) { target in
-                Button { model.select(target) } label: {
-                    HStack {
-                        Image(systemName: model.selectedTarget?.id == target.id ? "checkmark.circle.fill" : "circle")
-                        Text("\(target.name) (\(target.width)×\(target.height))")
+            if !model.targets.isEmpty {
+                Divider()
+                ForEach(model.targets) { target in
+                    Button { model.select(target) } label: {
+                        HStack {
+                            Image(systemName: model.selectedTarget?.id == target.id
+                                  ? "checkmark.circle.fill" : "circle")
+                            Text("\(target.name) (\(target.width)×\(target.height))")
+                        }
+                    }
+                }
+                Divider()
+                Button("Refresh Displays") { model.refreshDisplays() }
+            }
+
+            if !model.hostDisplays.isEmpty {
+                Divider()
+                Text("Remote target is at…")
+                ForEach(model.hostDisplays) { display in
+                    Picker(
+                        display.label,
+                        selection: Binding<ScreenEdge?>(
+                            get: {
+                                model.hostDisplays.first(where: { $0.id == display.id })?.edge
+                            },
+                            set: { model.setAndroidEdge($0, for: display.id) })) {
+                        Text("None").tag(ScreenEdge?.none)
+                        ForEach(ScreenEdge.allCases, id: \.self) { edge in
+                            Text(edge.rawValue.capitalized).tag(ScreenEdge?.some(edge))
+                        }
                     }
                 }
             }
-            Divider()
-            Button("Refresh Displays") { model.refreshDisplays() }
-        }
 
-        if model.controlState == .remote {
-            Divider()
-            Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
-        }
+            if model.controlState == .remote {
+                Divider()
+                Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
+            }
 
-        Divider()
-        Button("Quit") { NSApplication.shared.terminate(nil) }
+            Divider()
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+        }
+        .onAppear { model.refreshHostDisplays() }
     }
 
     @MainActor

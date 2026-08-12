@@ -34,7 +34,7 @@ DeX is a supported target/use case, not a CrossInput core state or type.
 ```text
 Presentation
 ├─ MenuBar
-├─ Settings
+├─ Settings              per-host-display handoff edge
 └─ Diagnostics
 
 Application
@@ -67,7 +67,10 @@ selection and rejects stale responses; `InputSender` returns a semantic
 delivery result; and `ControlHandoffController` is the thin capture/safety
 composition boundary.
 The menu bar composition root wires the controllers, while `AppModel` exposes
-their presentation-facing state.
+their presentation-facing state. Host display enumeration and persisted edge
+choices remain presentation/configuration concerns: every current macOS
+display is shown independently from the Android remote-target list, and its
+selected edge is applied to `InputCapture`.
 
 ### Android helper
 
