@@ -11,11 +11,12 @@ struct SmokeMain {
         let args = CommandLine.arguments.dropFirst()
         let serialArg = args.first { !$0.hasPrefix("--") }
         let uhidMode = args.contains("--uhid")
+        let transport = AdbTransport()
         let serial: String
         if let serialArg {
             serial = serialArg
         } else {
-            serial = await firstAdbSerial()
+            serial = transport.firstConnectedSerial()
         }
         guard !serial.isEmpty else {
             print("ERROR: no adb device connected")
@@ -23,8 +24,7 @@ struct SmokeMain {
         }
         print("serial: \(serial)")
 
-        var config = RemoteSession.Configuration(serial: serial)
-        config.adbPath = locateAdb() ?? "/opt/homebrew/bin/adb"
+        let config = RemoteSession.Configuration(transport: transport, serial: serial)
         let manager = RemoteSession(configuration: config)
 
         try await manager.connect()
@@ -52,11 +52,21 @@ struct SmokeMain {
         let selected = try Messages.decodeDisplay(selectFrame.payload)
         print("SELECT_DISPLAY(\(target.displayId)) -> \(selected.name)")
 
-        // A couple of small relative moves; fire-and-forget frames.
-        try manager.send(CxiFrame(type: .pointerMoveRel, requestId: 100,
-                                  payload: Messages.pointerMoveRel(dx: 40, dy: 20)))
-        try manager.send(CxiFrame(type: .pointerMoveRel, requestId: 101,
-                                  payload: Messages.pointerMoveRel(dx: -40, dy: -20)))
+        // A couple of small relative moves through the same acknowledged
+        // semantic delivery contract used by the application.
+        for (dx, dy) in [(Int32(40), Int32(20)), (Int32(-40), Int32(-20))] {
+            let response = try await manager.request(
+                .pointerMoveRel, payload: Messages.pointerMoveRel(dx: dx, dy: dy))
+            guard response.type == .pointerResult else {
+                throw ConnectionError.protocolError(
+                    "expected POINTER_RESULT, got \(response.type)")
+            }
+            let result = try Messages.decodePointerResult(response.payload)
+            guard result.status == .delivered else {
+                throw ConnectionError.protocolError(
+                    "pointer delivery status \(result.status)")
+            }
+        }
 
         let pong = try await manager.request(.ping, payload: Data())
         print("PING -> \(pong.type)")
@@ -125,25 +135,4 @@ struct SmokeMain {
         print("UHID destroy -> \(destroyed.type)")
     }
 
-    static func firstAdbSerial() async -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: locateAdb() ?? "/opt/homebrew/bin/adb")
-        process.arguments = ["devices"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do { try process.run() } catch { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        for line in String(decoding: data, as: UTF8.self).split(separator: "\n").dropFirst() {
-            let parts = line.split(whereSeparator: { $0.isWhitespace })
-            if parts.count >= 2, parts[1] == "device" { return String(parts[0]) }
-        }
-        return ""
-    }
-
-    static func locateAdb() -> String? {
-        ["/usr/local/bin/adb", "/opt/homebrew/bin/adb", "/usr/bin/adb"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
 }

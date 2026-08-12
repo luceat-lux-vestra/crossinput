@@ -87,7 +87,9 @@ Negative:
 The rebaseline boundaries are implemented in the current v1 code:
 
 - `SessionController` is the single owner of `SessionState` transitions and
-  stale `RemoteSession` replacement.
+  stale `RemoteSession` replacement. A connecting session remains private
+  until HELLO and capability negotiation succeed; reconnect exhaustion tears
+  down the transport and enters a terminal failed state.
 - `EdgeSwitchStateMachine` contains only control handoff and pointer-safety
   states. External failures arrive through `forceReturn(.remoteUnavailable)`.
 - `ControlHandoffController` combines capture with handoff safety, while
@@ -100,7 +102,8 @@ The rebaseline boundaries are implemented in the current v1 code:
   routing. v1 raw HID handlers remain only for compatibility and are not used
   by the normal Ampersand pointer path.
 - `TargetSelectionController` publishes a selection only after a matching
-  `DISPLAY_CHANGED` response and ignores stale selection responses.
+  `DISPLAY_CHANGED` response and ignores stale selection responses. Initial
+  refresh awaits that confirmation before the application enables capture.
 - `SessionController` ignores events as well as disconnect callbacks from a
   replaced `RemoteSession`.
 - `HELLO_ACK` advertises additive v1 capabilities. The current app rejects an
@@ -109,10 +112,14 @@ The rebaseline boundaries are implemented in the current v1 code:
   matching helper.
 - `InputSender` bounds and coalesces pointer movement, keeps keyboard and
   release paths independent, and cancels stale movement on local return.
+  External-control takeover also drains queued key releases and releases
+  accepted held pointer buttons without delaying local pointer recovery.
 - `DisplayDiscovery` merges the public display list with optionally detected
   system-visible display IDs so a Samsung DeX virtual display is selectable;
   the hidden API is isolated behind the existing runtime-reflection adapter
   and falls back to the public list when unavailable.
+- `PointerDispatcher` serializes target selection, metric refresh, injection,
+  and shutdown across the helper stdin and display-callback threads.
 
 This implementation status is separate from device verification status below.
 
@@ -129,6 +136,9 @@ This implementation status is separate from device verification status below.
   target selection, display disappearance/reappearance, backend paths, and
   emergency recovery before this ADR can be marked fully verified. The current
   display-removal propagation is explicitly deferred to issue #17.
+- The post-rebase source audit and its separate physical-verification status
+  are recorded in
+  [`architecture-rebaseline-2026-08-13.md`](../research/architecture-rebaseline-2026-08-13.md).
 
 ## Revisit conditions
 

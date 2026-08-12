@@ -44,6 +44,12 @@ final class ControlHandoffController: @unchecked Sendable {
         capture.onKeyEvent = { [weak self] event in
             self?.sender.enqueueKey(event)
         }
+        capture.onPointerStateReset = { [weak self] in
+            // InputCapture invokes this synchronously after queuing held-key
+            // releases. Schedule remote cleanup without delaying the external
+            // controller's triggering event or local pointer recovery.
+            self?.sender.resetCapturedInputState()
+        }
         capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
                 guard let self, generation == self.currentSuppressionGeneration else { return }
@@ -124,7 +130,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private func controlState(for state: HandoffState) -> ControlState {
         switch state {
         case .edgeArmed: return .arming(switchMachine.entryEdge)
-        case .remoteActive: return .remote(nil)
+        case .remoteActive: return .remote
         case .returning: return .returning
         case .localActive, .disabled: return .local
         }
@@ -135,6 +141,7 @@ final class ControlHandoffController: @unchecked Sendable {
         case .watchdogTimeout: return .watchdogTimeout
         case .emergencyReturn: return .emergencyHotkey
         case .remoteUnavailable: return .remoteUnavailable
+        case .externalControlTakeover: return .externalControl
         case .deactivated: return .captureStopped
         case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered:
             return .normalReturn
@@ -146,6 +153,7 @@ final class ControlHandoffController: @unchecked Sendable {
         case .watchdogTimeout: return .watchdogTimeout
         case .emergencyHotkey: return .emergencyReturn
         case .remoteUnavailable: return .remoteUnavailable
+        case .externalControl: return .externalControlTakeover
         case .captureStopped: return .deactivated
         case .normalReturn: return .suppressionReleased
         }

@@ -47,6 +47,11 @@ final class SessionController {
     var onUnavailable: ((String) -> Void)?
 
     private var session: (any SessionConnection)?
+    /// Candidate performing HELLO/capability negotiation. It is owned by the
+    /// controller for cancellation, but is not published to InputSender until
+    /// the handshake has completed successfully.
+    private var connectingSession: (any SessionConnection)?
+    private var connectionAttempt: UInt64 = 0
     private var reconnectTask: Task<Void, Never>?
     private let sessionFactory: @Sendable (RemoteSession.Configuration) -> any SessionConnection
 
@@ -66,11 +71,16 @@ final class SessionController {
     func connect(serial: String) async throws -> any SessionConnection {
         reconnectTask?.cancel()
         reconnectTask = nil
+        connectionAttempt &+= 1
+        let attempt = connectionAttempt
         setState(.connecting)
         let old = session
+        let oldConnecting = connectingSession
         session = nil
+        connectingSession = nil
         reference.set(nil)
         old?.shutdownAndWait()
+        oldConnecting?.shutdownAndWait()
 
         var configuration = RemoteSession.Configuration(transport: adbTransport, serial: serial)
         configuration.stderrHandler = { text in Diagnostics.log("helper: \(text)") }
@@ -90,19 +100,29 @@ final class SessionController {
                 self.onUnavailable?("helper session ended")
             }
         }
-        session = manager
-        reference.set(manager)
+        connectingSession = manager
 
         do {
             try await manager.connect()
-            guard session === manager else { throw ConnectionError.streamClosed }
+            guard attempt == connectionAttempt,
+                  connectingSession === manager else {
+                throw ConnectionError.streamClosed
+            }
+            connectingSession = nil
+            session = manager
+            reference.set(manager)
             setState(.ready)
             return manager
         } catch {
-            if session === manager {
-                session = nil
+            if attempt == connectionAttempt, connectingSession === manager {
+                connectingSession = nil
                 reference.set(nil)
                 setState(.failed(error.localizedDescription))
+            }
+            // A newer attempt may already have shut this candidate down. If
+            // the stale connect nevertheless became live, close it here.
+            if attempt == connectionAttempt || manager.isConnected {
+                manager.shutdownAndWait()
             }
             throw error
         }
@@ -111,14 +131,30 @@ final class SessionController {
     func disconnect() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        connectionAttempt &+= 1
         let old = session
+        let oldConnecting = connectingSession
         session = nil
+        connectingSession = nil
         reference.set(nil)
         old?.shutdownAndWait()
+        oldConnecting?.shutdownAndWait()
         setState(.disconnected)
     }
 
-    func markFailed(_ message: String) {
+    /// Moves the session to a failed terminal state and tears down any helper
+    /// candidate or live channel so presentation and transport cannot diverge.
+    func fail(_ message: String) {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionAttempt &+= 1
+        let old = session
+        let oldConnecting = connectingSession
+        session = nil
+        connectingSession = nil
+        reference.set(nil)
+        old?.shutdownAndWait()
+        oldConnecting?.shutdownAndWait()
         setState(.failed(message))
     }
 
@@ -160,6 +196,8 @@ final class SessionController {
                 }
                 Diagnostics.log("auto-reconnect attempt \(attempt): device still offline")
             }
+            guard !Task.isCancelled, let self else { return }
+            await self.fail("Wireless device remained unavailable after 5 reconnect attempts")
         }
     }
 

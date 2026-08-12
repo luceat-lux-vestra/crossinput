@@ -17,7 +17,7 @@ enum SessionState: Equatable {
 enum ControlState: Equatable {
     case local
     case arming(ScreenEdge)
-    case remote(RemoteTargetID?)
+    case remote
     case returning
 }
 

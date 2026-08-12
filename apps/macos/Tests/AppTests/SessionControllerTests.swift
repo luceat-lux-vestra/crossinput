@@ -35,6 +35,53 @@ final class SessionControllerTests: XCTestCase {
         }
     }
 
+    func testConnectingSessionIsNotPublishedBeforeHandshakeCompletes() async throws {
+        let pending = FakeSession(serial: "pending", connectDelay: 100_000_000)
+        let factory = SessionFactoryBox([pending])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+
+        let connection = Task { try await controller.connect(serial: "pending") }
+        try await Task.sleep(nanoseconds: 10_000_000)
+
+        XCTAssertEqual(controller.state, .connecting)
+        XCTAssertNil(controller.reference.current())
+
+        _ = try await connection.value
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertTrue(controller.reference.current() === pending)
+    }
+
+    func testNewConnectionAttemptSupersedesPendingHandshake() async throws {
+        let pending = FakeSession(serial: "pending", connectDelay: 100_000_000)
+        let replacement = FakeSession(serial: "replacement")
+        let factory = SessionFactoryBox([pending, replacement])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+
+        let first = Task { try await controller.connect(serial: "pending") }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        _ = try await controller.connect(serial: "replacement")
+        _ = try? await first.value
+
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertTrue(controller.reference.current() === replacement)
+        // The fake deliberately becomes connected after the first shutdown;
+        // the stale completion must be detected and closed again.
+        XCTAssertEqual(pending.shutdownCount, 2)
+    }
+
+    func testTerminalFailureClearsAndShutsDownLiveSession() async throws {
+        let session = FakeSession(serial: "device")
+        let factory = SessionFactoryBox([session])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+
+        _ = try await controller.connect(serial: "device")
+        controller.fail("terminal failure")
+
+        XCTAssertEqual(controller.state, .failed("terminal failure"))
+        XCTAssertNil(controller.reference.current())
+        XCTAssertEqual(session.shutdownCount, 1)
+    }
+
     func testSessionDisconnectWhileLocalClearsCurrentSessionAndRequestsRecovery() async throws {
         let session = FakeSession(serial: "device")
         let factory = SessionFactoryBox([session])
@@ -88,17 +135,22 @@ final class SessionControllerTests: XCTestCase {
     private final class FakeSession: SessionConnection, @unchecked Sendable {
         let serial: String
         let connectError: Error?
+        let connectDelay: UInt64
         var isConnected = false
         var onEvent: (@Sendable (CxiFrame) -> Void)?
         var onDisconnect: (@Sendable () -> Void)?
         var shutdownCount = 0
 
-        init(serial: String, connectError: Error? = nil) {
+        init(serial: String, connectError: Error? = nil, connectDelay: UInt64 = 0) {
             self.serial = serial
             self.connectError = connectError
+            self.connectDelay = connectDelay
         }
 
         func connect() async throws {
+            if connectDelay > 0 {
+                try await Task.sleep(nanoseconds: connectDelay)
+            }
             if let connectError { throw connectError }
             isConnected = true
         }

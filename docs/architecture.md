@@ -1,9 +1,9 @@
 # CrossInput Architecture
 
-> Status: rebaseline implementation complete for v0.1.x stabilization. The
-> current v1 implementation remains macOS → Android and keeps the ADB,
-> app_process, UHID, and InputManager paths. Fresh device evidence for the
-> semantic pointer path remains a separate completion gate.
+> Status: rebaseline implementation re-audited for v0.1.x stabilization on
+> 2026-08-13. The current v1 implementation remains macOS → Android and
+> keeps the ADB, app_process, UHID, and InputManager paths. Fresh device
+> evidence for the semantic pointer path remains a separate completion gate.
 
 CrossInput is an input bridge. It captures semantic input on a local host and
 safely hands control to a selected remote target. The current product is
@@ -60,10 +60,12 @@ Protocol
 ```
 
 These boundaries are implemented in the current source. `SessionController`
-owns the current `SessionState` and replaces stale sessions;
-`TargetSelectionController` confirms `SELECT_DISPLAY` before publishing a selection and rejects
-stale responses; `InputSender` returns a semantic delivery result; and
-`ControlHandoffController` is the thin capture/safety composition boundary.
+owns the current `SessionState`, keeps a candidate session private until HELLO
+and capability negotiation succeed, and replaces stale sessions;
+`TargetSelectionController` confirms `SELECT_DISPLAY` before publishing a
+selection and rejects stale responses; `InputSender` returns a semantic
+delivery result; and `ControlHandoffController` is the thin capture/safety
+composition boundary.
 The menu bar composition root wires the controllers, while `AppModel` exposes
 their presentation-facing state.
 
@@ -112,7 +114,7 @@ The three lifecycles are related but not interchangeable:
 | Lifecycle | States | Owns |
 |---|---|---|
 | Session | `disconnected`, `connecting`, `ready`, `reconnecting`, `failed` | ADB/helper process, CXI handshake, request correlation, disconnect/reconnect |
-| Control | `local`, `arming(edge)`, `remote(target)`, `returning` | Pointer ownership, edge handoff, emergency release, key/button cleanup |
+| Control | `local`, `arming(edge)`, `remote`, `returning` | Pointer ownership, edge handoff, emergency release, key/button cleanup |
 | Target | `unavailable`, `available`, `selecting(targetId)`, `selected(targetId)` | Discovery snapshot, confirmed selection validity, display disappearance/reappearance |
 
 Session failure must release local input without waiting for a target refresh.
@@ -158,9 +160,10 @@ known verification boundary, not a completed current capability.
 
 The invariant requires local recovery for helper crash, timeout, unexpected
 disconnect, stale callbacks, failed handoff, and capture shutdown. Held
-modifiers and buttons are released during remote-to-local transition and helper
-cleanup. No diagnostic path logs key codes, clipboard contents, or input
-payloads.
+modifiers and buttons are released during remote-to-local transition, external
+control takeover, and helper cleanup. A takeover passes the triggering external
+event through and never warps the pointer. No diagnostic path logs key codes,
+clipboard contents, or input payloads.
 
 ## Technology decisions retained
 
@@ -190,4 +193,6 @@ recovery requires the real-device ADB logs and screen confirmation required by
 
 See [product definition](product.md), [roadmap](roadmap.md),
 [ADR-0009](adr/ADR-0009-architecture-rebaseline.md), and the
-[CXI v2 design](../protocol/v2-design.md).
+[CXI v2 design](../protocol/v2-design.md). The rebased integration audit is
+recorded in
+[the 2026-08-13 research note](research/architecture-rebaseline-2026-08-13.md).

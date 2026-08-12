@@ -40,6 +40,7 @@ public enum TransitionReason: String, Sendable {
     case emergencyReturn
     case watchdogTimeout
     case suppressionReleased
+    case externalControlTakeover
     case remoteUnavailable
     case deactivated
 }
@@ -70,9 +71,9 @@ public struct StateTransition: Sendable, Equatable {
 /// shortcut, or a remote-unavailable fail-safe command brings control back to
 /// macOS. External lifecycle is deliberately outside this type.
 ///
-/// Movement model: while DeX owns the pointer, movement is tracked along a
+/// Movement model: while the remote target owns the pointer, movement is tracked along a
 /// virtual axis perpendicular to the entry edge. Position 0 is the entry
-/// boundary; positive positions are inside Android/DeX; negative positions are
+/// boundary; positive positions are inside the remote target; negative positions are
 /// beyond the boundary toward macOS. macOS only regains control once the
 /// position reaches `-returnHysteresis` — the pointer must actually cross the
 /// boundary it entered through and keep going, so brief wobbles and orthogonal
@@ -86,7 +87,7 @@ public struct StateTransition: Sendable, Equatable {
 /// - bottom edge:  moving down  (dy > 0) goes inside  -> delta = dy
 ///
 /// Note: origin/main had the top/bottom cases inverted (a return fired when
-/// moving INTO DeX). The PR that introduced this model fixed that; see the
+/// moving into the remote target). The PR that introduced this model fixed that; see the
 /// equivalence table in the ADR.
 ///
 /// First-event rule (issue #37): the first movement event after entering is
@@ -116,7 +117,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private var entryEdgeStorage: ScreenEdge = .left
 
     /// Virtual pointer position along the axis perpendicular to the entry edge.
-    /// 0 = entry boundary, positive = inside Android/DeX, negative = beyond the
+    /// 0 = entry boundary, positive = inside the remote target, negative = beyond the
     /// boundary toward macOS. Return fires only when position <= -returnHysteresis.
     private var virtualAxisPosition: CGFloat = 0
 
@@ -147,7 +148,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         queue.sync { stateStorage }
     }
 
-    /// Edge the pointer used to leave macOS for DeX.
+    /// Edge the pointer used to leave macOS for the remote target.
     public var entryEdge: ScreenEdge {
         queue.sync { entryEdgeStorage }
     }
@@ -198,17 +199,17 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     }
 
     /// Signed movement along the axis perpendicular to the entry edge.
-    /// Positive = deeper into Android/DeX, negative = toward macOS, zero = off-axis.
+    /// Positive = deeper into the remote target, negative = toward macOS, zero = off-axis.
     public static func androidDirectedDelta(entryEdge: ScreenEdge, dx: CGFloat, dy: CGFloat) -> CGFloat {
         switch entryEdge {
-        case .left: return -dx // DeX on the left: moving left goes inside
-        case .right: return dx // DeX on the right: moving right goes inside
-        case .top: return -dy // DeX above: moving up goes inside
-        case .bottom: return dy // DeX below: moving down goes inside
+        case .left: return -dx // Remote on the left: moving left goes inside
+        case .right: return dx // Remote on the right: moving right goes inside
+        case .top: return -dy // Remote above: moving up goes inside
+        case .bottom: return dy // Remote below: moving down goes inside
         }
     }
 
-    /// Relative pointer movement while DeX owns the pointer.
+    /// Relative pointer movement while the remote target owns the pointer.
     /// Called with the movement accepted by the semantic input-delivery
     /// boundary, never with raw deltas from a failed send.
     ///
@@ -241,7 +242,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
                 )
             }
             // The first event after entering never returns (issue #37); leftover
-            // warp/synthetic deltas must not bounce the user out of DeX.
+            // warp/synthetic deltas must not bounce the user out of the remote target.
             guard !first else { return }
             if position <= -returnHysteresis {
                 returnToMacOS(reason: .boundaryCrossed)

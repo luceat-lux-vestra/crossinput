@@ -109,6 +109,20 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(collector.transitions.map(\.reason), [.remoteUnavailable, .remoteUnavailable])
     }
 
+    func testExternalControlTakeoverForcesSafeLocalReturn() {
+        let machine = makeRemoteActive(edge: .right)
+        let collector = TransitionCollector()
+        machine.onStateChange = { collector.append($0) }
+
+        machine.forceReturn(reason: .externalControlTakeover)
+        machine.flushCallbacks()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertEqual(
+            collector.transitions.map(\.reason),
+            [.externalControlTakeover, .externalControlTakeover])
+    }
+
     func testRemoteUnavailableWhileAlreadyLocalDoesNotInventSessionState() {
         let machine = EdgeSwitchStateMachine()
         machine.activate()

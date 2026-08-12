@@ -56,6 +56,7 @@ class PointerDispatcher(
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
 
+    @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
         val selected = when (mode) {
@@ -88,19 +89,24 @@ class PointerDispatcher(
         return true
     }
 
+    @Synchronized
     override fun refreshMetrics(displayId: Int) {
         inputManager.refreshMetrics(displayId)
     }
 
+    @Synchronized
     override fun moveRelative(dx: Int, dy: Int): PointerDelivery =
         deliver { it.moveRelative(dx, dy) }
 
+    @Synchronized
     override fun button(button: Int, down: Boolean): PointerDelivery =
         deliver { it.button(button, down) }
 
+    @Synchronized
     override fun scroll(horizontal: Float, vertical: Float): PointerDelivery =
         deliver { it.scroll(horizontal, vertical) }
 
+    @Synchronized
     override fun close() {
         active?.close()
         if (active !== uhid) uhid.close()

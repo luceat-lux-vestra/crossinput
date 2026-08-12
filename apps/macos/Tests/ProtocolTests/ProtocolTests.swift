@@ -220,7 +220,7 @@ struct ProtocolTests {
             }
             dir.deleteLastPathComponent()
         }
-        #expect(false, "protocol/fixtures not found from \(#filePath)")
+        #expect(Bool(false), "protocol/fixtures not found from \(#filePath)")
         return Data()
     }
 

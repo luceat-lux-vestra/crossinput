@@ -1,6 +1,6 @@
 # CrossInput Roadmap
 
-> Updated: 2026-08-11. This roadmap distinguishes accepted decisions,
+> Updated: 2026-08-13. This roadmap distinguishes accepted decisions,
 > implemented behavior, and evidence status. A green local build is not an
 > on-device completion record.
 
@@ -50,11 +50,20 @@ The architecture rebaseline is the current bounded work stream (issue #41):
 - Queued semantic input is tagged with a session generation so replacement
   connections cannot receive stale pointer or keyboard work; late pointer
   results cannot change handoff accounting.
+- A session is not published to input delivery until HELLO and capability
+  negotiation succeed; reconnect exhaustion fails closed and tears down the
+  candidate or live transport.
+- Initial target refresh waits for a confirmed `DISPLAY_CHANGED` response
+  before input capture is enabled.
+- External-control takeover returns locally without pointer warping, drains
+  queued key releases, and releases accepted held pointer buttons.
+- Android target selection, metric refresh, pointer injection, and shutdown
+  are serialized across helper threads.
 
-The implementation boundary is complete in PR #42 when local gates pass; the
-PR does not close #41 until the remaining screen-confirmed device matrix is
-attached. The real macOS event-tap/helper 100-cycle record is now attached,
-but target-screen visibility is still pending.
+The implementation boundary was re-audited in PR #42 after rebasing onto the
+current main branch. The PR does not close #41 until the remaining
+screen-confirmed device matrix is attached. The real macOS event-tap/helper
+100-cycle record is attached, but target-screen visibility is still pending.
 
 The rebaseline does not include a protocol migration, reverse input, a new
 transport, an installed APK, or a broad repository rewrite.

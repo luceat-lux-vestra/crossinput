@@ -31,7 +31,7 @@ final class TargetSelectionController {
     /// Refreshes the normalized target snapshot from the current session.
     /// The session identity is checked again after the asynchronous response so
     /// an old connection cannot publish a target list after replacement.
-    func refresh() async throws {
+    func refresh(autoSelectPreferred: Bool = true) async throws {
         let frame: CxiFrame
         if let listRequest {
             frame = try await listRequest()
@@ -43,6 +43,13 @@ final class TargetSelectionController {
         guard frame.type == .displayList else { throw RefreshError.rejected }
         let list = try Messages.decodeDisplayList(frame.payload)
         applySnapshot(RemoteTargetCatalog.normalize(list))
+        if autoSelectPreferred,
+           selectedTarget == nil,
+           let preferred = RemoteTargetCatalog.preferredTarget(
+            in: targets,
+            override: AppSettings.Settings.displayIdOverride) {
+            try await select(preferred)
+        }
     }
 
     func reset() {
@@ -54,7 +61,7 @@ final class TargetSelectionController {
         publish()
     }
 
-    func applySnapshot(_ newTargets: [RemoteTarget], autoSelect: Bool = true) {
+    func applySnapshot(_ newTargets: [RemoteTarget]) {
         targets = newTargets
         if let selected = selectedTarget {
             selectedTarget = newTargets.first(where: { $0.id == selected.id })
@@ -75,20 +82,16 @@ final class TargetSelectionController {
             state = .selecting(pendingTarget)
         } else if let selectedTarget {
             state = .selected(selectedTarget.id)
-        } else if autoSelect,
-                  let preferred = RemoteTargetCatalog.preferredTarget(
-                    in: newTargets,
-                    override: AppSettings.Settings.displayIdOverride) {
-            publish()
-            select(preferred)
-            return
         } else {
             state = newTargets.isEmpty ? .unavailable : .available
         }
         publish()
     }
 
-    func handleDisplayChanged(_ info: DisplayInfo) {
+    /// Applies one unsolicited display update. Returning a target requests an
+    /// asynchronous selection by the application layer; this method never
+    /// hides a network request behind a synchronous state mutation.
+    func handleDisplayChanged(_ info: DisplayInfo) -> RemoteTarget? {
         let target = RemoteTargetCatalog.normalize(info)
         if let index = targets.firstIndex(where: { $0.id == target.id }) {
             targets[index] = target
@@ -97,22 +100,27 @@ final class TargetSelectionController {
         }
         if selectedTarget == nil, target.kind == .external {
             publish()
-            select(target)
+            return target
         } else {
             publish()
+            return nil
         }
     }
 
-    func select(_ target: RemoteTarget) {
+    /// Confirms target selection with the helper before publishing selected
+    /// state. Callers can therefore wait for routing readiness before enabling
+    /// input capture or reporting a successful connection.
+    func select(_ target: RemoteTarget) async throws {
         guard targets.contains(where: { $0.id == target.id }) else {
             Diagnostics.log("selection ignored: target is no longer present")
-            return
+            throw SelectionError.targetUnavailable
         }
-        guard selectRequest != nil || session.current() != nil else {
+        let sessionSnapshot = session.snapshot()
+        guard selectRequest != nil || sessionSnapshot.connection != nil else {
             Diagnostics.log("selection failed: no active session")
             state = selectedTarget.map { .selected($0.id) } ?? (targets.isEmpty ? .unavailable : .available)
             publish()
-            return
+            throw ConnectionError.streamClosed
         }
 
         selectionToken &+= 1
@@ -120,38 +128,42 @@ final class TargetSelectionController {
         pendingTarget = target.id
         state = .selecting(target.id)
         publish()
-        let request = selectRequest
-        let sessionReference = session
-
-        Task { [weak self] in
-            do {
-                let frame: CxiFrame
-                if let request {
-                    frame = try await request(target.id)
-                } else {
-                    guard let connection = sessionReference.current() else { throw ConnectionError.streamClosed }
-                    frame = try await connection.request(
-                        .selectDisplay,
-                        payload: Messages.selectDisplay(displayId: target.id.rawValue))
+        do {
+            let frame: CxiFrame
+            if let selectRequest {
+                frame = try await selectRequest(target.id)
+            } else {
+                guard let connection = sessionSnapshot.connection else {
+                    throw ConnectionError.streamClosed
                 }
-                guard frame.type == .displayChanged else {
-                    throw SelectionError.rejected
+                frame = try await connection.request(
+                    .selectDisplay,
+                    payload: Messages.selectDisplay(displayId: target.id.rawValue))
+                guard session.snapshot().generation == sessionSnapshot.generation else {
+                    throw SelectionError.stale
                 }
-                let confirmed = RemoteTargetCatalog.normalize(
-                    try Messages.decodeDisplayChanged(frame.payload))
-                guard confirmed.id == target.id else {
-                    throw SelectionError.rejected
-                }
-                self?.completeSelection(token: token, target: confirmed)
-            } catch {
-                self?.failSelection(token: token, target: target.id, error: error)
             }
+            guard frame.type == .displayChanged else {
+                throw SelectionError.rejected
+            }
+            let confirmed = RemoteTargetCatalog.normalize(
+                try Messages.decodeDisplayChanged(frame.payload))
+            guard confirmed.id == target.id else {
+                throw SelectionError.rejected
+            }
+            guard completeSelection(token: token, target: confirmed) else {
+                throw SelectionError.stale
+            }
+        } catch {
+            failSelection(token: token, target: target.id, error: error)
+            throw error
         }
     }
 
-    private func completeSelection(token: UInt64, target: RemoteTarget) {
+    @discardableResult
+    private func completeSelection(token: UInt64, target: RemoteTarget) -> Bool {
         guard token == selectionToken, pendingTarget == target.id,
-              targets.contains(where: { $0.id == target.id }) else { return }
+              targets.contains(where: { $0.id == target.id }) else { return false }
         pendingTarget = nil
         if let index = targets.firstIndex(where: { $0.id == target.id }) {
             targets[index] = target
@@ -159,6 +171,7 @@ final class TargetSelectionController {
         selectedTarget = target
         state = .selected(target.id)
         publish()
+        return true
     }
 
     private func failSelection(token: UInt64, target: RemoteTargetID, error: Error) {
@@ -175,6 +188,8 @@ final class TargetSelectionController {
 
     private enum SelectionError: Error {
         case rejected
+        case stale
+        case targetUnavailable
     }
 
     private enum RefreshError: Error {

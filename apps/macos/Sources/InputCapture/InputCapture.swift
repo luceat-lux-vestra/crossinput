@@ -14,6 +14,9 @@ public enum SuppressionReleaseReason: String, Sendable {
     case emergencyHotkey
     case remoteUnavailable
     case captureStopped
+    /// An external controller took ownership of the macOS pointer. This path
+    /// must not restore the pointer by warping it to the configured edge.
+    case externalControl
 }
 
 /// A single pointer event captured from the system, ready to become a CXI message.
@@ -302,7 +305,7 @@ public final class InputCapture: @unchecked Sendable {
         if wasSuppressing {
             showCursor()
             flushStuckKeys()
-            if !SuppressionReleasePolicy.restoresPointer(for: reason) {
+            if reason == .externalControl {
                 // External control owns the pointer position. Do not warp it
                 // back to the edge or center; the triggering event is returned
                 // to macOS immediately after this synchronous cleanup.

@@ -1,6 +1,7 @@
 import Foundation
 import Protocol
 import InputCapture
+import Diagnostics
 
 enum PointerDeliveryResult: Sendable, Equatable {
     case deliveredMovement(dx: Int32, dy: Int32)
@@ -27,6 +28,11 @@ final class InputSender: @unchecked Sendable {
     private var pendingPointers: [PendingPointer] = []
     private var pointerWorkerScheduled = false
     private var pointerGeneration: UInt64 = 0
+    /// Pointer buttons accepted by the helper for one session generation.
+    /// Access is confined to pointerQueue so takeover cleanup can wait for an
+    /// in-flight delivery and release exactly the state that reached Android.
+    private var heldButtons: Set<UInt32> = []
+    private var heldButtonsSessionGeneration: UInt64?
 
     private struct PendingPointer {
         let event: PointerEvent
@@ -116,8 +122,43 @@ final class InputSender: @unchecked Sendable {
     /// Waits until capture events queued before this call have reached the
     /// helper. Used before transport teardown to preserve key/button cleanup.
     func waitForDrain() {
-        pointerQueue.sync {}
         keyboardQueue.sync {}
+        pointerQueue.sync {}
+    }
+
+    /// Schedules cleanup after key-up events already queued by InputCapture.
+    /// Local pointer recovery and the triggering external-control event never
+    /// wait for a remote request or transport write.
+    func resetCapturedInputState() {
+        cancelPendingPointerEvents()
+        keyboardQueue.async { [weak self] in
+            guard let self else { return }
+            pointerQueue.async { [weak self] in
+                self?.releaseHeldButtonsAfterExternalTakeover()
+            }
+        }
+    }
+
+    private func releaseHeldButtonsAfterExternalTakeover() {
+        let snapshot = session.snapshot()
+        let buttons = heldButtons.sorted()
+        let buttonGeneration = heldButtonsSessionGeneration
+        heldButtons.removeAll()
+        heldButtonsSessionGeneration = nil
+
+        guard buttonGeneration == snapshot.generation,
+              let connection = snapshot.connection,
+              !buttons.isEmpty else { return }
+
+        for button in buttons {
+            // Cleanup is best effort. Zero marks an uncorrelated response, so
+            // it cannot satisfy an unrelated in-flight request.
+            try? connection.send(CxiFrame(
+                type: .pointerButton,
+                requestId: 0,
+                payload: Messages.pointerButton(button: button, down: false)))
+        }
+        Diagnostics.log("external-control input state reset buttons=\(buttons.count)")
     }
 
     private func drainPointerQueue() {
@@ -173,6 +214,17 @@ final class InputSender: @unchecked Sendable {
             let result = try Messages.decodePointerResult(response.payload)
             switch result.status {
             case .delivered:
+                if case let .button(button, down) = event.kind {
+                    if heldButtonsSessionGeneration != item.sessionGeneration {
+                        heldButtons.removeAll()
+                        heldButtonsSessionGeneration = item.sessionGeneration
+                    }
+                    if down {
+                        heldButtons.insert(button)
+                    } else {
+                        heldButtons.remove(button)
+                    }
+                }
                 return isMovement
                     ? .deliveredMovement(dx: result.deliveredDx, dy: result.deliveredDy)
                     : .delivered

@@ -44,7 +44,7 @@ extension Ampersand {
 
 extension AppModel {
     var statusColor: Color {
-        if case .remote = controlState { return .blue }
+        if controlState == .remote { return .blue }
         if case .returning = controlState { return .yellow }
         switch sessionState {
         case .disconnected: return .gray
@@ -109,9 +109,12 @@ final class AppModel: ObservableObject {
         do {
             _ = try await sessionController.connect(serial: serial)
             try await targetController.refresh()
+            guard targetController.selectedTarget != nil else {
+                throw AppConnectionError.noAvailableTarget
+            }
             applyEdgeConfig()
             guard enable() else {
-                sessionController.markFailed("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
+                sessionController.fail("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
                 handoffController.remoteUnavailable()
                 return
             }
@@ -120,10 +123,7 @@ final class AppModel: ObservableObject {
             // A post-handshake failure (for example LIST_DISPLAYS or target
             // refresh rejection) must not leave a live helper behind while
             // the presentation state says the session failed.
-            if sessionController.isConnected {
-                sessionController.disconnect()
-            }
-            sessionController.markFailed(error.localizedDescription)
+            sessionController.fail(error.localizedDescription)
             handoffController.remoteUnavailable()
         }
     }
@@ -153,12 +153,22 @@ final class AppModel: ObservableObject {
     }
 
     func select(_ target: RemoteTarget) {
-        targetController.select(target)
+        Task { [weak self] in
+            do {
+                guard let self else { return }
+                try await self.targetController.select(target)
+            } catch {
+                Diagnostics.log("selection failed id=\(target.id.rawValue) reason=\(error.localizedDescription)")
+            }
+        }
     }
 
     private func handleDisplayChanged(_ info: DisplayInfo) {
-        targetController.handleDisplayChanged(info)
+        let suggested = targetController.handleDisplayChanged(info)
         applyEdgeConfig()
+        if let suggested {
+            select(suggested)
+        }
     }
 
     private func handleSessionUnavailable(_ reason: String) {
@@ -205,7 +215,7 @@ final class AppModel: ObservableObject {
             }
         case .fatalError:
             if let fatal = try? Messages.decodeFatalError(frame.payload) {
-                sessionController.markFailed("helper fatal \(fatal.code): \(fatal.message)")
+                sessionController.fail("helper fatal \(fatal.code): \(fatal.message)")
                 handoffController.remoteUnavailable()
             }
         case .displayChanged:
@@ -270,7 +280,7 @@ private struct AppMenu: View {
             Button("Refresh Displays") { model.refreshDisplays() }
         }
 
-        if case .remote = model.controlState {
+        if model.controlState == .remote {
             Divider()
             Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
         }
@@ -294,5 +304,13 @@ private struct AppMenu: View {
         case .reconnecting: return "Reconnecting…"
         case let .failed(message): return "Error: \(message)"
         }
+    }
+}
+
+private enum AppConnectionError: LocalizedError {
+    case noAvailableTarget
+
+    var errorDescription: String? {
+        "No available Android target was discovered"
     }
 }

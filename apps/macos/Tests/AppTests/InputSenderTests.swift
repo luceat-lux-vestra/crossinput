@@ -148,6 +148,50 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(newSession.sendCount, 0)
     }
 
+    func testExternalControlResetReleasesAcceptedPointerButtons() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let delivered = DispatchSemaphore(value: 0)
+        let result = ResultBox<PointerDeliveryResult>()
+
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) {
+            result.set($0)
+            delivered.signal()
+        }
+        XCTAssertEqual(delivered.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .delivered)
+
+        sender.resetCapturedInputState()
+        sender.waitForDrain()
+
+        XCTAssertEqual(session.pointerButtonEvents.map(\.0), [0])
+        XCTAssertEqual(session.pointerButtonEvents.map(\.1), [true])
+        XCTAssertEqual(session.sentPointerButtonEvents.map(\.0), [0])
+        XCTAssertEqual(session.sentPointerButtonEvents.map(\.1), [false])
+        XCTAssertEqual(session.sentFrames.last?.requestId, 0)
+    }
+
+    func testExternalControlResetQueuesCleanupWithoutBlockingLocalReturn() {
+        let session = FakeSession(sendDelay: 100_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        sender.enqueueKey(CapturedKeyEvent(keyCode: 29, metaState: 0,
+                                           action: 1, repeatCount: 0))
+        XCTAssertEqual(session.sendStarted.wait(timeout: .now() + 1), .success)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        sender.resetCapturedInputState()
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+        sender.waitForDrain()
+
+        XCTAssertLessThan(elapsed, 0.05)
+        XCTAssertEqual(session.sendCount, 1)
+    }
+
     private final class ResultBox<Value>: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Value?
@@ -168,6 +212,9 @@ final class InputSenderTests: XCTestCase {
         var onDisconnect: (@Sendable () -> Void)?
         private(set) var acceptedMovement: (Int32, Int32) = (0, 0)
         private(set) var requestTypes: [MessageType] = []
+        private(set) var pointerButtonEvents: [(UInt32, Bool)] = []
+        private(set) var sentPointerButtonEvents: [(UInt32, Bool)] = []
+        private(set) var sentFrames: [CxiFrame] = []
         private(set) var sendCount = 0
         let requestStarted = DispatchSemaphore(value: 0)
         let sendStarted = DispatchSemaphore(value: 0)
@@ -185,6 +232,12 @@ final class InputSenderTests: XCTestCase {
             lock.withLock {
                 requestCount += 1
                 requestTypes.append(type)
+                if type == .pointerButton, payload.count >= 5 {
+                    let button = payload.withUnsafeBytes { raw in
+                        UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
+                    }
+                    pointerButtonEvents.append((button, payload[4] != 0))
+                }
             }
             if delay > 0 {
                 if let timeout, Double(delay) / 1_000_000_000 > timeout {
@@ -212,7 +265,16 @@ final class InputSenderTests: XCTestCase {
 
         func send(_ frame: CxiFrame) throws {
             sendStarted.signal()
-            lock.withLock { sendCount += 1 }
+            lock.withLock {
+                sendCount += 1
+                sentFrames.append(frame)
+                if frame.type == .pointerButton, frame.payload.count >= 5 {
+                    let button = frame.payload.withUnsafeBytes { raw in
+                        UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
+                    }
+                    sentPointerButtonEvents.append((button, frame.payload[4] != 0))
+                }
+            }
             if sendDelay > 0 {
                 Thread.sleep(forTimeInterval: Double(sendDelay) / 1_000_000_000)
             }

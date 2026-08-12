@@ -21,10 +21,11 @@ final class TargetSelectionControllerTests: XCTestCase {
                                                      selectRequest: { _ in
             throw SelectionFailure.rejected
         })
-        controller.applySnapshot([phone], autoSelect: false)
-        controller.select(phone)
-
-        try await Task.sleep(nanoseconds: 20_000_000)
+        controller.applySnapshot([phone])
+        do {
+            try await controller.select(phone)
+            XCTFail("expected selection failure")
+        } catch {}
 
         XCTAssertNil(controller.selectedTarget)
         XCTAssertEqual(controller.state, .available)
@@ -37,11 +38,12 @@ final class TargetSelectionControllerTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
             throw SelectionFailure.rejected
         })
-        controller.applySnapshot([phone], autoSelect: false)
-        controller.select(phone)
-        controller.applySnapshot([], autoSelect: false)
+        controller.applySnapshot([phone])
+        let selection = Task { try await controller.select(phone) }
+        await Task.yield()
+        controller.applySnapshot([])
 
-        try await Task.sleep(nanoseconds: 150_000_000)
+        _ = try? await selection.value
         XCTAssertNil(controller.selectedTarget)
         XCTAssertEqual(controller.state, .unavailable)
     }
@@ -61,13 +63,14 @@ final class TargetSelectionControllerTests: XCTestCase {
             return CxiFrame(type: .displayChanged, requestId: 1,
                             payload: Self.displayPayload(for: id))
         })
-        controller.applySnapshot([phone, dex], autoSelect: false)
+        controller.applySnapshot([phone, dex])
 
-        controller.select(phone)
+        let first = Task { try await controller.select(phone) }
         try await Task.sleep(nanoseconds: 5_000_000)
-        controller.select(dex)
+        let second = Task { try await controller.select(dex) }
 
-        try await Task.sleep(nanoseconds: 150_000_000)
+        _ = try? await first.value
+        try await second.value
         XCTAssertEqual(controller.selectedTarget?.id, dex.id)
         XCTAssertEqual(controller.state, .selected(dex.id))
     }
@@ -80,14 +83,39 @@ final class TargetSelectionControllerTests: XCTestCase {
                      payload: Self.displayListPayload(for: targetID))
         })
 
-        try await controller.refresh()
+        try await controller.refresh(autoSelectPreferred: false)
 
         XCTAssertEqual(controller.targets.map(\.id), [dex.id])
         XCTAssertEqual(controller.targets.first?.kind, .phone)
         XCTAssertEqual(controller.state, .available)
     }
 
-    nonisolated private static func displayPayload(for id: RemoteTargetID) -> Data {
+    func testRefreshWaitsForPreferredSelectionConfirmation() async throws {
+        let reference = SessionReference()
+        let targetID = dex.id
+        let controller = TargetSelectionController(
+            session: reference,
+            listRequest: {
+                CxiFrame(type: .displayList, requestId: 7,
+                         payload: Self.displayListPayload(for: targetID, type: 7))
+            },
+            selectRequest: { id in
+                try await Task.sleep(nanoseconds: 100_000_000)
+                return CxiFrame(type: .displayChanged, requestId: 8,
+                                payload: Self.displayPayload(for: id, type: 7))
+            })
+
+        let refresh = Task { try await controller.refresh() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertNil(controller.selectedTarget)
+        XCTAssertEqual(controller.state, .selecting(targetID))
+
+        try await refresh.value
+        XCTAssertEqual(controller.selectedTarget?.id, targetID)
+        XCTAssertEqual(controller.state, .selected(targetID))
+    }
+
+    nonisolated private static func displayPayload(for id: RemoteTargetID, type: UInt8 = 1) -> Data {
         var payload = Data()
         func appendU32(_ value: UInt32) {
             var littleEndian = value.littleEndian
@@ -100,7 +128,7 @@ final class TargetSelectionControllerTests: XCTestCase {
         }
 
         appendU32(id.rawValue)
-        payload.append(1) // phone display type; normalization only needs the id here.
+        payload.append(type)
         appendU32(0)
         payload.append(1)
         appendU32(1080)
@@ -113,11 +141,11 @@ final class TargetSelectionControllerTests: XCTestCase {
         return payload
     }
 
-    nonisolated private static func displayListPayload(for id: RemoteTargetID) -> Data {
+    nonisolated private static func displayListPayload(for id: RemoteTargetID, type: UInt8 = 1) -> Data {
         var payload = Data()
         var count = UInt32(1).littleEndian
         payload.append(Data(bytes: &count, count: MemoryLayout<UInt32>.size))
-        payload.append(displayPayload(for: id))
+        payload.append(displayPayload(for: id, type: type))
         return payload
     }
 
