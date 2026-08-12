@@ -170,6 +170,8 @@ class CodecTest {
         val payload = Messages.helloAck(Cxi.VERSION)
         val bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(Cxi.VERSION, bb.short.toInt() and 0xFFFF)
+        assertEquals(Cxi.CAPABILITIES, bb.int)
+        assertEquals(0, Messages.helloAckCapabilities(byteArrayOf(1, 0)))
     }
 
     @Test
@@ -248,6 +250,15 @@ class CodecTest {
         assertEquals(7, bb.int)
         val len = bb.int
         assertEquals("bad", String(ByteArray(len) { bb.get() }, Charsets.UTF_8))
+    }
+
+    @Test
+    fun pointerResultBuildsAcceptedMovement() {
+        val payload = Messages.pointerResult(0, 12, -8)
+        val bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0, bb.get().toInt())
+        assertEquals(12, bb.int)
+        assertEquals(-8, bb.int)
     }
 
     @Test

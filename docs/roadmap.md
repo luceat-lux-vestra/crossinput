@@ -1,83 +1,108 @@
-# Ampersand Roadmap
+# CrossInput Roadmap
 
-> Updated: 2026-08-10 (v0.1.0 released; keyboard backends verified on device)
-> Original plan: `DEXCURSOR_IMPLEMENTATION_PLAN.md` (1221 lines, kept in local Downloads — historical document)
+> Updated: 2026-08-13. This roadmap distinguishes accepted decisions,
+> implemented behavior, and evidence status. A green local build is not an
+> on-device completion record.
 
-## Phase overview
+## Product baseline
 
-| Phase | Content | Completion criteria | Status |
-|---|---|---|---|
-| 0 | UHID input verification (DeX external display delivery) | On-device click/move/cursor display confirmed | ✅ done (category A) |
-| 0.5 | Execution method decided (ADR-0006) | v1 = adb push + run confirmed; installed app deferred to v2 | ✅ done |
-| 1 | Repository bootstrap | bootstrap.sh / build-android-helper.sh / swift build + tests / CI green | ✅ done (macOS packaging via `scripts/package-macos.sh` deferred to Phase 8) |
-| 2 | Android helper minimal implementation | display discovery + UHID + CXI protocol | ✅ done |
-| — | InputManager pointer fallback (SdkPointerBackend) | implemented; UHID pointer path verified on-device, pointer fallback on-device verification tracked separately | 🔶 implemented; on-device verification pending (not yet exercised on device) |
-| 3 | DeX input routing | UHID input delivered to the DeX external display (leverages Phase 0 findings) | ✅ done (on-device, UHID pointer path) |
-| 4 | CGEventTap prototype | input capture verified against the real Android sink | ✅ done |
-| 5 | Edge switching | macOS↔DeX switching | 🔶 implemented; 100-repeat stability open (see below) |
-| 6 | Menu bar app + onboarding | settings/status UI + wireless debugging pairing guide | ✅ done |
-| 7 | Recovery & performance | sleep/wake, permission revocation, error recovery | 🔶 auto-reconnect done; sleep/wake edge cases open |
-| 8 | Distribution | **v0.1.0 shipped**: `Ampersand-0.1.0.dmg` on GitHub Releases, ad-hoc signed (ADR-0008). Open: Homebrew tap (ADR-0005), adb bundling (ADR-0004), notarization when a Developer ID exists | ✅ v0.1.0 shipped 🔶 |
-| 9 | Keyboard extension (mac→Android) | keyboard delivery + system-shortcut handling + Korean 2-set, per ADR-0007 | ✅ UHID and InputManager paths verified on-device; test-only override + unit tests done |
+CrossInput is a macOS-to-Android input bridge. The current path is:
 
-## Phase 9: Keyboard extension — complete
+```text
+macOS host → ADB/app_process → Android helper → selected display target
+```
 
-Completion criteria split (per ADR-0007):
+UHID remains available for system-routed pointer use. The normal selected-target
+pointer path uses InputManager explicit-display routing because a UHID report
+cannot name an Android display.
+Samsung DeX is a supported target, not the product definition.
 
-- **protocol/KEY_EVENT delivery** — done (PR #23)
-- **UHID keyboard backend** — done, verified on device (key-state reporting; infinite repeat fixed — PR #24, #26)
-- **macOS system-shortcut suppression while captured** — done, verified on device (PR #25)
-- **Korean 2-set composition via Android IME** — done, verified on device
-- **InputManager virtual-injection fallback** — implemented, unit/build validated, and verified on device (SM-G977N / Android 12; issue #33)
-- **Test-only deterministic backend override** — `--keyboard-backend=uhid|input-manager|auto` implemented; enables forced backend selection for testing; production default remains AUTO
-- **Automated backend-selection tests** — `KeyboardBackendTest.kt` / `KeyboardBackendModeTest.kt` cover AUTO, forced UHID, forced InputManager, failure paths, and override parsing
+## Completed
 
-## Phase 0: UHID input verification — done
+- Repository bootstrap, CI, Swift macOS app, Kotlin helper, and CXI v1.
+- CGEventTap pointer and keyboard capture with screen-edge handoff.
+- ADB wireless transport and app_process helper startup.
+- Android display discovery without a hardcoded display ID.
+- Historical UHID pointer and keyboard paths were verified on SM-G977N / Android 12;
+  the post-rebaseline semantic pointer path requires fresh evidence.
+- InputManager keyboard fallback verified on SM-G977N / Android 12; evidence is
+  recorded under `docs/research/inputmanager-keyboard-fallback-2026-08-10.md`.
+- macOS shortcut suppression, modifier cleanup, reconnect handling, stale
+  callback protection, and emergency release unit coverage.
+- v0.1.0 DMG packaging and release documentation.
 
-**Result: category A — UHID relative mouse fully controls the DeX external display.** (SM-G977N, Android 12)
+## Current stabilization
 
-- Mouse movement: 1:1 mapping + pointer acceleration (same as a real mouse)
-- Click: delivered to the DeX (display 2) window, focus change confirmed
-- Cursor display: arrow shown while moving, fades after ~3.5s idle (Samsung default UX)
-- Input path: app_process (shell uid) UHID — no root required
+The architecture rebaseline is the current bounded work stream (issue #41):
 
-## Issue breakdown
+- Product definition and non-goals.
+- Session/control/target lifecycle boundary.
+- Remote target terminology and target-selection policy.
+- ADB transport versus CXI remote-session responsibility.
+- Android pointer/keyboard injection backend boundary.
+- CXI v1 leakage record and v2 design-only document.
+- Behavior-preserving regression coverage and real-device evidence.
+- HELLO capability negotiation rejects helpers that cannot return
+  `POINTER_RESULT` or guarantee explicit selected-target routing.
+- Pointer delivery uses a bounded, coalescing movement queue; button, scroll,
+  keyboard, and safety events are not allowed to wait behind an unbounded move
+  backlog.
+- Queued semantic input is tagged with a session generation so replacement
+  connections cannot receive stale pointer or keyboard work; late pointer
+  results cannot change handoff accounting.
+- A session is not published to input delivery until HELLO and capability
+  negotiation succeed; reconnect exhaustion fails closed and tears down the
+  candidate or live transport.
+- Initial target refresh waits for a confirmed `DISPLAY_CHANGED` response
+  before input capture is enabled.
+- External-control takeover returns locally without pointer warping, drains
+  queued key releases, and releases accepted held pointer buttons.
+- Android target selection, metric refresh, pointer injection, and shutdown
+  are serialized across helper threads.
+- The macOS menu preserves its per-host-display handoff-edge picker separately
+  from the normalized Android remote-target list.
 
-- Epic A (Feasibility): A-01~A-07 — Phase 0 done
-- Epic B (Android helper): B-01~B-07
-- Epic C (macOS input): C-01~C-07
-- Epic D (edge switching): D-01~D-07
-- Epic E (productization): E-01~E-07
-- Epic F (extension — dex→mac): F-01~F-07 (see ADR-0003: accessibility touch + custom IME keyboard, after v1)
+The implementation boundary was re-audited in PR #42 after rebasing onto the
+current main branch. The PR does not close #41 until the remaining
+screen-confirmed device matrix is attached. The real macOS event-tap/helper
+100-cycle record is attached, but target-screen visibility is still pending.
 
-## Extension scope (after v1, ADR-0003)
-> mac→Android keyboard completed in Phase 9 (ADR-0007) — see above.
+The rebaseline does not include a protocol migration, reverse input, a new
+transport, an installed APK, or a broad repository rewrite.
 
-- ~~mac→Android keyboard: UHID keyboard delivery; macOS system-shortcut handling (Cmd+Tab etc.) was the open item~~ → **Phase 9, ADR-0007 — both keyboard paths done on device**: keyboard message type + UHID keyboard backend on Android, InputManager virtual-injection fallback, system-shortcut suppression in the macOS capture tap, Korean 2-set via Android IME. On-device verification is recorded in issue #33.
-- dex→mac touch: AccessibilityService capture + CGEventPost injection
-- dex→mac keyboard: custom IME app (our keyboard must be the active IME), Korean via text transport
-- iPad: out of scope (no CGEventTap-equivalent API on iPadOS)
+## Near term
 
-## Open future work items
+- Display hot-plug and display ON/OFF reliability across the full matrix in
+  issue #17.
+- Reconnect robustness after wireless debugging drop and sleep/wake.
+- Stale target selection and stale callback protection during refresh/reconnect.
+- Diagnostics that expose lifecycle metadata without input payloads.
+- Packaging/distribution follow-up: bundled ADB, Homebrew path, and notarization
+  when their ADR gates are satisfied.
+- Screen-confirmed edge-switch stability and remaining regression matrix.
+- Matching-helper packaging/deployment for the shipped Mac application; the
+  current runtime rejects an incompatible pre-existing helper instead.
 
-- **Display list auto-refresh (unreliable, issue #17)** — the macOS app refreshes the display list only via the manual "Refresh Displays" menu action (LIST_DISPLAYS re-issue). A DISPLAY_CHANGED handler exists but auto-sync is NOT declared reliable and must be fixed in a future work item. The reporter cannot enumerate all failure cases, so **all of the following cases must be verified during that work** (do not assume a single root cause):
-  - DeX display hot-plug while the app runs (connect/disconnect HDMI)
-  - DeX display state toggling ON/OFF without removal (helper reports stale OFF states)
-  - Multiple display IDs (0 = phone built-in / DeX desktop / HDMI) with per-display edge config
-  - Wireless-debugging drop (Samsung disables on Wi-Fi drop/sleep) + auto-reconnect — reconnected session must re-fetch the list and restore selection
-  - Stale ConnectionManager callbacks racing a fresh connect
-  - List when DeX is off (only built-in display 0 present) — decide desired behavior (show nothing vs. still show phone screen)
-  - "Refresh Displays" while app is disconnected — currently logged as ignored; confirm expected UX
+## Future
 
-## Progress log
+- CXI v2 migration planning and compatibility strategy.
+- Alternate handoff mechanisms.
+- Alternate transports.
+- Bidirectional-input feasibility study.
+- Other host and target platforms.
 
-- 2026-08-05: **v0.1.0 released** — `Ampersand-0.1.0.dmg` on GitHub Releases (PR #28): ad-hoc signed + DMG packaging (ADR-0008), `release.yml` CI publishing on v* tags, README install docs, CHANGELOG.
-- 2026-08-05: keyboard extension primary path complete (ADR-0007, Phase 9) — UHID keyboard (PR #23–#26), macOS system-shortcut suppression, Korean 2-set; infinite key-repeat fixed on the UHID path (key-state reporting); verified on device (SM-G977N). InputManager virtual-injection fallback implemented but not yet exercised on a physical device (issue #33)
-- 2026-08-10: InputManager virtual-injection keyboard fallback verified on SM-G977N / Android 12 (PR #40): forced backend selection, single key delivery, modifier delivery, no repeat after release, metadata-only logging, held-key synthetic release during SHUTDOWN, and graceful process-exit detection passed; failure-path safety remains covered by unit tests.
-- 2026-08-04: display handling work committed (commit 65c4766): DISPLAY_CHANGED live update, manual Refresh Displays, stale-list clearing on connect/disconnect, wireless auto-reconnect; per-display list refresh remains manual for now, auto-update tracked as issue #17
-- 2026-08-03: environment check complete (SM-G977N, Android 12, wireless ADB connected, DeX active — display 0 phone / 2 Desktop / 6 HDMI)
-- 2026-08-03: leap-scrcpy server APK built (`app-debug.apk` 5.8MB), client built (`pnpm build`)
-- 2026-08-03: UHID mouse on-device verification complete — move/click/cursor display (category A)
-- 2026-08-03: product name Ampersand / tagline CrossInput / repo crossinput (ADR-0002), scope (ADR-0003), adb bundling (ADR-0004), distribution (ADR-0005), execution method decided (ADR-0006: v1 = adb push + run, installed app deferred to v2)
-- 2026-08-03: repository bootstrap complete — CI green (macOS swift build+test / Android gradle build / protocol fixture checks), repo `crossinput` created on GitHub (private)
-- 2026-08-03: verification results recorded in issue #2; docs/ migrated to English
+These items are not current commitments. Each requires an explicit scope and
+verification record before implementation.
+
+## Accepted but not implemented
+
+Existing ADRs may contain accepted future decisions. Their status remains
+historical and is not silently rewritten by this roadmap. In particular:
+
+- ADR-0004's bundled-ADB release path remains pending.
+- ADR-0005's Homebrew tap remains pending.
+- ADR-0006's installed-app UHID experiment remains deferred.
+- ADR-0003's reverse-input path remains outside current scope.
+
+See [architecture](architecture.md), [product definition](product.md), and the
+[ADR index](adr/).

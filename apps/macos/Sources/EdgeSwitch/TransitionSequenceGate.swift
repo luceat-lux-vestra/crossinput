@@ -6,8 +6,8 @@ import Foundation
 /// blocks, whose execution order is not guaranteed. `TransitionSequenceGate`
 /// is the final safety net required by the concurrency contract: a stale
 /// transition (lower or equal sequence than the last applied one) is
-/// discarded, so an old `.dexActive` callback arriving after a newer
-/// `.error` or `.recovering` transition can never re-suppress the capture.
+/// discarded, so an old `.remoteActive` callback arriving after a newer
+/// fail-safe return can never re-suppress the capture.
 public struct TransitionSequenceGate: Sendable {
     private(set) public var lastAppliedSequence: UInt64 = 0
 
