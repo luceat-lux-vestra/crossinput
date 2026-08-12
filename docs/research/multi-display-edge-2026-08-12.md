@@ -175,5 +175,37 @@ suppression generation, and release reason.
 
 This does not claim to fix the Android/DeX pointer sprite or its idle behavior;
 those remain issue #46. Physical cursor visibility after the latest binary's
-emergency and normal returns must be recorded separately; unobserved behavior
-remains NOT VERIFIED.
+emergency and normal returns is recorded below; unobserved behavior remains
+NOT VERIFIED.
+
+## Latest-head physical verification attempt
+
+Date: 2026-08-13
+Runtime code verified: `1fafc4c048b32a1fc42f127e4076b6c2ba3a036d`
+Packaged binary: release `Ampersand.app`, ad-hoc signature verified
+Device preflight: SM-G977N, Android 12 / API 31
+
+The latest release app bundle was launched with
+`CROSSINPUT_DIAG_CURSOR_VISIBILITY=1`. ADB confirmed the dynamically selected
+Desktop virtual display and its current runtime state, but the physical HDMI
+Screen was OFF. `adb exec-out screencap -d 2 -p` produced an empty capture, so
+there was no target-screen evidence for cursor visibility or pointer routing.
+
+Results for this latest-head attempt:
+
+- PASS — latest-head release build, package, and code-sign verification;
+- PASS — ADB connection and dynamic display discovery preflight;
+- NOT VERIFIED — non-primary Built-in Retina left-edge handoff;
+- NOT VERIFIED — normal return, emergency return, and watchdog/fail-safe return;
+- NOT VERIFIED — cursor visible after each return;
+- NOT VERIFIED — top and bottom physical smoke;
+- NOT VERIFIED — non-target display edge accidental-handoff behavior.
+
+The earlier pre-fix physical observation remains evidence for the original
+coordinate-space regression only. It is not evidence that this latest cursor
+visibility change passed on a real screen. If the cursor remains invisible in a
+future run with an active target screen, capture the hide/show `CGError`
+results, suppression generation, local visibility transitions, return reason,
+and actual screen observation; do not add extra display-ID calls. Application
+activation and focus remain separate root-cause candidates if the balanced
+latest calls still do not restore visibility.
