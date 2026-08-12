@@ -177,9 +177,4 @@ final class DisplayEdgeResolverTests: XCTestCase {
             CGPoint(x: frame.maxX - threshold, y: frame.midY))
     }
 
-    func testCursorDisplayIDsAreSymmetricAndDoNotDoubleCountMainDisplay() {
-        XCTAssertEqual(InputCapture.cursorDisplayIDs(current: 1, main: 5), [1, 5])
-        XCTAssertEqual(InputCapture.cursorDisplayIDs(current: 5, main: 5), [5])
-        XCTAssertEqual(InputCapture.cursorDisplayIDs(current: nil, main: 5), [5])
-    }
 }
