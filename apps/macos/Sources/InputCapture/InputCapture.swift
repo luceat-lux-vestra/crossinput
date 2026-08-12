@@ -517,15 +517,11 @@ public final class InputCapture: @unchecked Sendable {
     private func holdPointerAtEdge() {
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
-        let f = display.frame
-        let p = currentPosition
-        let hold: CGPoint
-        switch edge {
-        case .left:   hold = CGPoint(x: f.minX + edgeThreshold, y: p.y)
-        case .right:  hold = CGPoint(x: f.maxX - edgeThreshold, y: p.y)
-        case .top:    hold = CGPoint(x: p.x, y: f.maxY - edgeThreshold)
-        case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
-        }
+        let hold = DisplayEdgeResolver.pointerPosition(
+            for: edge,
+            in: display.frame,
+            at: currentPosition,
+            threshold: edgeThreshold)
         CGWarpMouseCursorPosition(hold)
     }
 
@@ -539,15 +535,11 @@ public final class InputCapture: @unchecked Sendable {
             CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
             return
         }
-        let f = display.frame
-        let p = currentPosition
-        let hold: CGPoint
-        switch edge {
-        case .left:   hold = CGPoint(x: f.minX + edgeThreshold, y: p.y)
-        case .right:  hold = CGPoint(x: f.maxX - edgeThreshold, y: p.y)
-        case .top:    hold = CGPoint(x: p.x, y: f.maxY - edgeThreshold)
-        case .bottom: hold = CGPoint(x: p.x, y: f.minY + edgeThreshold)
-        }
+        let hold = DisplayEdgeResolver.pointerPosition(
+            for: edge,
+            in: display.frame,
+            at: currentPosition,
+            threshold: edgeThreshold)
         CGWarpMouseCursorPosition(hold)
         postSyntheticMove(at: hold)
         // Don't re-trigger the edge switch from the pointer sitting on the edge.

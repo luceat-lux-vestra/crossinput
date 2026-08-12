@@ -16,11 +16,12 @@ from a different display.
 
 The original fix still resolved `CGEvent.location` against `NSScreen.frame`.
 Those values use different global coordinate systems: Quartz event locations
-and `CGDisplayBounds` place displays below the primary at increasing positive
-Y, while AppKit represents displays below the primary with negative Y. The
-original implementation therefore worked by coincidence on the primary
-display but could not resolve the configured Built-in Retina display in the
-five-display physical layout.
+and `CGDisplayBounds` use a global display coordinate space whose origin is the
+upper-left of the main display. AppKit `NSScreen.frame` uses a different global
+coordinate convention, so mixing the two can misidentify a display or invert
+vertical edge meaning. The original implementation therefore worked by
+coincidence on the primary display but could not resolve the configured
+Built-in Retina display in the five-display physical layout.
 
 The 2026-08-12 physical record below is superseded for the configured-edge
 success claim by the direct 2026-08-13 reproduction. The non-target stale-state
@@ -42,14 +43,29 @@ space.
 - Resolve `CGEvent.location` with `CGGetDisplaysWithPoint` and use
   `CGDisplayBounds` for edge detection, suppression holding, and return warps.
 
+The Quartz convention is authoritative for this path:
+
+```text
+CGEvent.location / CGGetDisplaysWithPoint / CGDisplayBounds:
+origin = upper-left of main display
+top = minY
+bottom = maxY
+left = minX
+right = maxX
+```
+
+`NSScreen.frame` must not be mixed into this event and warp geometry. It may
+still be used by the host-display menu for presentation, but not for pointer
+edge resolution or pointer holding/restoration.
+
 ## Automated verification
 
 The macOS suite passed on this branch:
 
 ```text
 swift test --quiet
-101 XCTest cases passed
-28 Swift Testing cases passed
+78 XCTest cases passed
+30 Swift Testing cases passed
 ```
 
 The deterministic regression fixture covers:
@@ -59,6 +75,9 @@ The deterministic regression fixture covers:
 - transition from a configured display to a non-target display;
 - transition back to a configured display; and
 - single-display edge behavior.
+- Quartz top/bottom semantics on a primary-like frame and the non-primary
+  Built-in Retina geometry;
+- shared pure pointer hold/restore coordinates for all four edges.
 
 Repository-wide validation is recorded below as it is run.
 
@@ -67,7 +86,7 @@ Additional repository gates passed:
 ```text
 swift build: PASS
 ./scripts/build-android-helper.sh test: PASS
-node protocol/scripts/check-fixtures.mjs: PASS (14 fixtures)
+node protocol/scripts/check-fixtures.mjs: PASS (15 fixtures)
 find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n: PASS
 Android metadata-only logging guard: PASS
 git diff --check: PASS
@@ -129,3 +148,8 @@ cursor hide/show, and `boundaryCrossed` return transitions.
 The Android pointer sprite was not visible during this successful routing
 test. That observation remains tracked by issue #46 and is not claimed as
 fixed by this coordinate-space correction.
+
+The 2026-08-13 physical smoke test covered the configured Built-in Retina
+left edge and Android-to-macOS return. Top/bottom physical edge smoke tests
+were not performed in that run; they remain an automated geometry regression,
+not a physical PASS claim.
