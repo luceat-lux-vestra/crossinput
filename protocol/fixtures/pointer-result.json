@@ -1,0 +1,7 @@
+{
+  "type": "POINTER_RESULT",
+  "requestId": 10,
+  "status": "DELIVERED",
+  "deliveredDx": 12,
+  "deliveredDy": -8
+}

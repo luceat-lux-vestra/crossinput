@@ -30,4 +30,5 @@ object Protocol {
     const val TYPE_PONG: Int = 0x8006
     const val TYPE_LOG_EVENT: Int = 0x8007
     const val TYPE_FATAL_ERROR: Int = 0x8008
+    const val TYPE_POINTER_RESULT: Int = 0x8009
 }

@@ -6,6 +6,19 @@ import Carbon.HIToolbox
 import EdgeSwitch
 import Diagnostics
 
+/// Why input suppression ended. These are control-safety causes; session and
+/// transport layers translate their failures to `remoteUnavailable`.
+public enum SuppressionReleaseReason: String, Sendable {
+    case normalReturn
+    case watchdogTimeout
+    case emergencyHotkey
+    case remoteUnavailable
+    case captureStopped
+    /// An external controller took ownership of the macOS pointer. This path
+    /// must not restore the pointer by warping it to the configured edge.
+    case externalControl
+}
+
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
     public enum Kind: Sendable, Equatable {
@@ -130,7 +143,9 @@ public final class InputCapture: @unchecked Sendable {
         case suppressed  // consume pointer events and forward them to the device
     }
 
-    public private(set) var mode: Mode = .listening
+    public var mode: Mode {
+        stateLock.withLock { isSuppressing ? .suppressed : .listening }
+    }
 
     /// Called on the capture thread for every pointer event while suppressed.
     public var onPointerEvent: (@Sendable (PointerEvent) -> Void)?
@@ -290,7 +305,7 @@ public final class InputCapture: @unchecked Sendable {
         if wasSuppressing {
             showCursor()
             flushStuckKeys()
-            if !SuppressionReleasePolicy.restoresPointer(for: reason) {
+            if reason == .externalControl {
                 // External control owns the pointer position. Do not warp it
                 // back to the edge or center; the triggering event is returned
                 // to macOS immediately after this synchronous cleanup.

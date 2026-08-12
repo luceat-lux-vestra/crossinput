@@ -111,6 +111,13 @@ struct ProtocolTests {
     @Test func helloAckDecodesFromFixture() throws {
         let payload = payloadOf(fixture("hello-ack.bin"))
         #expect(try Messages.decodeHelloAck(payload) == 1)
+        #expect(try Messages.decodeHelloAckInfo(payload).capabilities == .currentPointerPath)
+    }
+
+    @Test func legacyHelloAckHasNoCapabilities() throws {
+        let info = try Messages.decodeHelloAckInfo(Data([1, 0]))
+        #expect(info.version == 1)
+        #expect(info.capabilities.isEmpty)
     }
 
     @Test func displayListDecodesFromFixture() throws {
@@ -128,6 +135,14 @@ struct ProtocolTests {
     @Test func pongDecodesFromFixture() throws {
         let payload = payloadOf(fixture("pong.bin"))
         #expect(payload.isEmpty)
+    }
+
+    @Test func pointerResultDecodesAcceptedMovementFromFixture() throws {
+        let payload = payloadOf(fixture("pointer-result.bin"))
+        let result = try Messages.decodePointerResult(payload)
+        #expect(result.status == .delivered)
+        #expect(result.deliveredDx == 12)
+        #expect(result.deliveredDy == -8)
     }
 
     // MARK: - FrameParser robustness
@@ -205,7 +220,7 @@ struct ProtocolTests {
             }
             dir.deleteLastPathComponent()
         }
-        #expect(false, "protocol/fixtures not found from \(#filePath)")
+        #expect(Bool(false), "protocol/fixtures not found from \(#filePath)")
         return Data()
     }
 

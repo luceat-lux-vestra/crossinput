@@ -8,6 +8,24 @@ public enum Protocol {
     public static let headerLength: Int = 15 // magic(3) + version(2) + type(2) + requestId(4) + payloadLen(4)
 }
 
+/// Feature capabilities advertised by the v1 HELLO_ACK payload. The wire
+/// version remains v1; capabilities distinguish additive runtime features
+/// from the base framing compatibility.
+public struct HelperCapabilities: OptionSet, Sendable, Equatable {
+    public let rawValue: UInt32
+
+    public init(rawValue: UInt32) {
+        self.rawValue = rawValue
+    }
+
+    public static let semanticPointerResult = Self(rawValue: 1 << 0)
+    public static let explicitPointerRouting = Self(rawValue: 1 << 1)
+    public static let currentPointerPath: Self = [
+        .semanticPointerResult,
+        .explicitPointerRouting,
+    ]
+}
+
 public enum MessageType: UInt16, Sendable {
     // Mac -> Android
     case hello = 0x0001
@@ -31,6 +49,7 @@ public enum MessageType: UInt16, Sendable {
     case pong = 0x8006
     case logEvent = 0x8007
     case fatalError = 0x8008
+    case pointerResult = 0x8009
 
     public var isRequest: Bool { rawValue < 0x8000 }
 }
@@ -212,18 +231,34 @@ public struct DisplayInfo: Sendable, Equatable {
         self.layerStack = layerStack
     }
 
-    public var isDesktop: Bool { (flags & 0x40) != 0 } // Display.FLAG_DESKTOP
+    /// Samsung Android 12 exposes the DeX virtual display with a raw virtual
+    /// type and a build-specific flag combination. Keep the compatibility
+    /// heuristics here; application code consumes RemoteTarget instead.
+    public var isDesktop: Bool {
+        (flags & 0x40) != 0 || type == 7 ||
+            name.caseInsensitiveCompare("Desktop") == .orderedSame ||
+            uniqueId.range(of: ",Desktop,", options: .caseInsensitive) != nil
+    }
 }
 
 public enum DecodeError: Error, Equatable, Sendable {
     case truncated(String)
     case invalidString
     case invalidDisplay
+    case invalidPointerDelivery
+}
+
+public enum PointerDeliveryStatus: UInt8, Sendable, Equatable {
+    case delivered = 0
+    case failed = 1
+    case partiallyDelivered = 2
 }
 
 struct Decoder {
     var data: Data
     var offset = 0
+
+    var remaining: Int { data.count - offset }
 
     init(_ data: Data) { self.data = data }
 
@@ -245,6 +280,12 @@ struct Decoder {
         offset += 4
         return v
     }
+    mutating func i32() throws -> Int32 {
+        guard offset + 4 <= data.count else { throw DecodeError.truncated("i32") }
+        let v = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
+        offset += 4
+        return v
+    }
     mutating func lengthPrefixedString() throws -> String {
         let length = Int(try u32())
         guard offset + length <= data.count else { throw DecodeError.truncated("string") }
@@ -257,9 +298,15 @@ struct Decoder {
 }
 
 public extension Messages {
-    static func decodeHelloAck(_ payload: Data) throws -> UInt16 {
+    static func decodeHelloAckInfo(_ payload: Data) throws -> (version: UInt16, capabilities: HelperCapabilities) {
         var d = Decoder(payload)
-        return try d.u16()
+        let version = try d.u16()
+        let capabilities = d.remaining >= 4 ? HelperCapabilities(rawValue: try d.u32()) : []
+        return (version, capabilities)
+    }
+
+    static func decodeHelloAck(_ payload: Data) throws -> UInt16 {
+        try decodeHelloAckInfo(payload).version
     }
 
     static func decodeKeyEvent(_ payload: Data) throws -> (keyCode: UInt16, metaState: UInt32, action: UInt8, repeatCount: UInt8) {
@@ -292,6 +339,21 @@ public extension Messages {
 
     static func decodeDisplayChanged(_ payload: Data) throws -> DisplayInfo {
         return try decodeDisplay(payload)
+    }
+
+    static func pointerResult(status: PointerDeliveryStatus,
+                                     deliveredDx: Int32 = 0,
+                                     deliveredDy: Int32 = 0) -> Data {
+        Data([status.rawValue]) + LE.i32(deliveredDx) + LE.i32(deliveredDy)
+    }
+
+    static func decodePointerResult(_ payload: Data) throws -> (status: PointerDeliveryStatus, deliveredDx: Int32, deliveredDy: Int32) {
+        var d = Decoder(payload)
+        let rawStatus = try d.u8()
+        guard let status = PointerDeliveryStatus(rawValue: rawStatus) else {
+            throw DecodeError.invalidPointerDelivery
+        }
+        return (status, try d.i32(), try d.i32())
     }
 
     static func decodeDisplayList(_ payload: Data) throws -> [DisplayInfo] {

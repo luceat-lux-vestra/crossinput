@@ -16,6 +16,12 @@ object Cxi {
     const val VERSION = 1
     val MAGIC = byteArrayOf(0x43, 0x58, 0x49) // "CXI"
     const val MAX_PAYLOAD = 1 shl 20 // 1 MiB safety cap
+
+    // HELLO_ACK feature bits. These are additive to CXI v1 framing.
+    const val CAPABILITY_SEMANTIC_POINTER_RESULT = 1 shl 0
+    const val CAPABILITY_EXPLICIT_POINTER_ROUTING = 1 shl 1
+    const val CAPABILITIES = CAPABILITY_SEMANTIC_POINTER_RESULT or
+        CAPABILITY_EXPLICIT_POINTER_ROUTING
 }
 
 class ProtocolException(message: String) : Exception(message)
