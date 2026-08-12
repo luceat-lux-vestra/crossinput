@@ -64,7 +64,7 @@ The macOS suite passed on this branch:
 
 ```text
 swift test --quiet
-78 XCTest cases passed
+79 XCTest cases passed
 30 Swift Testing cases passed
 ```
 
@@ -153,3 +153,17 @@ The 2026-08-13 physical smoke test covered the configured Built-in Retina
 left edge and Android-to-macOS return. Top/bottom physical edge smoke tests
 were not performed in that run; they remain an automated geometry regression,
 not a physical PASS claim.
+
+## Cursor visibility follow-up
+
+The same physical run exposed a separate macOS cursor fail-safe defect: the
+diagnostic line `cursor shown (balanced)` did not guarantee that the cursor was
+visible after emergency return when handoff began on a non-primary display.
+The rebaseline had reduced the public CoreGraphics calls to
+`CGMainDisplayID()` only, although cursor hide/show is display-scoped. The
+follow-up keeps the current resolved display and the main display symmetric,
+with a unique display list when they are the same. This does not claim to fix
+the Android/DeX pointer sprite or its idle behavior; those remain issue #46.
+The cursor-display fix was covered by deterministic tests and a release build,
+but its post-emergency-return visibility was not re-verified physically after
+the latest code change because the app was intentionally left stopped.

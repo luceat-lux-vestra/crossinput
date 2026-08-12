@@ -561,15 +561,35 @@ public final class InputCapture: @unchecked Sendable {
     private func hideCursor() {
         guard !isCursorHidden else { return }
         isCursorHidden = true
-        CGDisplayHideCursor(CGMainDisplayID())
+        for displayID in Self.cursorDisplayIDs(
+            current: currentDisplayID,
+            main: CGMainDisplayID()) {
+            CGDisplayHideCursor(displayID)
+        }
         Diagnostics.log("cursor hidden (balanced)")
     }
 
     private func showCursor() {
         guard isCursorHidden else { return }
         isCursorHidden = false
-        CGDisplayShowCursor(CGMainDisplayID())
+        for displayID in Self.cursorDisplayIDs(
+            current: currentDisplayID,
+            main: CGMainDisplayID()) {
+            CGDisplayShowCursor(displayID)
+        }
         Diagnostics.log("cursor shown (balanced)")
+    }
+
+    /// Cursor hide/show is display-scoped on macOS. The handoff can begin on
+    /// a non-primary display, while the fallback remains the main display if
+    /// no current event display has been resolved yet. Keep the two calls
+    /// symmetric and avoid double-counting when they are the same display.
+    static func cursorDisplayIDs(
+        current: CGDirectDisplayID?,
+        main: CGDirectDisplayID
+    ) -> [CGDirectDisplayID] {
+        guard let current, current != main else { return [main] }
+        return [current, main]
     }
 
     // MARK: - Fail-safe watchdog
