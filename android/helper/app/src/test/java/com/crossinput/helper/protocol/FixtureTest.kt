@@ -49,6 +49,7 @@ class FixtureTest {
         assertEquals(1, frame.requestId)
         val version = le(frame.payload).short.toInt() and 0xFFFF
         assertEquals(1, version)
+        assertEquals(Cxi.CAPABILITIES, Messages.helloAckCapabilities(frame.payload))
     }
 
     @Test
@@ -145,6 +146,17 @@ class FixtureTest {
         val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
         assertEquals(0.0f, horizontal)
         assertEquals(1.0f, vertical)
+    }
+
+    @Test
+    fun pointerResult() {
+        val frame = fixture("pointer-result")
+        assertEquals(Protocol.TYPE_POINTER_RESULT, frame.type)
+        assertEquals(10, frame.requestId)
+        assertArrayEquals(
+            byteArrayOf(0, 12, 0, 0, 0, 248.toByte(), 255.toByte(), 255.toByte(), 255.toByte()),
+            frame.payload,
+        )
     }
 
     @Test
