@@ -19,6 +19,25 @@ public enum SuppressionReleaseReason: String, Sendable {
     case externalControl
 }
 
+/// The CoreGraphics cursor API is injectable so cursor hide/show lifecycle
+/// behavior can be tested without changing the host pointer in a test.
+protocol CursorVisibilityAPI {
+    func hideCursor() -> CGError
+    func showCursor() -> CGError
+}
+
+private struct CoreGraphicsCursorVisibility: CursorVisibilityAPI {
+    func hideCursor() -> CGError {
+        // The display argument is accepted for API compatibility but has no
+        // effect. Keep one stable argument and balance calls by count.
+        CGDisplayHideCursor(CGMainDisplayID())
+    }
+
+    func showCursor() -> CGError {
+        CGDisplayShowCursor(CGMainDisplayID())
+    }
+}
+
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
     public enum Kind: Sendable, Equatable {
@@ -179,6 +198,9 @@ public final class InputCapture: @unchecked Sendable {
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
+    private let cursorVisibility: any CursorVisibilityAPI
+    private let pointerRestoreOverride: (() -> Void)?
+    private let cursorVisibilityDiagnosticsEnabled: Bool
 
     /// Monotonically increasing counter identifying the current suppression session.
     /// Incremented on each suppress() call. Passed to onSuppressionReleased so
@@ -198,15 +220,34 @@ public final class InputCapture: @unchecked Sendable {
     /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
     private var keysDown: Set<Int> = []
 
-    public init(
+    public convenience init(
         externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil
+    ) {
+        self.init(
+            externalControlClassifier: externalControlClassifier,
+            sourceIdentityResolver: sourceIdentityResolver,
+            cursorVisibility: CoreGraphicsCursorVisibility()
+        )
+    }
+
+    /// Test-only injection point for cursor call-count and lifecycle tests.
+    init(
+        externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
+        sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
+        cursorVisibility: any CursorVisibilityAPI,
+        pointerRestoreOverride: (() -> Void)? = nil,
+        cursorVisibilityDiagnosticsEnabled: Bool? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
         self.sourceDiagnostics = ExternalControlSourceDiagnostics(
             enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
         )
+        self.cursorVisibility = cursorVisibility
+        self.pointerRestoreOverride = pointerRestoreOverride
+        self.cursorVisibilityDiagnosticsEnabled = cursorVisibilityDiagnosticsEnabled
+            ?? (ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1")
     }
 
     // MARK: - Lifecycle
@@ -256,6 +297,7 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public func stop() {
+        release(reason: .captureStopped)
         stateLock.withLock {
             if let tap {
                 CFMachPortInvalidate(tap)
@@ -284,11 +326,12 @@ public final class InputCapture: @unchecked Sendable {
             guard !isSuppressing else { return nil }
             isSuppressing = true
             suppressionGeneration &+= 1
+            hideCursor()
             return suppressionGeneration
         }
         guard let generation else { return nil }
         startWatchdog()
-        hideCursor()
+        Diagnostics.log("suppression started generation=\(generation)")
         return generation
     }
 
@@ -300,10 +343,15 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = false
             watchdog?.cancel()
             watchdog = nil
+            if was {
+                showCursor()
+            }
             return (was, gen)
         }
         if wasSuppressing {
-            showCursor()
+            Diagnostics.log(
+                "suppression released generation=\(generation) reason=\(reason.rawValue)"
+            )
             flushStuckKeys()
             if reason == .externalControl {
                 // External control owns the pointer position. Do not warp it
@@ -315,7 +363,11 @@ public final class InputCapture: @unchecked Sendable {
                 // Physically return the pointer to the crossing edge point the user
                 // pushed through, so Android->macOS continues seamlessly instead of
                 // jumping to the screen center.
-                restorePointerAtEdge()
+                if let pointerRestoreOverride {
+                    pointerRestoreOverride()
+                } else {
+                    restorePointerAtEdge()
+                }
             }
             onSuppressionReleased?(reason, generation)
         }
@@ -333,6 +385,16 @@ public final class InputCapture: @unchecked Sendable {
                 androidEdgeByDisplay[displayID] = edge
             } else {
                 androidEdgeByDisplay.removeValue(forKey: displayID)
+            }
+        }
+    }
+
+    /// Test-only display mutation seam for proving cursor balancing does not
+    /// depend on the event display that happens to be current at release.
+    internal func setCurrentEventDisplayForTesting(_ displayID: CGDirectDisplayID?) {
+        stateLock.withLock {
+            currentEventDisplay = displayID.map {
+                DisplayEdgeConfiguration(displayID: $0, frame: .zero, configuredEdge: nil)
             }
         }
     }
@@ -560,36 +622,40 @@ public final class InputCapture: @unchecked Sendable {
 
     private func hideCursor() {
         guard !isCursorHidden else { return }
+        let previous = isCursorHidden
         isCursorHidden = true
-        for displayID in Self.cursorDisplayIDs(
-            current: currentDisplayID,
-            main: CGMainDisplayID()) {
-            CGDisplayHideCursor(displayID)
-        }
-        Diagnostics.log("cursor hidden (balanced)")
+        let result = cursorVisibility.hideCursor()
+        logCursorVisibility(
+            operation: "hide",
+            result: result,
+            from: previous,
+            to: isCursorHidden
+        )
     }
 
     private func showCursor() {
         guard isCursorHidden else { return }
+        let previous = isCursorHidden
         isCursorHidden = false
-        for displayID in Self.cursorDisplayIDs(
-            current: currentDisplayID,
-            main: CGMainDisplayID()) {
-            CGDisplayShowCursor(displayID)
-        }
-        Diagnostics.log("cursor shown (balanced)")
+        let result = cursorVisibility.showCursor()
+        logCursorVisibility(
+            operation: "show",
+            result: result,
+            from: previous,
+            to: isCursorHidden
+        )
     }
 
-    /// Cursor hide/show is display-scoped on macOS. The handoff can begin on
-    /// a non-primary display, while the fallback remains the main display if
-    /// no current event display has been resolved yet. Keep the two calls
-    /// symmetric and avoid double-counting when they are the same display.
-    static func cursorDisplayIDs(
-        current: CGDirectDisplayID?,
-        main: CGDirectDisplayID
-    ) -> [CGDirectDisplayID] {
-        guard let current, current != main else { return [main] }
-        return [current, main]
+    private func logCursorVisibility(
+        operation: String,
+        result: CGError,
+        from: Bool,
+        to: Bool
+    ) {
+        guard cursorVisibilityDiagnosticsEnabled else { return }
+        Diagnostics.log("cursor \(operation) requested")
+        Diagnostics.log("cursor \(operation) result=CGError(\(result.rawValue))")
+        Diagnostics.log("isCursorHidden transition \(from)->\(to)")
     }
 
     // MARK: - Fail-safe watchdog

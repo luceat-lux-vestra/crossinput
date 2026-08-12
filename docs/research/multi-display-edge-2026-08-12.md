@@ -64,7 +64,7 @@ The macOS suite passed on this branch:
 
 ```text
 swift test --quiet
-79 XCTest cases passed
+83 XCTest cases passed
 30 Swift Testing cases passed
 ```
 
@@ -85,7 +85,9 @@ Additional repository gates passed:
 
 ```text
 swift build: PASS
+swift build -c release: PASS
 ./scripts/build-android-helper.sh test: PASS
+./scripts/build-android-helper.sh assembleDebug: PASS
 node protocol/scripts/check-fixtures.mjs: PASS (15 fixtures)
 find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n: PASS
 Android metadata-only logging guard: PASS
@@ -156,14 +158,22 @@ not a physical PASS claim.
 
 ## Cursor visibility follow-up
 
-The same physical run exposed a separate macOS cursor fail-safe defect: the
-diagnostic line `cursor shown (balanced)` did not guarantee that the cursor was
-visible after emergency return when handoff began on a non-primary display.
-The rebaseline had reduced the public CoreGraphics calls to
-`CGMainDisplayID()` only, although cursor hide/show is display-scoped. The
-follow-up keeps the current resolved display and the main display symmetric,
-with a unique display list when they are the same. This does not claim to fix
-the Android/DeX pointer sprite or its idle behavior; those remain issue #46.
-The cursor-display fix was covered by deterministic tests and a release build,
-but its post-emergency-return visibility was not re-verified physically after
-the latest code change because the app was intentionally left stopped.
+The same physical run exposed a separate macOS cursor fail-safe observation:
+the diagnostic line `cursor shown (balanced)` did not guarantee that the cursor
+was visible after emergency return when handoff began on a non-primary display.
+
+`CGDisplayHideCursor` and `CGDisplayShowCursor` accept a display ID, but the
+display argument has no effect. Quartz maintains a hide-cursor count, so calls
+must be balanced by call count rather than by display ID. Each suppression
+session therefore requests exactly one hide and each release transition
+requests exactly one show, using `CGMainDisplayID()` consistently. The local
+`isCursorHidden` guard prevents duplicate calls even if the current event
+display becomes unresolved or changes before release. In opt-in cursor
+diagnostics (`CROSSINPUT_DIAG_CURSOR_VISIBILITY=1`), the app records the
+requested operation, its `CGError` result, the local visibility transition,
+suppression generation, and release reason.
+
+This does not claim to fix the Android/DeX pointer sprite or its idle behavior;
+those remain issue #46. Physical cursor visibility after the latest binary's
+emergency and normal returns must be recorded separately; unobserved behavior
+remains NOT VERIFIED.
