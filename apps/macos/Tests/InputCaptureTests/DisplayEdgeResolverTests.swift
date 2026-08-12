@@ -92,4 +92,20 @@ final class DisplayEdgeResolverTests: XCTestCase {
             at: CGPoint(x: 50, y: 50), displays: displays, threshold: threshold
         ))
     }
+
+    func testQuartzCoordinatesForDisplayBelowPrimaryRetainConfiguredEdge() {
+        // Quartz places a display below the primary at a larger positive Y.
+        // AppKit represents the same display with a negative Y, so passing an
+        // NSScreen frame to this event-coordinate resolver cannot match.
+        let displayBelowPrimary = CGRect(x: 900, y: 2160, width: 2454, height: 1586)
+        let displays = [configuration(id: 1, frame: displayBelowPrimary, edge: .left)]
+
+        XCTAssertEqual(
+            DisplayEdgeResolver.candidate(
+                at: CGPoint(x: 901, y: 2800),
+                displays: displays,
+                threshold: threshold),
+            DisplayEdgeCandidate(displayID: 1, edge: .left)
+        )
+    }
 }

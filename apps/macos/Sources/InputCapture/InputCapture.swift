@@ -461,13 +461,18 @@ public final class InputCapture: @unchecked Sendable {
     private func updatePosition(_ event: CGEvent) {
         currentPosition = event.location
         currentEventDisplay = nil
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(currentPosition) }),
-              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+        var displayID = CGDirectDisplayID()
+        var displayCount: UInt32 = 0
+        guard CGGetDisplaysWithPoint(currentPosition, 1, &displayID, &displayCount) == .success,
+              displayCount == 1 else {
             return
         }
         currentEventDisplay = DisplayEdgeConfiguration(
-            displayID: CGDirectDisplayID(number.uint32Value),
-            frame: screen.frame,
+            displayID: displayID,
+            // CGEvent.location and CGDisplayBounds use the same global Quartz
+            // coordinate space. NSScreen.frame uses AppKit coordinates and
+            // diverges for displays above or below the primary display.
+            frame: CGDisplayBounds(displayID),
             configuredEdge: nil
         )
     }
@@ -501,9 +506,8 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func centerPointer() {
-        if let screen = NSScreen.main {
-            CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
-        }
+        let frame = CGDisplayBounds(CGMainDisplayID())
+        CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
     }
 
     /// Pins the macOS pointer to the configured Android edge of the current
@@ -531,9 +535,8 @@ public final class InputCapture: @unchecked Sendable {
     private func restorePointerAtEdge() {
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
-            if let screen = NSScreen.main {
-                CGWarpMouseCursorPosition(CGPoint(x: screen.frame.midX, y: screen.frame.midY))
-            }
+            let frame = CGDisplayBounds(CGMainDisplayID())
+            CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
             return
         }
         let f = display.frame
