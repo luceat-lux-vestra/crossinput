@@ -49,6 +49,13 @@ final class InputSender: @unchecked Sendable {
         self.pointerRequestTimeout = max(0.05, pointerRequestTimeout)
     }
 
+    /// True while a live transport exists for the current session. Edge events
+    /// must not arm handoff without it: entering remoteActive against a dead
+    /// session traps local input until the watchdog fires (issue #50).
+    var hasLiveConnection: Bool {
+        session.snapshot().connection != nil
+    }
+
     /// Enqueues one semantic delivery batch. Adjacent movement events for the
     /// same session may be coalesced; the completion is for that delivered
     /// batch, not a per-original-event acknowledgement. The aggregate result

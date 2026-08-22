@@ -31,8 +31,13 @@ final class ControlHandoffController: @unchecked Sendable {
                 self.apply(state: transition.to, reason: transition.reason)
             }
         }
-        capture.onScreenEdge = { [weak switchMachine] edge in
-            switchMachine?.pointerAtEdge(edge)
+        capture.onScreenEdge = { [weak self] edge in
+            // A dead session must never re-arm handoff. After a fail-safe
+            // return the pointer can rest on the configured edge; entering
+            // remoteActive with no live transport trapped the user until the
+            // watchdog fired (issue #50).
+            guard let self, self.sender.hasLiveConnection else { return }
+            self.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
             self?.sender.enqueuePointer(event) { [weak self] result in
@@ -92,6 +97,9 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(delivery: PointerDeliveryResult) {
         switch delivery {
         case let .deliveredMovement(dx, dy):
+            // Confirmed acceptance proves the delivery pipeline is live; keep
+            // the fail-safe watchdog from expiring during long sessions.
+            capture.pokeWatchdog()
             // The handoff position is credited only with the movement that
             // the helper reported as accepted. Failed writes never advance
             // this state.
@@ -101,9 +109,9 @@ final class ControlHandoffController: @unchecked Sendable {
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:
-            break
+            recordCancelledDelivery()
         case .delivered:
-            break
+            capture.pokeWatchdog()
         case .failed:
             // A helper-side failure is a control-oriented availability loss;
             // the state machine does not need to know whether ADB, UHID, or
@@ -112,6 +120,25 @@ final class ControlHandoffController: @unchecked Sendable {
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
     }
+
+    /// Cancelled deliveries while remoteActive mean the pipeline dropped work
+    /// without a failure signal; if that persists, only the watchdog can save
+    /// the user, so the burst must leave a metadata-only trace (issue #50).
+    /// Rate-limited: one line per window, counts are never input contents.
+    private func recordCancelledDelivery() {
+        guard capture.isSuppressed else { return }
+        cancelledDeliveryCount += 1
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastCancelledDeliveryLog >= Self.cancelledLogWindow else { return }
+        let count = cancelledDeliveryCount
+        cancelledDeliveryCount = 0
+        lastCancelledDeliveryLog = now
+        Diagnostics.log("pointer deliveries cancelled count=\(count) windowSeconds=\(Int(Self.cancelledLogWindow))")
+    }
+
+    private static let cancelledLogWindow: TimeInterval = 5
+    private var cancelledDeliveryCount = 0
+    private var lastCancelledDeliveryLog: TimeInterval = 0
 
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
