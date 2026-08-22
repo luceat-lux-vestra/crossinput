@@ -187,6 +187,13 @@ public final class InputCapture: @unchecked Sendable {
     private var runLoopSource: CFRunLoopSource?
     private var runLoop: CFRunLoop?
     private var watchdog: DispatchSourceTimer?
+    /// Dedicated queue for the fail-safe watchdog. The tap queue's only thread
+    /// is parked inside CFRunLoopRun() and can never service timer events, so
+    /// the watchdog must never target tapQueue (issue #50).
+    private let watchdogQueue = DispatchQueue(label: "crossinput.watchdog", qos: .userInteractive)
+    /// Fail-safe window. Instance property so tests can shorten it; defaults
+    /// to `Self.suppressionTimeout`.
+    private let suppressionTimeout: TimeInterval
     private let stateLock = NSLock()
     private var currentPosition: CGPoint = .zero
     /// The display containing the most recently handled pointer event. This is
@@ -212,7 +219,14 @@ public final class InputCapture: @unchecked Sendable {
     private let edgeThreshold: CGFloat = 2
     private var emergencyHotKey: EventHotKeyRef?
     /// Prevents an immediate re-trigger after the pointer returns to macOS.
+    /// Guarded by stateLock (written from release paths on other threads).
     private var edgeCooldownUntil: CFTimeInterval = 0
+    /// Set when a return restores the pointer onto the configured edge zone.
+    /// Edge detection stays gated until an event shows the pointer physically
+    /// outside the zone — a time cooldown alone lets a pointer parked on the
+    /// crossing point re-trap into a dead remote session (issue #50).
+    /// Guarded by stateLock.
+    private var requireEdgeExit = false
     /// Tracks whether cursor is currently hidden to prevent unbalanced hide/show.
     private var isCursorHidden = false
     /// Android key codes currently down on the device; on release (fail-safe,
@@ -237,7 +251,8 @@ public final class InputCapture: @unchecked Sendable {
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
         cursorVisibility: any CursorVisibilityAPI,
         pointerRestoreOverride: (() -> Void)? = nil,
-        cursorVisibilityDiagnosticsEnabled: Bool? = nil
+        cursorVisibilityDiagnosticsEnabled: Bool? = nil,
+        suppressionTimeoutOverride: TimeInterval? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
@@ -248,6 +263,7 @@ public final class InputCapture: @unchecked Sendable {
         self.pointerRestoreOverride = pointerRestoreOverride
         self.cursorVisibilityDiagnosticsEnabled = cursorVisibilityDiagnosticsEnabled
             ?? (ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1")
+        self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
     }
 
     // MARK: - Lifecycle
@@ -310,11 +326,14 @@ public final class InputCapture: @unchecked Sendable {
             watchdog?.cancel()
             watchdog = nil
         }
-        // Stop the run loop (must be scheduled on the tap thread).
-        tapQueue.async { [weak self] in
-            guard let self, let runLoop = self.runLoop else { return }
-            CFRunLoopStop(runLoop)
-            self.runLoop = nil
+        // CFRunLoopStop is documented thread-safe; call it directly instead of
+        // enqueueing on tapQueue, whose thread may be parked inside
+        // CFRunLoopRun() and could never service the block (issue #50).
+        stateLock.withLock {
+            if let runLoop {
+                CFRunLoopStop(runLoop)
+                self.runLoop = nil
+            }
         }
     }
 
@@ -358,7 +377,9 @@ public final class InputCapture: @unchecked Sendable {
                 // back to the edge or center; the triggering event is returned
                 // to macOS immediately after this synchronous cleanup.
                 onPointerStateReset?()
-                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+                stateLock.withLock {
+                    edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+                }
             } else {
                 // Physically return the pointer to the crossing edge point the user
                 // pushed through, so Android->macOS continues seamlessly instead of
@@ -544,9 +565,17 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func detectEdge() {
-        // After a return-to-macOS warp, briefly ignore the edge so the pointer
-        // sitting on the crossing point does not instantly switch back.
-        guard CFAbsoluteTimeGetCurrent() >= edgeCooldownUntil else { return }
+        // After a return-to-macOS warp, ignore the edge until the pointer has
+        // physically left the configured edge zone. The pointer is restored
+        // onto the crossing point, so a plain time cooldown re-traps the user
+        // the moment it expires (or races with in-flight events, issue #50).
+        stateLock.lock()
+        if CFAbsoluteTimeGetCurrent() < edgeCooldownUntil {
+            stateLock.unlock()
+            return
+        }
+        let exitGated = requireEdgeExit
+        stateLock.unlock()
         guard let display = currentEventDisplay,
               let configuredEdge = stateLock.withLock({ androidEdgeByDisplay[display.displayID] }) else {
             return
@@ -563,7 +592,15 @@ public final class InputCapture: @unchecked Sendable {
             at: currentPosition,
             displays: [currentDisplay],
             threshold: edgeThreshold
-        ) else { return }
+        ) else {
+            if exitGated {
+                // First event outside the zone releases the gate; that event
+                // itself cannot arm (it points away from the edge).
+                stateLock.withLock { requireEdgeExit = false }
+            }
+            return
+        }
+        if exitGated { return }
         onScreenEdge?(candidate.edge)
     }
 
@@ -595,6 +632,13 @@ public final class InputCapture: @unchecked Sendable {
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
             let frame = CGDisplayBounds(CGMainDisplayID())
             CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
+            // Arm the gates even on the unresolved-display path: without them
+            // a subsequent event near any configured edge can instantly
+            // re-arm handoff after a fail-safe return (issue #50).
+            stateLock.withLock {
+                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+                requireEdgeExit = true
+            }
             return
         }
         let hold = DisplayEdgeResolver.pointerPosition(
@@ -604,8 +648,15 @@ public final class InputCapture: @unchecked Sendable {
             threshold: edgeThreshold)
         CGWarpMouseCursorPosition(hold)
         postSyntheticMove(at: hold)
-        // Don't re-trigger the edge switch from the pointer sitting on the edge.
-        edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+        // Don't re-trigger the edge switch from the pointer sitting on the
+        // edge: park detection behind both the short cooldown and the
+        // leave-zone gate. The synthetic move posted above arrives through
+        // the tap with the pointer still inside the zone, so only physical
+        // movement away from the edge may re-arm handoff (issue #50).
+        stateLock.withLock {
+            edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+            requireEdgeExit = true
+        }
     }
 
     /// macOS drops the first real movement deltas after a warp (the pointer
@@ -662,8 +713,8 @@ public final class InputCapture: @unchecked Sendable {
 
     private func startWatchdog() {
         watchdog?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: tapQueue)
-        timer.schedule(deadline: .now() + Self.suppressionTimeout, repeating: Self.suppressionTimeout)
+        let timer = DispatchSource.makeTimerSource(queue: watchdogQueue)
+        timer.schedule(deadline: .now() + suppressionTimeout, repeating: suppressionTimeout)
         timer.setEventHandler { [weak self] in
             // No pointer event for the timeout window: restore macOS control.
             self?.release(reason: .watchdogTimeout)
@@ -676,7 +727,7 @@ public final class InputCapture: @unchecked Sendable {
     public func pokeWatchdog() {
         stateLock.withLock {
             guard isSuppressing, let watchdog else { return }
-            watchdog.schedule(deadline: .now() + Self.suppressionTimeout, repeating: Self.suppressionTimeout)
+            watchdog.schedule(deadline: .now() + suppressionTimeout, repeating: suppressionTimeout)
         }
     }
 
