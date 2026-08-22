@@ -496,11 +496,21 @@ public final class InputCapture: @unchecked Sendable {
     /// The event is forwarded with the current modifier state so the Android IME
     /// can compose (e.g. Korean 2-set does its own mod mapping).
     ///
-    /// Emergency fail-safe: ⌘⇧X (RegisterEventHotKey) keeps working because hot
-    /// keys are read by the Carbon event dispatcher before/independent of the tap.
+    /// Emergency fail-safe: ⌘⇧X is detected here inside the tap, because this
+    /// tap consumes every keyboard event before the window server can match
+    /// registered Carbon hot keys — the shortcut must not depend on events we
+    /// swallow (issue #53). The Carbon registration remains a secondary path
+    /// for windows where the tap itself is disabled or unsuppressed.
     private func handleKeyboard(event: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
         guard suppressionIsActive else { return Unmanaged.passUnretained(event) }
         let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        if type == .keyDown,
+           virtualKey == Self.emergencyKeyCode,
+           event.flags.intersection(Self.emergencyModifierMask) == Self.emergencyModifiers {
+            Diagnostics.log("emergency shortcut detected")
+            release(reason: .emergencyHotkey)
+            return nil
+        }
         let metaState = KeyCodeMapper.androidMetaState(ofFlags: event.flags)
         let keyCode = KeyCodeMapper.androidKeyCode(ofVirtualKey: virtualKey)
         switch type {
@@ -732,6 +742,15 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public static let suppressionTimeout: TimeInterval = 30
+
+    /// Emergency return shortcut (⇧⌘X). Matched inside the tap because the tap
+    /// consumes keyboard events upstream of the window server's hot-key
+    /// matching (issue #53).
+    private static let emergencyKeyCode = UInt16(kVK_ANSI_X)
+    /// Lock-style flags (caps/num/function) are ignored; any other modifier
+    /// (control/option) must be absent so a held ⌃⌘X never triggers.
+    private static let emergencyModifierMask: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+    private static let emergencyModifiers: CGEventFlags = [.maskCommand, .maskShift]
 
     // MARK: - External-control source resolution
 
