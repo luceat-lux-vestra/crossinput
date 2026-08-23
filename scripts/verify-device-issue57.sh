@@ -533,7 +533,6 @@ esac
 
 
 finish_summary() {
-    sanitize_all_evidence
     {
         echo "ISSUE57_DEVICE_VERIFY"
         echo
