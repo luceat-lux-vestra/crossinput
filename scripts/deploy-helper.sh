@@ -55,6 +55,15 @@ case "$POINTER_BACKEND" in
         ;;
 esac
 
+# Test-only deterministic fault injection (issue #60): fail the Nth UHID report
+# write so the real UHID failure path (cleanup, held-button release, InputManager
+# failover) can be exercised on device. 0/absent = disabled (production path).
+FAIL_UHID_REPORT="${FAIL_UHID_REPORT:-0}"
+if ! [[ "$FAIL_UHID_REPORT" =~ ^[0-9]+$ ]]; then
+    echo "invalid FAIL_UHID_REPORT: $FAIL_UHID_REPORT (expected a non-negative integer)" >&2
+    exit 1
+fi
+
 # CXI frame presets (15-byte little-endian header; AGENTS.md rule 6 — keep in
 # sync with protocol/protocol.md). Header: "CXI" + version u16 + type u16 +
 # requestId u32 + payloadLen u32. Values mirror protocol/fixtures/*.bin.
@@ -102,8 +111,12 @@ start() {
     # Pass --keyboard-backend override for test-only deterministic selection
     local kb_arg="--keyboard-backend=$KEYBOARD_BACKEND"
     local pointer_arg="--pointer-backend=$POINTER_BACKEND"
+    local fault_arg=""
+    if [ "$FAIL_UHID_REPORT" -gt 0 ]; then
+        fault_arg="--fail-uhid-report=$FAIL_UHID_REPORT"
+    fi
     adb -s "$DEVICE" shell \
-        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg $pointer_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
+        "nohup sh -c 'tail -f $REMOTE_IN | app_process -cp $REMOTE_APK / com.crossinput.helper.Main $kb_arg $pointer_arg $fault_arg > $REMOTE_OUT 2> $REMOTE_LOG' >/dev/null 2>&1 &"
     sleep 2
     if ! helper_running; then
         echo "helper failed to start — stderr log:" >&2
@@ -114,6 +127,9 @@ start() {
     echo "helper running (stdin <- tail -f $REMOTE_IN; stdout -> $REMOTE_OUT, stderr -> $REMOTE_LOG)"
     echo "keyboard backend: $KEYBOARD_BACKEND"
     echo "pointer backend: $POINTER_BACKEND"
+    if [ "$FAIL_UHID_REPORT" -gt 0 ]; then
+        echo "uhid report fault injection: fail the $FAIL_UHID_REPORT-th report (test-only)"
+    fi
     echo "next: scripts/deploy-helper.sh list"
 }
 

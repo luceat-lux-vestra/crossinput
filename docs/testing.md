@@ -61,6 +61,60 @@ discovered display ID from `dumpsys display` when issuing `select` or `pointer`.
 `POINTER_BACKEND=uhid` is expected to reject selected-display routing rather
 than silently route to a different display.
 
+### Remote physical-device verification
+
+One-shot driver for the home Mac (`scripts/verify-device-issue57.sh`,
+issue #60): runs every automatable item of the #57 acceptance list against the
+physically connected SM-G977N + DeX and collects evidence under
+`docs/research/evidence/issue-57-device-verification/<timestamp>-<sha>/`.
+
+Prerequisites: ADB device connected (`adb devices` shows exactly one usable
+device, or set `ANDROID_SERIAL`), DeX active on the external display,
+`python3`, `jq`; optional `scrcpy >= 4.1` for the DeX-display recording.
+A JDK 17 is selected automatically when the default JVM is too new for the
+helper build.
+
+Invocation (SSH into the home Mac; the caller controls checkout state — the
+script never mutates history):
+
+```sh
+cd <crossinput-repo>
+git fetch --prune origin
+git switch fix/57-uhid-desktop-pointer-routing
+git reset --hard 2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+./scripts/verify-device-issue57.sh \
+  2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+```
+
+Add `--with-failover` for the deterministic mid-session UHID→InputManager
+scenario (needs the test-only `--fail-uhid-report=N` helper hook, which fails
+the Nth UHID report write at the real error path; auto-detected in the built
+APK — revisions without the hook record that item NOT_RUN instead of failing).
+`--skip-video` disables the recording attempt. Exit codes: 0 pass/pending-visual,
+1 automated FAIL, 2 usage/environment error, 3 precondition not met (e.g. DeX
+inactive).
+
+Automated: dynamic DeX discovery (never hardcodes the display id), AUTO backend
+assertion (`backend=uhid routing=system`), immediate first-move-after-select
+regression, forced-backend sessions with full pointer smoke (move, left/right/
+middle click, four-direction scroll), UHID registration via `dumpsys input` +
+time-bounded `getevent` on the Ampersand event node only, kernel-level scroll
+sign checks (REL_WHEEL/REL_HWHEEL), deterministic failover injection, clean
+shutdown, and a machine-readable summary (`result.md`). Evidence is
+metadata-only (no keystrokes, clipboard, or HID payloads).
+
+Still requires human confirmation (marked MANUAL_REQUIRED, never collapsed
+into PASS): visible pointer motion/appearance on the DeX screen, idle-fade
+reappearance, visible scroll direction (the attached screen-recording assists
+review but cursor composition is not machine-verifiable), and the complete
+macOS → Android → macOS edge handoff. Edge state-machine logic stays covered by
+the existing automated macOS tests.
+
+PASS/HOLD rules: overall is `FAIL` if any automatable assertion failed;
+otherwise `AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING` while any visual item
+remains open; PR #59 stays HOLD until those items are physically confirmed
+per AGENTS.md rule 2.
+
 Keyboard (Phase 9, ADR-0007 — added to the same helper session):
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.

@@ -28,11 +28,9 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v4
       - name: "Static guard: no input payload in logs"
-        run: |
-          if rg -n 'keyCode=.*event\.keyCode|keyCode=\$\{|HID report.*payload' android/helper/app/src/main; then
-            echo "Forbidden: key/event payload appears in Android helper logging" >&2
-            exit 1
-          fi
+        # Fails closed: missing scanner or undetected planted violation breaks
+        # the job (the previous inline `rg` call false-greened without ripgrep).
+        run: scripts/check-log-guard.sh
       - name: Gradle Test
         run: |
           cd android/helper
