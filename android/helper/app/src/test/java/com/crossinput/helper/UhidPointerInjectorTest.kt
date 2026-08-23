@@ -1,6 +1,7 @@
 package com.crossinput.helper
 
 import android.view.Display
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -70,5 +71,66 @@ class UhidPointerInjectorTest {
 
         assertTrue(!pointer.selectDisplay(display))
         assertEquals(PointerRouting.SYSTEM_ROUTED, pointer.routing)
+    }
+
+    @Test
+    fun semanticDescriptorMatchesGoldenBytesIncludingAcPanUsage() {
+        val expected = hexToBytes(
+            "05 01 09 02 A1 01 09 01 A1 00 " +
+                "05 09 19 01 29 03 15 00 25 01 " +
+                "95 03 75 01 81 02 " +
+                "95 01 75 05 81 01 " +
+                "05 01 09 30 09 31 15 81 25 7F " +
+                "75 08 95 02 81 06 " +
+                "09 38 15 81 25 7F 75 08 95 01 81 06 " +
+                // Consumer AC Pan usage 0x0238 (16-bit usage item) maps to
+                // REL_HWHEEL in the Linux generic HID layer.
+                "05 0C 0A 38 02 15 81 25 7F 75 08 95 01 81 06 " +
+                "C0 C0",
+        )
+        assertArrayEquals(expected, UhidPointerInjector.MOUSE_DESCRIPTOR)
+    }
+
+    @Test
+    fun horizontalScrollInvertsTheCxiSignIntoThePanField() {
+        val pointer = injector()
+        pointer.create()
+
+        assertEquals(PointerDelivery.DELIVERED, pointer.scroll(1f, 0f))
+        assertEquals(PointerDelivery.DELIVERED, pointer.scroll(-1f, 0f))
+
+        val reports = argumentCaptor<ByteArray>()
+        verify(hid, times(2)).sendReport(eq(9), reports.capture())
+        // CXI +horizontal means LEFT; the native chain treats positive pan as
+        // RIGHT, so the byte is inverted: left -> -1 (0xFF), right -> +1.
+        assertEquals(5, reports.allValues[0].size)
+        assertEquals(0xFF, reports.allValues[0][4].toInt() and 0xFF)
+        assertEquals(0x01, reports.allValues[1][4].toInt() and 0xFF)
+        assertEquals(0, reports.allValues[0][3].toInt())
+    }
+
+    @Test
+    fun movementButtonAndVerticalWheelReportsCarryZeroPan() {
+        val pointer = injector()
+        pointer.create()
+
+        pointer.moveRelative(10, 20)
+        pointer.scroll(0f, -1f)
+        pointer.button(2, true)
+
+        val reports = argumentCaptor<ByteArray>()
+        verify(hid, times(3)).sendReport(eq(9), reports.capture())
+        for (report in reports.allValues) {
+            assertEquals(5, report.size)
+            assertEquals(0, report[4].toInt())
+        }
+        assertEquals(20, reports.allValues[0][2].toInt())
+        assertEquals(-1, reports.allValues[1][3].toInt())
+        assertEquals(0x04, reports.allValues[2][0].toInt() and 0xFF)
+    }
+
+    private companion object {
+        fun hexToBytes(hex: String): ByteArray =
+            hex.trim().split(Regex("\\s+")).map { it.toInt(16).toByte() }.toByteArray()
     }
 }

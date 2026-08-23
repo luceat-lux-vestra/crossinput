@@ -1,0 +1,21 @@
+ISSUE57_DEVICE_VERIFY
+
+revision: 34e35dba7d52dcb43b56cc8eb42f34ac9ec20df9
+device: SM-G977N (selector=single-adb-device, serial=<redacted-adb-serial>)
+dex_display_id: 2
+
+auto_uhid_selection: PASS
+first_move_after_select: PASS
+uhid_device_registration: PASS
+pointer_result_smoke: PASS
+forced_uhid: PASS
+forced_input_manager: PASS
+four_direction_protocol_semantics: PASS
+clean_shutdown: PASS
+visible_pointer_motion: MANUAL_REQUIRED
+idle_pointer_reappearance: MANUAL_REQUIRED
+visual_scroll_direction: MANUAL_REQUIRED
+full_edge_handoff_return: MANUAL_REQUIRED
+mid_session_physical_failover: PASS
+
+overall: AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING

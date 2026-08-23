@@ -61,6 +61,112 @@ enum class PointerRouting {
 }
 
 /**
+ * Applies [MotionEvent.setDisplayId] (hidden API 28+) so injected events are
+ * targeted at the selected display. Production resolves the setter
+ * reflectively once; when unavailable, targeting cannot be honored and the
+ * backend reports itself unable to route explicitly. Injectable for host-JVM
+ * unit tests.
+ */
+fun interface DisplayIdSetter {
+    /** Returns false when display targeting is unavailable on this build. */
+    fun set(event: MotionEvent, displayId: Int): Boolean
+
+    companion object {
+        /** Sentinel: display targeting unavailable on this build. */
+        val UNAVAILABLE: DisplayIdSetter = DisplayIdSetter { _, _ -> false }
+
+        fun reflection(): DisplayIdSetter {
+            val method = try {
+                MotionEvent::class.java.getMethod("setDisplayId", Int::class.java)
+            } catch (_: Throwable) {
+                null
+            }
+            return if (method == null) {
+                UNAVAILABLE
+            } else {
+                DisplayIdSetter { event, displayId ->
+                    try {
+                        method.invoke(event, displayId)
+                        true
+                    } catch (_: Throwable) {
+                        false
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Applies [MotionEvent.setActionButton] (@hide, runtime API 23+) so
+ * press/release events carry the button that changed; Samsung's DeX pipeline
+ * rejects them otherwise (issue #57). Reports success explicitly: when the
+ * hidden API is unavailable or the invocation fails, the caller must refuse
+ * to inject a press/release event whose actionButton disagrees with its
+ * buttonState — that malformed event is exactly what the device rejected.
+ * Injectable for host-JVM unit tests.
+ */
+fun interface ActionButtonSetter {
+    /** Returns false when actionButton could not be applied. */
+    fun set(event: MotionEvent, button: Int): Boolean
+
+    companion object {
+        fun reflection(): ActionButtonSetter {
+            val method = try {
+                MotionEvent::class.java.getMethod("setActionButton", Int::class.java)
+            } catch (_: Throwable) {
+                null
+            }
+            return ActionButtonSetter { event, button ->
+                try {
+                    method?.invoke(event, button)
+                    method != null
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Injects a built [MotionEvent] through the hidden
+ * [InputManager.injectInputEvent] (async mode) and reports acceptance.
+ * Production resolves the method reflectively once; when unavailable every
+ * injection fails, which keeps routing/failover decisions honest. Injectable
+ * for host-JVM unit tests.
+ */
+fun interface MotionEventInjector {
+    fun inject(event: MotionEvent): Boolean
+
+    companion object {
+        /** Same value as the hidden InputManager.INJECT_INPUT_EVENT_MODE_ASYNC. */
+        private const val INJECT_MODE = 0
+
+        fun reflection(context: Context): MotionEventInjector? {
+            val inputManager =
+                context.getSystemService(Context.INPUT_SERVICE) as InputManager
+            val method = try {
+                InputManager::class.java.getMethod(
+                    "injectInputEvent",
+                    InputEvent::class.java,
+                    Int::class.java,
+                )
+            } catch (_: Throwable) {
+                return null
+            }
+            return MotionEventInjector { event ->
+                try {
+                    method.invoke(inputManager, event, INJECT_MODE) == true
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        }
+    }
+}
+
+/**
  * Input backend that injects pointer events via InputManager.injectInputEvent()
  * with display ID targeting (scrcpy-style SDK injection).
  * Works on Android 10+ with secondary display support.
@@ -71,10 +177,13 @@ enum class PointerRouting {
  */
 class InputManagerPointerInjector(
     private val log: Logger,
-    private val context: Context,
+    context: Context,
+    private val actionButtonSetter: ActionButtonSetter = ActionButtonSetter.reflection(),
+    private val displayIdSetter: DisplayIdSetter = DisplayIdSetter.reflection(),
+    private val eventInjector: MotionEventInjector? = MotionEventInjector.reflection(context),
 ) : PointerInjector {
     override val routing: PointerRouting
-        get() = if (setDisplayIdMethod != null) {
+        get() = if (displayIdSetter != DisplayIdSetter.UNAVAILABLE) {
             PointerRouting.EXPLICIT_DISPLAY
         } else {
             PointerRouting.UNAVAILABLE
@@ -91,30 +200,20 @@ class InputManagerPointerInjector(
     // Current pressed-button mask (MotionEvent.BUTTON_*), scrcpy-style
     private var buttons: Int = 0
 
-    private companion object {
-        // Same value as the hidden InputManager.INJECT_INPUT_EVENT_MODE_ASYNC
-        private const val INJECT_INPUT_EVENT_MODE_ASYNC = 0
-
-        private val injectInputEventMethod: Method? = try {
-            InputManager::class.java.getMethod("injectInputEvent", InputEvent::class.java, Int::class.java)
-        } catch (_: Throwable) {
-            null
-        }
-
-        // Reflection for MotionEvent.setDisplayId (added in API 28)
-        private val setDisplayIdMethod: Method? = try {
-            MotionEvent::class.java.getMethod("setDisplayId", Int::class.java)
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
+    /**
+     * Starts a new selection epoch. Invariant: every successful
+     * [selectDisplay] begins with no buttons logically held by this injector
+     * — the instance is long-lived under Main/PointerDispatcher, and a stale
+     * mask would emit ACTION_MOVE (instead of ACTION_HOVER_MOVE) with stale
+     * buttonState on the first move of the new epoch.
+     */
     override fun selectDisplay(display: Display): Boolean {
-        if (setDisplayIdMethod == null) {
+        if (displayIdSetter == DisplayIdSetter.UNAVAILABLE) {
             log.error("InputManagerPointerInjector", "explicit display routing API unavailable")
             initialized = false
             return false
         }
+        buttons = 0
         selectedDisplayId = display.displayId
         selectedDisplay = display
         initialized = true
@@ -196,8 +295,41 @@ class InputManagerPointerInjector(
             0 -> if (down) MotionEvent.ACTION_DOWN else MotionEvent.ACTION_UP
             else -> if (down) MotionEvent.ACTION_BUTTON_PRESS else MotionEvent.ACTION_BUTTON_RELEASE
         }
+        // ACTION_BUTTON_PRESS/RELEASE events must carry the matching
+        // actionButton; MotionEvent.obtain leaves it 0 (= BUTTON_PRIMARY),
+        // producing an event whose action says "secondary/tertiary changed"
+        // while its metadata claims the primary button did it. Samsung's DeX
+        // input pipeline rejects that inconsistent event outright, so a
+        // press/release whose actionButton cannot be applied must fail
+        // closed: injecting it anyway would reproduce the exact device
+        // defect. The tracked mask is only committed on full success.
+        val needsActionButton =
+            action == MotionEvent.ACTION_BUTTON_PRESS ||
+                action == MotionEvent.ACTION_BUTTON_RELEASE
         val newButtons = if (down) buttons or btn else buttons and btn.inv()
-        val event = buildEvent(action, newButtons)
+        val event = buildEvent(
+            action,
+            newButtons,
+            actionButton = if (needsActionButton) btn else 0,
+        )
+        val applied = if (needsActionButton) {
+            try {
+                actionButtonSetter.set(event, btn)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            true
+        }
+        if (!applied) {
+            event.recycle()
+            log.warn(
+                "InputManagerPointerInjector",
+                "actionButton metadata unavailable; rejecting secondary/tertiary " +
+                    "${if (down) "press" else "release"} to avoid a malformed event",
+            )
+            return PointerDelivery.FAILED
+        }
         if (!setDisplayId(event)) {
             event.recycle()
             return PointerDelivery.FAILED
@@ -242,7 +374,10 @@ class InputManagerPointerInjector(
         val coords = MotionEvent.PointerCoords().apply {
             x = currentX
             y = currentY
-            if (horizontal != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, horizontal)
+            // CXI wire contract: positive horizontal = LEFT (mirrors macOS).
+            // AXIS_HSCROLL positive means RIGHT on Android, so negate here;
+            // passing the wire value through verbatim inverted the direction.
+            if (horizontal != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, -horizontal)
             if (vertical != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vertical)
         }
         val event = buildEvent(MotionEvent.ACTION_SCROLL, buttons, coords)
@@ -255,7 +390,12 @@ class InputManagerPointerInjector(
         return accepted
     }
 
-    private fun buildEvent(action: Int, buttonState: Int, coords: MotionEvent.PointerCoords? = null): MotionEvent {
+    private fun buildEvent(
+        action: Int,
+        buttonState: Int,
+        coords: MotionEvent.PointerCoords? = null,
+        actionButton: Int = 0,
+    ): MotionEvent {
         val pointerCoords = coords ?: MotionEvent.PointerCoords().apply {
             x = currentX
             y = currentY
@@ -269,7 +409,7 @@ class InputManagerPointerInjector(
         // eventTime breaks app-side gesture/timer comparisons and caused input
         // ANRs in Samsung's DeX launcher on device.
         val now = android.os.SystemClock.uptimeMillis()
-        return MotionEvent.obtain(
+        val event = MotionEvent.obtain(
             now,
             now,
             action,
@@ -285,44 +425,40 @@ class InputManagerPointerInjector(
             InputDevice.SOURCE_MOUSE,
             0,
         )
-    }
-
-    private fun setDisplayId(event: MotionEvent): Boolean {
-        val method = setDisplayIdMethod ?: return false
-        if (selectedDisplayId < 0) return false
-        return try {
-            method.invoke(event, selectedDisplayId)
-            true
-        } catch (e: Exception) {
-            log.warn("InputManagerPointerInjector", "target routing metadata update failed: ${e.message}")
-            false
-        }
+        return event
     }
 
     private fun injectEvent(event: MotionEvent): Boolean {
-        try {
-            val method = injectInputEventMethod ?: run {
-                log.error("InputManagerPointerInjector", "injectInputEvent method not available")
-                return false
+        val injector = eventInjector
+        if (injector != null) {
+            return try {
+                injector.inject(event)
+            } catch (_: Throwable) {
+                false
             }
-            val result = method.invoke(inputManager, event, INJECT_INPUT_EVENT_MODE_ASYNC) as Boolean
-            if (!result) {
-                log.warn("InputManagerPointerInjector", "injectInputEvent returned false")
-            }
-            return result
-        } catch (e: SecurityException) {
-            log.error("InputManagerPointerInjector", "injectInputEvent security exception: ${e.message}")
-            return false
-        } catch (e: Exception) {
-            log.error("InputManagerPointerInjector", "injectInputEvent failed: ${e.javaClass.simpleName}: ${e.message}")
-            return false
         }
+        log.error("InputManagerPointerInjector", "injectInputEvent method not available")
+        return false
+    }
+
+    private fun setDisplayId(event: MotionEvent): Boolean {
+        if (selectedDisplayId < 0) return false
+        val ok = displayIdSetter.set(event, selectedDisplayId)
+        if (!ok) {
+            log.warn("InputManagerPointerInjector", "target routing metadata update failed")
+        }
+        return ok
     }
 
     override fun close() {
+        // InputManager owns no virtual HID device, so teardown is a local
+        // state reset; no synthetic release events are required. Resetting
+        // the mask here guarantees a reused instance never resurrects held
+        // buttons even if callers skip selectDisplay.
         initialized = false
         selectedDisplayId = -1
         selectedDisplay = null
+        buttons = 0
     }
 }
 

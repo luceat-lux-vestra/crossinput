@@ -1,0 +1,153 @@
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "keyboard backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "pointer backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=1 name=Ampersand Keyboard inputDeviceId=110"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidKeyboardInjector", "message": "UHID keyboard created id=1"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "KeyboardBackend", "message": "keyboard backend selected backend=uhid mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "handshake ok (v1 capabilities=3)"}
+{"type": "HELLO_ACK", "reqid": 1050, "version": 1, "capabilities": 3}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "listing 3 display(s)"}
+{"type": "DISPLAY_LIST", "reqid": 1051, "displays": [{"displayId": 0, "type": 1, "flags": 131, "state": 1, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}, {"displayId": 16, "type": 2, "flags": 139, "state": 1, "width": 1920, "height": 1080, "densityDpi": 213, "rotation": 0, "name": "HDMI Screen", "uniqueId": "local:1", "layerStack": 16}, {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}]}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=2 name=Ampersand Mouse inputDeviceId=111"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidPointerInjector", "message": "pointer backend ready backend=uhid"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "PointerDispatcher", "message": "pointer backend selected backend=uhid mode=auto target=2 routing=system"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "selected target display id=2"}
+{"type": "DISPLAY_CHANGED", "reqid": 1052, "display": {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1053, "status": 0, "dx": 30, "dy": 20}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "DisplayDiscovery", "message": "display changed id=0"}
+{"type": "DISPLAY_CHANGED", "reqid": 0, "display": {"displayId": 0, "type": 1, "flags": 131, "state": 2, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "DisplayDiscovery", "message": "display changed id=16"}
+{"type": "DISPLAY_CHANGED", "reqid": 0, "display": {"displayId": 16, "type": 2, "flags": 139, "state": 2, "width": 1920, "height": 1080, "densityDpi": 213, "rotation": 0, "name": "HDMI Screen", "uniqueId": "local:1", "layerStack": 16}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "DisplayDiscovery", "message": "display changed id=0"}
+{"type": "DISPLAY_CHANGED", "reqid": 0, "display": {"displayId": 0, "type": 1, "flags": 131, "state": 2, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1060, "status": 0, "dx": 25, "dy": 15}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1061, "status": 0, "dx": -25, "dy": -20}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1062, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1063, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1064, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1065, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1066, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1067, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1068, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1069, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1070, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1071, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1080, "status": 0, "dx": 10, "dy": 10}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1081, "status": 0, "dx": -10, "dy": -10}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1082, "status": 0, "dx": 15, "dy": -5}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "keyboard backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "pointer backend mode=uhid"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=1 name=Ampersand Keyboard inputDeviceId=112"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidKeyboardInjector", "message": "UHID keyboard created id=1"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "KeyboardBackend", "message": "keyboard backend selected backend=uhid mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "handshake ok (v1 capabilities=1)"}
+{"type": "HELLO_ACK", "reqid": 1100, "version": 1, "capabilities": 1}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "listing 3 display(s)"}
+{"type": "DISPLAY_LIST", "reqid": 1101, "displays": [{"displayId": 0, "type": 1, "flags": 131, "state": 2, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}, {"displayId": 16, "type": 2, "flags": 139, "state": 2, "width": 1920, "height": 1080, "densityDpi": 213, "rotation": 0, "name": "HDMI Screen", "uniqueId": "local:1", "layerStack": 16}, {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}]}
+{"type": "LOG_EVENT", "reqid": 0, "level": "warn", "tag": "PointerDispatcher", "message": "forced UHID ignores target 2; using system routing"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=2 name=Ampersand Mouse inputDeviceId=113"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidPointerInjector", "message": "pointer backend ready backend=uhid"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "PointerDispatcher", "message": "pointer backend selected backend=uhid mode=uhid"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "selected target display id=2"}
+{"type": "DISPLAY_CHANGED", "reqid": 1102, "display": {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1110, "status": 0, "dx": 25, "dy": 15}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1111, "status": 0, "dx": -25, "dy": -20}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1112, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1113, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1114, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1115, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1116, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1117, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1118, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1119, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1120, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1121, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1150, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1151, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1152, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1153, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "keyboard backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "pointer backend mode=input-manager"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=1 name=Ampersand Keyboard inputDeviceId=114"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidKeyboardInjector", "message": "UHID keyboard created id=1"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "KeyboardBackend", "message": "keyboard backend selected backend=uhid mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "handshake ok (v1 capabilities=3)"}
+{"type": "HELLO_ACK", "reqid": 1200, "version": 1, "capabilities": 3}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "listing 3 display(s)"}
+{"type": "DISPLAY_LIST", "reqid": 1201, "displays": [{"displayId": 0, "type": 1, "flags": 131, "state": 2, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}, {"displayId": 16, "type": 2, "flags": 139, "state": 2, "width": 1920, "height": 1080, "densityDpi": 213, "rotation": 0, "name": "HDMI Screen", "uniqueId": "local:1", "layerStack": 16}, {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}]}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "InputManagerPointerInjector", "message": "selected target 2 (1920x1080)"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "PointerDispatcher", "message": "pointer backend selected backend=input-manager mode=input-manager"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "selected target display id=2"}
+{"type": "DISPLAY_CHANGED", "reqid": 1202, "display": {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}}
+{"type": "POINTER_RESULT", "reqid": 1210, "status": 0, "dx": 25, "dy": 15}
+{"type": "POINTER_RESULT", "reqid": 1211, "status": 0, "dx": -25, "dy": -20}
+{"type": "POINTER_RESULT", "reqid": 1212, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1213, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1214, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1215, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1216, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1217, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1218, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1219, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1220, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1221, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1250, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1251, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1252, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1253, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "keyboard backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "pointer backend mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=1 name=Ampersand Keyboard inputDeviceId=115"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidKeyboardInjector", "message": "UHID keyboard created id=1"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "KeyboardBackend", "message": "keyboard backend selected backend=uhid mode=auto"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "handshake ok (v1 capabilities=3)"}
+{"type": "HELLO_ACK", "reqid": 1300, "version": 1, "capabilities": 3}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "listing 3 display(s)"}
+{"type": "DISPLAY_LIST", "reqid": 1301, "displays": [{"displayId": 0, "type": 1, "flags": 131, "state": 2, "width": 1440, "height": 3040, "densityDpi": 560, "rotation": 0, "name": "Built-in Screen", "uniqueId": "local:0", "layerStack": 0}, {"displayId": 16, "type": 2, "flags": 139, "state": 2, "width": 1920, "height": 1080, "densityDpi": 213, "rotation": 0, "name": "HDMI Screen", "uniqueId": "local:1", "layerStack": 16}, {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}]}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device created id=2 name=Ampersand Mouse inputDeviceId=116"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "UhidPointerInjector", "message": "pointer backend ready backend=uhid"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "PointerDispatcher", "message": "pointer backend selected backend=uhid mode=auto target=2 routing=system"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "Main", "message": "selected target display id=2"}
+{"type": "DISPLAY_CHANGED", "reqid": 1302, "display": {"displayId": 2, "type": 5, "flags": 536871298, "state": 2, "width": 1920, "height": 1080, "densityDpi": 160, "rotation": 0, "name": "Desktop", "uniqueId": "virtual:android,1000,Desktop,0", "layerStack": 2}}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1303, "status": 0, "dx": 8, "dy": 8}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "POINTER_RESULT", "reqid": 1304, "status": 0, "dx": 0, "dy": 0}
+{"type": "LOG_EVENT", "reqid": 0, "level": "warn", "tag": "HidDeviceManager", "message": "test-only report fault injected id=2"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "report sent id=2 len=5 written=11"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "HidDeviceManager", "message": "device destroyed id=2"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "info", "tag": "InputManagerPointerInjector", "message": "selected target 2 (1920x1080)"}
+{"type": "LOG_EVENT", "reqid": 0, "level": "warn", "tag": "PointerDispatcher", "message": "pointer backend failover backend=input-manager"}
+{"type": "POINTER_RESULT", "reqid": 1305, "status": 0, "dx": 0, "dy": 0}
+{"type": "POINTER_RESULT", "reqid": 1306, "status": 0, "dx": -6, "dy": 4}
