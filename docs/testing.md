@@ -98,10 +98,15 @@ script never mutates history):
 cd <crossinput-repo>
 git fetch --prune origin
 git switch fix/57-uhid-desktop-pointer-routing
-git reset --hard 2efdffa79960dd3d8e4c1e65b63e947784cfcd50
-./scripts/verify-device-issue57.sh \
-  2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+git pull --ff-only
+REV="$(git rev-parse HEAD)"
+./scripts/verify-device-issue57.sh "$REV" --with-failover
 ```
+
+The driver verifies the requested revision equals the checked-out HEAD
+(exact-HEAD invariant) and records the tested SHA in the evidence, so this
+procedure stays valid as the branch advances. Never `reset --hard` to a
+historical SHA to "re-verify" — that reproduces known-broken revisions.
 
 Add `--with-failover` for the deterministic mid-session UHID→InputManager
 scenario (needs the test-only `--fail-uhid-report=N` helper hook, which fails
