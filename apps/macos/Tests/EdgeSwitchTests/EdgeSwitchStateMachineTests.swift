@@ -97,6 +97,92 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .localActive)
     }
 
+    // MARK: - Issue #45: intent-based return credit
+
+    /// Entry event plus the fully-absorbed (requested, delivered=(0,0))
+    /// pull-back direction for each edge.
+    private static let issue45Cases: [(ScreenEdge, (Int32, Int32), (Int32, Int32))] = [
+        (.left, (-5, 0), (40, 0)),
+        (.right, (5, 0), (-40, 0)),
+        (.top, (0, -5), (0, 40)),
+        (.bottom, (0, 5), (0, -40)),
+    ]
+
+    func testBoundaryClampedPullBackStillReturnsOnRequestedIntent() {
+        // A helper cursor pinned at its display bound reports zero accepted
+        // movement for a pull-back it fully absorbed while still acknowledging
+        // delivery. Crediting only accepted movement pinned the virtual axis
+        // at the boundary forever; requested intent must accumulate and fire
+        // the boundary-crossed return.
+        for (edge, entry, blockedPullBack) in Self.issue45Cases {
+            let machine = makeRemoteActive(edge: edge)
+            machine.pointerMoved(dx: CGFloat(entry.0), dy: CGFloat(entry.1)) // spends first-move exemption
+
+            machine.pointerMoved(requestedDx: CGFloat(blockedPullBack.0),
+                                 requestedDy: CGFloat(blockedPullBack.1),
+                                 deliveredDx: 0, deliveredDy: 0)
+            XCTAssertEqual(machine.state, .remoteActive, "edge \(edge) returned before hysteresis")
+
+            machine.pointerMoved(requestedDx: CGFloat(blockedPullBack.0),
+                                 requestedDy: CGFloat(blockedPullBack.1),
+                                 deliveredDx: 0, deliveredDy: 0)
+            XCTAssertEqual(machine.state, .localActive, "edge \(edge) did not return on absorbed intent")
+        }
+    }
+
+    func testPinnedInwardPushDoesNotAdvanceVirtualPosition() {
+        // Inward movement credited only what the bound-clamped helper accepted:
+        // repeated fully-absorbed inward pushes must not inflate the position.
+        let machine = makeRemoteActive(edge: .right)
+        machine.pointerMoved(dx: 10, dy: 0) // spends first-move exemption
+
+        for _ in 0..<100 {
+            machine.pointerMoved(requestedDx: 500, requestedDy: 0, deliveredDx: 0, deliveredDy: 0)
+        }
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        // The position sits near its entry offset, so a sub-hysteresis
+        // pull-back stays remote and one more crosses the threshold. Crediting
+        // the +500 requests would have inflated the position enough to swallow
+        // both pull-backs and stay remoteActive.
+        machine.pointerMoved(requestedDx: -59, requestedDy: 0, deliveredDx: -59, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .remoteActive)
+        machine.pointerMoved(requestedDx: -100, requestedDy: 0, deliveredDx: -100, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testPartiallyAbsorbedPullBackCreditsFullRequestedIntent() {
+        // What the wall eats cannot slow the user's exit: partial absorption
+        // in the return direction still credits the whole requested delta.
+        // Delivered-only crediting would leave the position at -10 (no return).
+        let machine = makeRemoteActive(edge: .right)
+        machine.pointerMoved(dx: 10, dy: 0) // position 10
+
+        machine.pointerMoved(requestedDx: -80, requestedDy: 0,
+                             deliveredDx: -20, deliveredDy: 0) // credit -80 -> -70 <= -60
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testFirstEventBlockedPullBackIsExemptThenAccumulatesOnIntent() {
+        // The issue #37 exemption also covers an intent-credited blocked
+        // pull-back: the very first event never returns, later ones do.
+        let machine = makeRemoteActive(edge: .left)
+        machine.pointerMoved(requestedDx: 300, requestedDy: 0, deliveredDx: 0, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        machine.pointerMoved(requestedDx: 61, requestedDy: 0, deliveredDx: 0, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testZeroRequestedAndDeliveredDoesNotConsumeFirstEvent() {
+        let machine = makeRemoteActive(edge: .top)
+        machine.pointerMoved(requestedDx: 0, requestedDy: 0, deliveredDx: 0, deliveredDy: 0)
+        machine.pointerMoved(dx: 0, dy: 100)
+        XCTAssertEqual(machine.state, .remoteActive)
+        machine.pointerMoved(dx: 0, dy: 161)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
     func testRemoteUnavailableForcesSafeLocalReturn() {
         let machine = makeRemoteActive(edge: .left)
         let collector = TransitionCollector()

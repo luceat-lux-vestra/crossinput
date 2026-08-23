@@ -25,7 +25,8 @@ final class InputSenderTests: XCTestCase {
         }
 
         XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
-        XCTAssertEqual(result.get(), .deliveredMovement(dx: 3, dy: 4))
+        XCTAssertEqual(result.get(), .deliveredMovement(requestedDx: 10, requestedDy: 20,
+                                                        deliveredDx: 3, deliveredDy: 4))
     }
 
     func testPartialMovementIsReportedWithoutRetry() {
@@ -47,7 +48,8 @@ final class InputSenderTests: XCTestCase {
         }
 
         XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
-        XCTAssertEqual(result.get(), .partiallyDeliveredMovement(dx: 127, dy: 0))
+        XCTAssertEqual(result.get(), .partiallyDeliveredMovement(requestedDx: 300, requestedDy: 0,
+                                                                 deliveredDx: 127, deliveredDy: 0))
         XCTAssertEqual(session.requestCount, 1)
     }
 
