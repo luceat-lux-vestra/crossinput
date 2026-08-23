@@ -6,6 +6,7 @@ import android.view.Display
 import android.view.MotionEvent
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.anyInt
@@ -78,15 +79,25 @@ class InputManagerPointerInjectorTest {
         whenever(context.getSystemService(Context.INPUT_SERVICE))
             .thenReturn(Mockito.mock(InputManager::class.java))
 
-        // Test seams: apply actionButton straight onto the snapshot and accept
-        // every injection (the reflective hidden API is absent on host JVM).
         val actionButtonSetter = ActionButtonSetter { _, button ->
             captured.lastOrNull()?.actionButton = button
+            true
         }
         val displayIdSetter = DisplayIdSetter { _, _ -> true }
         val eventInjector = MotionEventInjector { true }
         return InputManagerPointerInjector(log, context, actionButtonSetter, displayIdSetter, eventInjector)
             .also { it.selectDisplay(display) }
+    }
+
+    /** Fresh mocked display for starting a new selection epoch. */
+    private fun display(): Display = Mockito.mock(Display::class.java).also {
+        whenever(it.displayId).thenReturn(2)
+        whenever(it.getRealMetrics(any())).then { invocation ->
+            val m = invocation.getArgument<android.util.DisplayMetrics>(0)
+            m.widthPixels = 1920
+            m.heightPixels = 1080
+            Unit
+        }
     }
 
     @After
@@ -191,10 +202,147 @@ class InputManagerPointerInjectorTest {
         injector.press(1)
 
         injector.close()
-
         // Held-button cleanup is the UhidPointerInjector contract (kernel
         // device); the InputManager backend holds no virtual device, so close
         // must simply tear down selection state without emitting events.
         assertEquals(2, captured.size)
+    }
+
+    // ---- Lifecycle: no stale button state across epochs (merge-gate req 1) --
+
+    @Test
+    fun closeThenReselectStartsHoverMoveWithEmptyButtonState() {
+        val injector = newInjector()
+        injector.press(1)
+
+        injector.close()
+        injector.selectDisplay(display())
+        val move = injector.moveRelative(5, 5)
+
+        assertEquals(PointerDelivery.deliveredMovement(5, 5), move)
+        val moveEvent = captured.last()
+        assertEquals(MotionEvent.ACTION_HOVER_MOVE, moveEvent.action)
+        assertEquals(0, moveEvent.buttonState)
+    }
+
+    @Test
+    fun reselectWithoutCloseStartsCleanEpoch() {
+        val injector = newInjector()
+        injector.press(0)
+        injector.press(2)
+
+        injector.selectDisplay(display())
+
+        val move = injector.moveRelative(3, 4)
+        assertEquals(PointerDelivery.deliveredMovement(3, 4), move)
+        val moveEvent = captured.last()
+        assertEquals(MotionEvent.ACTION_HOVER_MOVE, moveEvent.action)
+        assertEquals(0, moveEvent.buttonState)
+    }
+
+    @Test
+    fun closeIsIdempotent() {
+        val injector = newInjector()
+        injector.press(1)
+
+        injector.close()
+        injector.close()
+
+        injector.selectDisplay(display())
+        assertEquals(PointerDelivery.deliveredMovement(1, 1), injector.moveRelative(1, 1))
+        assertEquals(MotionEvent.ACTION_HOVER_MOVE, captured.last().action)
+    }
+
+    // ---- Fail-closed ActionButtonSetter (merge-gate req 2) ------------------
+
+    private fun newInjectorWith(
+        actionButtonSetter: ActionButtonSetter,
+        injectCalls: MutableList<MotionEvent>,
+    ): InputManagerPointerInjector {
+        captured.clear()
+        staticMock = Mockito.mockStatic(
+            MotionEvent::class.java,
+            Mockito.withSettings().defaultAnswer { invocation ->
+                val snapshot = Injected(
+                    action = invocation.getArgument<Int>(2),
+                    buttonState = invocation.getArgument<Int>(7),
+                    actionButton = 0,
+                )
+                captured += snapshot
+                val event = Mockito.mock(MotionEvent::class.java)
+                whenever(event.action).thenReturn(snapshot.action)
+                whenever(event.buttonState).thenAnswer { snapshot.buttonState }
+                whenever(event.actionButton).thenAnswer { snapshot.actionButton }
+                event
+            },
+        )
+        val context = Mockito.mock(Context::class.java)
+        whenever(context.getSystemService(Context.INPUT_SERVICE))
+            .thenReturn(Mockito.mock(InputManager::class.java))
+        val eventInjector = MotionEventInjector { event ->
+            injectCalls += event
+            true
+        }
+        return InputManagerPointerInjector(
+            log,
+            context,
+            actionButtonSetter,
+            DisplayIdSetter { _, _ -> true },
+            eventInjector,
+        ).also { it.selectDisplay(display()) }
+    }
+
+    @Test
+    fun unavailableActionButtonSetterRejectsSecondaryAndTertiary() {
+        val injectCalls = mutableListOf<MotionEvent>()
+        val failing = ActionButtonSetter { _, _ -> false }
+        val injector = newInjectorWith(failing, injectCalls)
+
+        assertEquals(PointerDelivery.FAILED, injector.button(1, true))
+        assertEquals(PointerDelivery.FAILED, injector.button(2, true))
+
+        // Fail closed: the malformed press/release must never reach injection.
+        assertTrue(injectCalls.isEmpty())
+    }
+
+    @Test
+    fun throwingActionButtonSetterRejectsSecondaryAndTertiary() {
+        val injectCalls = mutableListOf<MotionEvent>()
+        val throwing = ActionButtonSetter { _, _ -> throw IllegalStateException("hidden API broke") }
+        val injector = newInjectorWith(throwing, injectCalls)
+
+        assertEquals(PointerDelivery.FAILED, injector.button(1, true))
+        assertEquals(PointerDelivery.FAILED, injector.button(2, false))
+        assertTrue(injectCalls.isEmpty())
+    }
+
+    @Test
+    fun primaryLeftClickIgnoresActionButtonSetterAvailability() {
+        val injectCalls = mutableListOf<MotionEvent>()
+        val failing = ActionButtonSetter { _, _ -> false }
+        val injector = newInjectorWith(failing, injectCalls)
+
+        // ACTION_DOWN/UP never needs setActionButton; left clicks keep working.
+        assertEquals(PointerDelivery.DELIVERED, injector.button(0, true))
+        assertEquals(PointerDelivery.DELIVERED, injector.button(0, false))
+        assertEquals(2, injectCalls.size)
+        assertEquals(MotionEvent.ACTION_DOWN, captured[0].action)
+        assertEquals(MotionEvent.ACTION_UP, captured[1].action)
+    }
+
+    @Test
+    fun failedActionButtonApplicationDoesNotCommitButtonMask() {
+        val injectCalls = mutableListOf<MotionEvent>()
+        val failing = ActionButtonSetter { _, _ -> false }
+        val injector = newInjectorWith(failing, injectCalls)
+
+        injector.button(1, true) // rejected: mask must stay empty
+
+        // A later release observes the unchanged (empty) mask.
+        assertEquals(PointerDelivery.FAILED, injector.button(1, false))
+        assertTrue(injectCalls.isEmpty())
+        // And a successful left click still carries an empty mask.
+        assertEquals(PointerDelivery.DELIVERED, injector.button(0, true))
+        assertEquals(MotionEvent.BUTTON_PRIMARY, captured.last().buttonState)
     }
 }

@@ -100,12 +100,15 @@ fun interface DisplayIdSetter {
 /**
  * Applies [MotionEvent.setActionButton] (@hide, runtime API 23+) so
  * press/release events carry the button that changed; Samsung's DeX pipeline
- * rejects them otherwise (issue #57). Production resolves the setter
- * reflectively once; when the hidden API is absent the setter is a no-op and
- * events keep the historical behavior. Injectable for host-JVM unit tests.
+ * rejects them otherwise (issue #57). Reports success explicitly: when the
+ * hidden API is unavailable or the invocation fails, the caller must refuse
+ * to inject a press/release event whose actionButton disagrees with its
+ * buttonState — that malformed event is exactly what the device rejected.
+ * Injectable for host-JVM unit tests.
  */
 fun interface ActionButtonSetter {
-    fun set(event: MotionEvent, button: Int)
+    /** Returns false when actionButton could not be applied. */
+    fun set(event: MotionEvent, button: Int): Boolean
 
     companion object {
         fun reflection(): ActionButtonSetter {
@@ -117,8 +120,9 @@ fun interface ActionButtonSetter {
             return ActionButtonSetter { event, button ->
                 try {
                     method?.invoke(event, button)
+                    method != null
                 } catch (_: Throwable) {
-                    // Never let metadata application break injection.
+                    false
                 }
             }
         }
@@ -196,12 +200,20 @@ class InputManagerPointerInjector(
     // Current pressed-button mask (MotionEvent.BUTTON_*), scrcpy-style
     private var buttons: Int = 0
 
+    /**
+     * Starts a new selection epoch. Invariant: every successful
+     * [selectDisplay] begins with no buttons logically held by this injector
+     * — the instance is long-lived under Main/PointerDispatcher, and a stale
+     * mask would emit ACTION_MOVE (instead of ACTION_HOVER_MOVE) with stale
+     * buttonState on the first move of the new epoch.
+     */
     override fun selectDisplay(display: Display): Boolean {
         if (displayIdSetter == DisplayIdSetter.UNAVAILABLE) {
             log.error("InputManagerPointerInjector", "explicit display routing API unavailable")
             initialized = false
             return false
         }
+        buttons = 0
         selectedDisplayId = display.displayId
         selectedDisplay = display
         initialized = true
@@ -287,15 +299,37 @@ class InputManagerPointerInjector(
         // actionButton; MotionEvent.obtain leaves it 0 (= BUTTON_PRIMARY),
         // producing an event whose action says "secondary/tertiary changed"
         // while its metadata claims the primary button did it. Samsung's DeX
-        // input pipeline rejects that inconsistent event outright
-        // (injectInputEvent returned false), so right/middle clicks never
-        // delivered even though moves and left clicks worked.
-        var actionButton = 0
-        if (action == MotionEvent.ACTION_BUTTON_PRESS || action == MotionEvent.ACTION_BUTTON_RELEASE) {
-            actionButton = btn
-        }
+        // input pipeline rejects that inconsistent event outright, so a
+        // press/release whose actionButton cannot be applied must fail
+        // closed: injecting it anyway would reproduce the exact device
+        // defect. The tracked mask is only committed on full success.
+        val needsActionButton =
+            action == MotionEvent.ACTION_BUTTON_PRESS ||
+                action == MotionEvent.ACTION_BUTTON_RELEASE
         val newButtons = if (down) buttons or btn else buttons and btn.inv()
-        val event = buildEvent(action, newButtons, actionButton = actionButton)
+        val event = buildEvent(
+            action,
+            newButtons,
+            actionButton = if (needsActionButton) btn else 0,
+        )
+        val applied = if (needsActionButton) {
+            try {
+                actionButtonSetter.set(event, btn)
+            } catch (_: Throwable) {
+                false
+            }
+        } else {
+            true
+        }
+        if (!applied) {
+            event.recycle()
+            log.warn(
+                "InputManagerPointerInjector",
+                "actionButton metadata unavailable; rejecting secondary/tertiary " +
+                    "${if (down) "press" else "release"} to avoid a malformed event",
+            )
+            return PointerDelivery.FAILED
+        }
         if (!setDisplayId(event)) {
             event.recycle()
             return PointerDelivery.FAILED
@@ -391,13 +425,6 @@ class InputManagerPointerInjector(
             InputDevice.SOURCE_MOUSE,
             0,
         )
-        // Press/release events must carry the matching actionButton: Samsung's
-        // DeX pipeline rejects ACTION_BUTTON_PRESS/RELEASE whose actionButton
-        // does not agree with buttonState. The hidden-API adapter is a no-op
-        // when setActionButton is unavailable (conservative degradation).
-        if (actionButton != 0) {
-            actionButtonSetter.set(event, actionButton)
-        }
         return event
     }
 
@@ -424,9 +451,14 @@ class InputManagerPointerInjector(
     }
 
     override fun close() {
+        // InputManager owns no virtual HID device, so teardown is a local
+        // state reset; no synthetic release events are required. Resetting
+        // the mask here guarantees a reused instance never resurrects held
+        // buttons even if callers skip selectDisplay.
         initialized = false
         selectedDisplayId = -1
         selectedDisplay = null
+        buttons = 0
     }
 }
 
