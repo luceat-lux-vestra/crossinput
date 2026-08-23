@@ -183,6 +183,11 @@ case_s() {
     else
         bad "S: cleanup does not discard unpublished evidence"
     fi
+    if grep -q 'sanitize_all_evidence' "$drv"; then
+        bad "S: removed legacy sanitize_all_evidence call remains in driver"
+    else
+        ok "S: no stale legacy sanitizer call in completion path"
+    fi
 }
 
 case_a
