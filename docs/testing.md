@@ -50,7 +50,7 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
 5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; the macOS selection controller publishes the target only after this response.
-6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper must select an explicit-display backend for the selected target and return `POINTER_RESULT` with status/accepted movement, without logging payloads. In normal `auto` mode this is InputManager; UHID is system-routed and must not be reported as a successful selected-target backend.
+6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper returns `POINTER_RESULT` with status/accepted movement, without logging payloads. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the dispatcher degrades to InputManager until the next `SELECT_DISPLAY`.
 7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
 9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy pointer and keyboard UHID devices and exit cleanly (B-07).
@@ -58,8 +58,25 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 For deterministic pointer backend runs, start the helper with
 `POINTER_BACKEND=input-manager scripts/deploy-helper.sh start`; use the
 discovered display ID from `dumpsys display` when issuing `select` or `pointer`.
-`POINTER_BACKEND=uhid` is expected to reject selected-display routing rather
-than silently route to a different display.
+`POINTER_BACKEND=uhid` accepts `SELECT_DISPLAY` by activating system routing
+and logs a warning that the target is ignored; it still never claims explicit
+display routing in HELLO_ACK capabilities.
+
+Issue #57 acceptance (desktop-sink pointer routing):
+
+- After `select <desktop-id>` in auto mode, the helper log shows
+  `backend=uhid ... routing=system` and the DeX pointer sprite follows
+  `POINTER_MOVE_REL` (regression check: injected events previously left the
+  sprite frozen at the display center).
+- Four-direction scroll semantics on device, both backends
+  (`POINTER_BACKEND=uhid` and `=input-manager`): CXI +vertical scrolls up,
+  -vertical down, +horizontal (left contract) scrolls left, -horizontal
+  right. Horizontal was previously inverted on the InputManager path.
+- Send a move immediately after `select` (UHID create race): the first
+  reports must reach the desktop.
+- Mid-session UHID failure: held buttons are released best-effort before the
+  virtual device closes and subsequent input continues on InputManager until
+  the next `SELECT_DISPLAY`.
 
 ### Remote physical-device verification
 
@@ -81,10 +98,15 @@ script never mutates history):
 cd <crossinput-repo>
 git fetch --prune origin
 git switch fix/57-uhid-desktop-pointer-routing
-git reset --hard 2efdffa79960dd3d8e4c1e65b63e947784cfcd50
-./scripts/verify-device-issue57.sh \
-  2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+git pull --ff-only
+REV="$(git rev-parse HEAD)"
+./scripts/verify-device-issue57.sh "$REV" --with-failover
 ```
+
+The driver verifies the requested revision equals the checked-out HEAD
+(exact-HEAD invariant) and records the tested SHA in the evidence, so this
+procedure stays valid as the branch advances. Never `reset --hard` to a
+historical SHA to "re-verify" — that reproduces known-broken revisions.
 
 Add `--with-failover` for the deterministic mid-session UHID→InputManager
 scenario (needs the test-only `--fail-uhid-report=N` helper hook, which fails

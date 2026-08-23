@@ -38,12 +38,23 @@ enum class PointerBackendMode(val token: String) {
  * Owns pointer backend selection and failover inside the Android helper.
  * macOS only sends semantic CXI v1 pointer events and never selects UHID
  * descriptors or report formats.
+ *
+ * AUTO prefers the system-routed UHID mouse for desktop sink targets so the
+ * visible pointer sprite follows (injected InputManager events bypass
+ * InputReader and never move it), and uses InputManager everywhere else.
+ * Runtime failover to InputManager is sticky until the next SELECT_DISPLAY.
  */
 class PointerDispatcher(
     private val log: Logger,
     private val uhid: UhidPointerInjector,
     private val inputManager: InputManagerPointerInjector,
     private val mode: PointerBackendMode = PointerBackendMode.AUTO,
+    /**
+     * Conservative heuristic for whether the target display is a desktop
+     * system sink where the system-routed UHID mouse reaches the visible
+     * pointer sprite. Must never throw; failures are treated as false.
+     */
+    private val isSystemRouteCandidate: (Display) -> Boolean = SystemRoutePolicy::isDesktopSink,
 ) : PointerInjector {
     override val supportsExplicitDisplayRouting: Boolean
         get() = when (mode) {
@@ -59,26 +70,41 @@ class PointerDispatcher(
     @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
-        val selected = when (mode) {
-            PointerBackendMode.UHID -> if (uhid.routing == PointerRouting.EXPLICIT_DISPLAY && uhid.create()) uhid else null
-            PointerBackendMode.INPUT_MANAGER -> inputManager
-            // UHID cannot carry a selected display ID. For a target-selection
-            // request, prefer only a backend that can make that routing
-            // explicit; otherwise use InputManager directly.
-            PointerBackendMode.AUTO -> if (uhid.routing == PointerRouting.EXPLICIT_DISPLAY && uhid.create()) uhid else null
-        }
-        if (selected != null && selected.selectDisplay(display)) {
-            active = selected
-            log.info(TAG, "pointer backend selected backend=${backendName(selected)} mode=${mode.token}")
-            return true
+        if (mode == PointerBackendMode.UHID) {
+            // Forced UHID deliberately trades away explicit target routing.
+            // Warn loudly and drive the system-routed device anyway instead of
+            // failing; UhidPointerInjector.selectDisplay keeps its honest
+            // target-specific semantics untouched.
+            log.warn(TAG, "forced UHID ignores target ${display.displayId}; using system routing")
+            return if (uhid.selectSystemRoute()) {
+                active = uhid
+                log.info(TAG, "pointer backend selected backend=uhid mode=${mode.token}")
+                true
+            } else {
+                active = null
+                log.error(TAG, "UHID pointer unavailable in forced mode")
+                false
+            }
         }
 
-        if (mode == PointerBackendMode.UHID) {
-            active = null
-            log.error(TAG, "UHID cannot guarantee explicit target routing in forced mode")
-            return false
+        // Desktop sink candidates route system-level mice through the native
+        // InputReader pipeline (the visible pointer sprite follows the UHID
+        // device), so prefer UHID there. FLAG_DESKTOP is a heuristic, not a
+        // guarantee; every other target keeps explicit InputManager targeting.
+        if (mode == PointerBackendMode.AUTO &&
+            isSystemRouteCandidate(display) &&
+            uhid.selectSystemRoute()
+        ) {
+            active = uhid
+            log.info(
+                TAG,
+                "pointer backend selected backend=uhid mode=${mode.token} " +
+                    "target=${display.displayId} routing=system",
+            )
+            return true
         }
-        if (selected !== inputManager) uhid.close()
+        if (mode == PointerBackendMode.AUTO) uhid.close()
+
         if (inputManager.routing != PointerRouting.EXPLICIT_DISPLAY || !inputManager.selectDisplay(display)) {
             active = null
             log.error(TAG, "InputManager pointer backend unavailable")
@@ -145,11 +171,6 @@ class PointerDispatcher(
             active = null
             log.error(TAG, "pointer backend failover unavailable")
         }
-    }
-
-    private fun backendName(injector: PointerInjector): String = when (injector) {
-        uhid -> "uhid"
-        else -> "input-manager"
     }
 
     companion object {

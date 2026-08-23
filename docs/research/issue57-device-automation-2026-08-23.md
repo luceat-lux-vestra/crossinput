@@ -3,7 +3,9 @@
 Date: 2026-08-23 · Device: SM-G977N (Android 12 / API 31, wireless ADB) · DeX:
 active as Samsung's **virtual Desktop display** (id 2,
 `virtual:android,1000,Desktop,0`, 1920x1080) while the HDMI sink reports OFF
-(DeX-for-PC style session). Target revision: PR #59 HEAD `2efdffa79960dd3d8e4c1e65b63e947784cfcd50`.
+(DeX-for-PC style session). Target revision: PR #59 HEAD
+`2efdffa79960dd3d8e4c1e65b63e947784cfcd50` (historical: that revision carried
+both device defects documented below; fixed later on the branch).
 
 Tooling delivered under issue #60: `scripts/verify-device-issue57.sh`
 (one-shot SSH driver), `scripts/check-log-guard.sh` (CI false-green fix), and

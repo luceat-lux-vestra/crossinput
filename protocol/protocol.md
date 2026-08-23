@@ -45,7 +45,7 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x0008 | SHUTDOWN | (none) |
 | 0x0009 | POINTER_MOVE_REL | dx i32 + dy i32 (relative pointer delta, target display pixels) |
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
-| 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up, positive horizontal = left, Android AXIS_* convention) |
+| 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up; positive horizontal = left — mirrors the macOS scroll axes; Android backends convert to their native conventions: AXIS_HSCROLL positive is right, so the InputManager backend negates horizontal and the UHID backend inverts it into the AC Pan field) |
 | 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (Android KeyEvent semantics, see below) |
 
 ### Android → Mac
@@ -74,16 +74,22 @@ the current semantic pointer path. The current helper advertises:
 | Bit | Name | Meaning |
 |---:|---|---|
 | 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
-| 1 | `explicitPointerRouting` | target selection is enforced by an explicit-display backend |
+| 1 | `explicitPointerRouting` | the helper can serve pointer targets through an explicit-display-routing backend when required (desktop sinks may instead be served by the system-routed backend; see "Application path") |
 
 ## Application path and v1 compatibility
 
 The normal Ampersand application path uses the semantic `POINTER_*` messages
 after `SELECT_DISPLAY`. The Android helper's `PointerDispatcher` owns backend
-selection. UHID is system-routed and cannot claim a selected display; the
-targeted application path therefore requires the InputManager backend, which
-sets the event display ID explicitly. macOS does not construct a descriptor or
-report.
+selection. For desktop sink targets (hidden `DisplayInfo.FLAG_DESKTOP`, e.g.
+Samsung DeX), AUTO prefers the system-routed UHID mouse: its reports flow
+through InputReader, so the visible pointer sprite follows the virtual
+device — injected InputManager events bypass InputReader and never move it.
+Every other target uses the InputManager backend, which sets the event
+display ID explicitly. If the UHID device cannot be created or a report write
+fails mid-session, the dispatcher degrades to InputManager until the next
+`SELECT_DISPLAY`. macOS does not construct a descriptor or report; the
+semantic UHID descriptor (buttons/X/Y/wheel/AC Pan) lives in the helper and
+is covered by byte-exact unit tests.
 
 `CREATE_HID_DEVICE`, `HID_REPORT`, and `DESTROY_HID_DEVICE` remain implemented
 by the helper as a CXI v1 compatibility path for existing clients and fixtures.
@@ -185,8 +191,10 @@ LIST_DISPLAYS (req 2)            │
 SELECT_DISPLAY (req 3)           │   (routes subsequent semantic POINTER_*
                                  │    messages to the selected display)
                                  ├─► DISPLAY_CHANGED (req 3)
-POINTER_MOVE_REL / BUTTON /      │   (helper enforces explicit target
-SCROLL (req 4..n)                │    routing; UHID is system-routed)
+POINTER_MOVE_REL / BUTTON /      │   (helper picks the backend per target:
+SCROLL (req 4..n)                │    desktop sinks use the system-routed
+                                 │    UHID mouse; others use explicit
+                                 │    InputManager display targeting)
                                  ├─► POINTER_RESULT (same req; accepted delta)
 PING (req m)                     │
                                  ├─► PONG (req m)
