@@ -1,2 +1,2 @@
 List of devices attached
-adb-R3CM70F42SH-J81yRC._adb-tls-connect._tcp device product:beyondxks model:SM_G977N device:beyondx transport_id:74
+<redacted-adb-serial> device product:beyondxks model:SM_G977N device:beyondx transport_id:74

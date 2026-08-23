@@ -182,6 +182,10 @@ cleanup() {
             "pkill -f 'crossinput-[h]elper.apk' 2>/dev/null; pkill -f 'cxi-[h]elper-stdin' 2>/dev/null; rm -f /data/local/tmp/cxi-helper-stdin /data/local/tmp/cxi-helper-stdout.bin /data/local/tmp/cxi-helper.log" \
             >/dev/null 2>&1 || true
     fi
+    # Aborted runs must not leave raw identifiers on disk either.
+    if declare -F sanitize_all_evidence >/dev/null 2>&1 && [ -n "${EVIDENCE:-}" ]; then
+        sanitize_all_evidence || true
+    fi
     rm -rf "$TMP_LOCAL"
     exit "$rc"
 }
@@ -442,12 +446,21 @@ if [ -z "$DEVICE" ]; then
     exit "$EXIT_USAGE"
 fi
 export DEVICE
+IDENT_DEVICE="$DEVICE"
 
 MODEL="$(adb -s "$DEVICE" shell getprop ro.product.model | tr -d '\r')"
 RELEASE="$(adb -s "$DEVICE" shell getprop ro.build.version.release | tr -d '\r')"
 SDK="$(adb -s "$DEVICE" shell getprop ro.build.version.sdk | tr -d '\r')"
+if [ -n "${ANDROID_SERIAL:-}" ]; then
+    DEVICE_SELECTOR="env-android-serial"
+elif [ "$(grep -c . <<<"$SERIALS" || true)" -eq 1 ]; then
+    DEVICE_SELECTOR="single-adb-device"
+else
+    DEVICE_SELECTOR="model-match-SM-G977N"
+fi
 {
-    echo "serial=$DEVICE"
+    echo "serial=<redacted-adb-serial>"
+    echo "device_selector=$DEVICE_SELECTOR"
     echo "model=$MODEL"
     echo "android_release=$RELEASE"
     echo "sdk=$SDK"
@@ -458,6 +471,67 @@ SDK="$(adb -s "$DEVICE" shell getprop ro.build.version.sdk | tr -d '\r')"
         echo "sdk_expectation=MISMATCH (expected API 31 lab rig; continuing, non-gating)"
     fi
 } >>"$(ev metadata.txt)"
+
+# ---- evidence redaction (fail-closed) ---------------------------------------
+# Raw host/device identifiers (adb serial, home paths, username) are kept in
+# process variables for the live session but must never persist into the
+# git-bound evidence directory. Every evidence file passes through
+# sanitize_file(); a residual identifier aborts the run instead of committing.
+# Fixed slots keep the value->marker mapping stable even when some values
+# (e.g. ANDROID_SERIAL) are unset.
+IDENT_USER="$(id -un)"
+IDENT_HOME="${HOME:-}"
+IDENT_ANDROID_SERIAL="${ANDROID_SERIAL:-}"
+IDENT_DEVICE="" # filled once the target device is selected
+
+sanitize_file() { # sanitize_file <path>
+    local f="$1" tmp val bad=0
+    [ -f "$f" ] || return 0
+    tmp="$(mktemp "$TMP_LOCAL/sanitize.XXXXXX")"
+    python3 - "$f" "$tmp" \
+        "$IDENT_USER" "$IDENT_HOME" "$IDENT_ANDROID_SERIAL" "$IDENT_DEVICE" <<'PY'
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+user, home, aserial, device = sys.argv[3:7]
+data = open(src, "rb").read()
+# Most-specific first: replacing the bare username before $HOME would
+# rewrite /Users/<name> into /Users/<redacted-user> and defeat the home-path
+# match, leaving a host path fragment behind.
+for value, marker in (
+    (home, b"<redacted-home-path>"),
+    (aserial, b"<redacted-adb-serial>"),
+    (device, b"<redacted-adb-serial>"),
+    (user, b"<redacted-user>"),
+):
+    if value:
+        data = data.replace(value.encode("utf-8", "surrogateescape"), marker)
+open(dst, "wb").write(data)
+PY
+    for val in "$IDENT_USER" "$IDENT_HOME" "$IDENT_ANDROID_SERIAL" "$IDENT_DEVICE"; do
+        [ -n "$val" ] || continue
+        if grep -Fq -- "$val" "$tmp"; then
+            echo "refusing to persist '$val' in $f (fail-closed redaction)" >&2
+            bad=1
+        fi
+    done
+    if grep -Eq '/(Users|home)/' "$tmp"; then
+        echo "refusing to persist a host user path in $f (fail-closed redaction)" >&2
+        bad=1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        rm -f "$tmp"
+        exit "$EXIT_USAGE"
+    fi
+    mv "$tmp" "$f"
+}
+
+sanitize_all_evidence() {
+    [ -d "$EVIDENCE" ] || return 0
+    find "$EVIDENCE" -type f | while IFS= read -r f; do
+        sanitize_file "$f"
+    done
+}
 
 adb -s "$DEVICE" exec-out dumpsys display >"$(ev dumpsys-display.txt)"
 
@@ -471,14 +545,30 @@ if ! { [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 
         fi
     done
 fi
-echo "java_home=${JAVA_HOME:-default}" >>"$(ev metadata.txt)"
+# Record only version/vendor of the selected JVM - absolute toolchain paths
+# are host-identifying and never persist to evidence.
+JAVA_RUNTIME_LINE="$({ [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version || java -version; } 2>&1 | head -1)"
+JAVA_VERSION="$(printf '%s' "$JAVA_RUNTIME_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+case "$JAVA_RUNTIME_LINE" in
+    *Temurin*) JAVA_VENDOR=temurin ;;
+    *Corretto* | *amzn*) JAVA_VENDOR=corretto ;;
+    *Zulu*) JAVA_VENDOR=zulu ;;
+    *GraalVM*) JAVA_VENDOR=graalvm ;;
+    *) JAVA_VENDOR=unknown ;;
+esac
+{
+    echo "java_version=${JAVA_VERSION:-unknown}"
+    echo "java_vendor=$JAVA_VENDOR"
+} >>"$(ev metadata.txt)"
+
 
 finish_summary() {
+    sanitize_all_evidence
     {
         echo "ISSUE57_DEVICE_VERIFY"
         echo
         echo "revision: $REQUESTED_SHA"
-        echo "device: $MODEL ($DEVICE)"
+        echo "device: $MODEL (selector=$DEVICE_SELECTOR, serial=<redacted-adb-serial>)"
         echo "dex_display_id: ${DEX_ID:-unknown}"
         echo
         for key in "${RESULTS_ORDER[@]}"; do
@@ -492,7 +582,7 @@ finish_summary() {
         echo "# Issue #57 device verification - ${TS}-${SHORT_SHA}"
         echo
         echo "- revision: \`$REQUESTED_SHA\` (requested: \`$REV\`, HEAD at start: \`$HEAD_SHA\`)"
-        echo "- device: $MODEL serial=$DEVICE Android $RELEASE (API $SDK)"
+        echo "- device: $MODEL selector=$DEVICE_SELECTOR Android $RELEASE (API $SDK); raw adb serial redacted"
         echo "- dex display id: ${DEX_ID:-unknown}"
         echo "- started (UTC): $TS"
         echo "- overall: **$OVERALL**"

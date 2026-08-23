@@ -1,7 +1,7 @@
 # Issue #57 device verification - 20260823T150545Z-2efdffa
 
 - revision: `2efdffa79960dd3d8e4c1e65b63e947784cfcd50` (requested: `2efdffa79960dd3d8e4c1e65b63e947784cfcd50`, HEAD at start: `2efdffa79960dd3d8e4c1e65b63e947784cfcd50`)
-- device: SM-G977N serial=adb-R3CM70F42SH-J81yRC._adb-tls-connect._tcp Android 12 (API 31)
+- device: SM-G977N selector=single-adb-device Android 12 (API 31); raw adb serial redacted
 - dex display id: 2
 - started (UTC): 20260823T150545Z
 - overall: **FAIL**

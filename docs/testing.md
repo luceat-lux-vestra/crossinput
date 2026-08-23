@@ -101,7 +101,10 @@ middle click, four-direction scroll), UHID registration via `dumpsys input` +
 time-bounded `getevent` on the Ampersand event node only, kernel-level scroll
 sign checks (REL_WHEEL/REL_HWHEEL), deterministic failover injection, clean
 shutdown, and a machine-readable summary (`result.md`). Evidence is
-metadata-only (no keystrokes, clipboard, or HID payloads).
+metadata-only (no keystrokes, clipboard, or HID payloads) and identifier-
+redacted: adb serials appear as `<redacted-adb-serial>`, host home paths and
+the username are masked, and only the JVM version/vendor is recorded — a
+fail-closed sanitizer aborts the run if any raw identifier would persist.
 
 Still requires human confirmation (marked MANUAL_REQUIRED, never collapsed
 into PASS): visible pointer motion/appearance on the DeX screen, idle-fade
