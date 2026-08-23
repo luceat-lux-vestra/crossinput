@@ -15,7 +15,15 @@ import java.nio.ByteOrder
  * Direct /dev/uhid access from the shell user is proven on the SM-G977N
  * (Phase 0 probe). Report payloads are never logged (AGENTS.md rule 4).
  */
-class HidDeviceManager(private val log: Logger, private val context: Context) {
+class HidDeviceManager(
+    private val log: Logger,
+    private val context: Context,
+    /**
+     * Test-only fault injection (issue #60); null/disabled in production so
+     * every report write follows the normal path.
+     */
+    private val reportFault: UhidReportFault? = null,
+) {
     class HidError(val code: Int, message: String) : Exception(message)
 
     private data class Device(val id: Int, val fd: FileDescriptor, val inputDeviceId: Int? = null)
@@ -66,6 +74,10 @@ class HidDeviceManager(private val log: Logger, private val context: Context) {
             return false
         }
         return try {
+            if (reportFault?.shouldFail() == true) {
+                log.warn("HidDeviceManager", "test-only report fault injected id=$deviceId")
+                return false
+            }
             val buf = ByteBuffer.allocate(4 + 2 + report.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.putInt(UHID_INPUT2)
             buf.putShort(report.size.toShort())

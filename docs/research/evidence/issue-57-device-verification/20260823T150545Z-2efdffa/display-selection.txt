@@ -1,0 +1,44 @@
+selected_dex_display_id=2 (2|state=2|1920x1080|Desktop|virtual:android,1000,Desktop,0)
+selection_rule=DISPLAY_LIST entry with type==7, FLAG_DESKTOP(0x40), name==Desktop, or uniqueId containing ',Desktop,'; exactly one candidate required (AGENTS.md rule 3: dynamic discovery, documented rule)
+-- all desktop candidates --
+2|state=2|1920x1080|Desktop|virtual:android,1000,Desktop,0
+-- all displays --
+{
+  "displayId": 0,
+  "type": 1,
+  "flags": 131,
+  "state": 2,
+  "width": 1440,
+  "height": 3040,
+  "densityDpi": 560,
+  "rotation": 0,
+  "name": "Built-in Screen",
+  "uniqueId": "local:0",
+  "layerStack": 0
+}
+{
+  "displayId": 6,
+  "type": 2,
+  "flags": 139,
+  "state": 2,
+  "width": 1920,
+  "height": 1080,
+  "densityDpi": 213,
+  "rotation": 0,
+  "name": "HDMI Screen",
+  "uniqueId": "local:1",
+  "layerStack": 6
+}
+{
+  "displayId": 2,
+  "type": 5,
+  "flags": 536871298,
+  "state": 2,
+  "width": 1920,
+  "height": 1080,
+  "densityDpi": 160,
+  "rotation": 0,
+  "name": "Desktop",
+  "uniqueId": "virtual:android,1000,Desktop,0",
+  "layerStack": 2
+}
