@@ -1,0 +1,27 @@
+[Main] keyboard backend mode=auto
+[Main] pointer backend mode=auto
+[HidDeviceManager] device created id=1 name=Ampersand Keyboard inputDeviceId=118
+[UhidKeyboardInjector] UHID keyboard created id=1
+[KeyboardBackend] keyboard backend selected backend=uhid mode=auto
+[Main] handshake ok (v1 capabilities=3)
+[Main] listing 3 display(s)
+[HidDeviceManager] device created id=2 name=Ampersand Mouse inputDeviceId=119
+[UhidPointerInjector] pointer backend ready backend=uhid
+[PointerDispatcher] pointer backend selected backend=uhid mode=auto target=2 routing=system
+[Main] selected target display id=2
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
+[HidDeviceManager] report sent id=2 len=5 written=11
