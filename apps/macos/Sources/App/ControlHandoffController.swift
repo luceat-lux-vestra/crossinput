@@ -96,16 +96,23 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func apply(delivery: PointerDeliveryResult) {
         switch delivery {
-        case let .deliveredMovement(dx, dy):
+        case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
             // Confirmed acceptance proves the delivery pipeline is live; keep
             // the fail-safe watchdog from expiring during long sessions.
             capture.pokeWatchdog()
-            // The handoff position is credited only with the movement that
-            // the helper reported as accepted. Failed writes never advance
-            // this state.
-            switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
-        case let .partiallyDeliveredMovement(dx, dy):
-            switchMachine.pointerMoved(dx: CGFloat(dx), dy: CGFloat(dy))
+            // The handoff position is credited through the machine's intent
+            // rule (issue #45): return-direction movement counts even when
+            // the helper's display-bound clamp reported zero accepted
+            // movement; inward movement only counts what was accepted.
+            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
+                                       requestedDy: CGFloat(requestedDy),
+                                       deliveredDx: CGFloat(deliveredDx),
+                                       deliveredDy: CGFloat(deliveredDy))
+        case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
+            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
+                                       requestedDy: CGFloat(requestedDy),
+                                       deliveredDx: CGFloat(deliveredDx),
+                                       deliveredDy: CGFloat(deliveredDy))
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:

@@ -4,8 +4,14 @@ import InputCapture
 import Diagnostics
 
 enum PointerDeliveryResult: Sendable, Equatable {
-    case deliveredMovement(dx: Int32, dy: Int32)
-    case partiallyDeliveredMovement(dx: Int32, dy: Int32)
+    // Movement results carry both the requested batch delta (what was asked
+    // of the helper, after coalescing) and the accepted delta. The state
+    // machine needs the requested intent to credit return-direction movement
+    // that a display-bound clamp fully absorbed (issue #45).
+    case deliveredMovement(requestedDx: Int32, requestedDy: Int32,
+                           deliveredDx: Int32, deliveredDy: Int32)
+    case partiallyDeliveredMovement(requestedDx: Int32, requestedDy: Int32,
+                                    deliveredDx: Int32, deliveredDy: Int32)
     case delivered
     case cancelled
     case failed
@@ -232,13 +238,19 @@ final class InputSender: @unchecked Sendable {
                         heldButtons.remove(button)
                     }
                 }
-                return isMovement
-                    ? .deliveredMovement(dx: result.deliveredDx, dy: result.deliveredDy)
-                    : .delivered
+                guard isMovement,
+                      case let .move(requestedDx, requestedDy) = event.kind else { return .delivered }
+                return .deliveredMovement(requestedDx: requestedDx,
+                                          requestedDy: requestedDy,
+                                          deliveredDx: result.deliveredDx,
+                                          deliveredDy: result.deliveredDy)
             case .partiallyDelivered:
-                return isMovement
-                    ? .partiallyDeliveredMovement(dx: result.deliveredDx, dy: result.deliveredDy)
-                    : .failed
+                guard isMovement,
+                      case let .move(requestedDx, requestedDy) = event.kind else { return .failed }
+                return .partiallyDeliveredMovement(requestedDx: requestedDx,
+                                                   requestedDy: requestedDy,
+                                                   deliveredDx: result.deliveredDx,
+                                                   deliveredDy: result.deliveredDy)
             case .failed:
                 return .failed
             }
