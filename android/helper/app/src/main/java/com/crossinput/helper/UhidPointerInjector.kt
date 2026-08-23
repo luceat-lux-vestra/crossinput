@@ -66,7 +66,7 @@ class UhidPointerInjector(
         var deliveredDx = 0
         var deliveredDy = 0
         for (report in reports) {
-            if (!hid.sendReport(id, report(buttons, report.first, report.second, 0))) {
+            if (!hid.sendReport(id, report(buttons, report.first, report.second, 0, 0))) {
                 failed = true
                 close()
                 // Retrying a partially sent semantic move on another backend
@@ -90,7 +90,7 @@ class UhidPointerInjector(
         val id = deviceId ?: return PointerDelivery.FAILED
         val bit = buttonBit(button) ?: return PointerDelivery.FAILED
         val next = if (down) buttons or bit else buttons and bit.inv()
-        if (!hid.sendReport(id, report(next, 0, 0, 0))) {
+        if (!hid.sendReport(id, report(next, 0, 0, 0, 0))) {
             failed = true
             close()
             return PointerDelivery.FAILED
@@ -100,17 +100,22 @@ class UhidPointerInjector(
     }
 
     override fun scroll(horizontal: Float, vertical: Float): PointerDelivery {
-        // Keep the descriptor/report contract byte-for-byte compatible with
-        // the verified v1 mouse. Horizontal scrolling is not represented by
-        // that descriptor, so the dispatcher uses InputManager for it.
-        if (horizontal != 0f) return PointerDelivery.FAILED
         val id = deviceId ?: return PointerDelivery.FAILED
+        if (failed) return PointerDelivery.FAILED
         val wheel = when {
             vertical > 0f -> 1
             vertical < 0f -> 255
             else -> 0
         }
-        if (!hid.sendReport(id, report(buttons, 0, 0, wheel))) {
+        // CXI wire contract: positive horizontal = LEFT. The native chain
+        // treats AC Pan / REL_HWHEEL positive values as RIGHT, so invert here
+        // to preserve the wire semantic end-to-end.
+        val pan = when {
+            horizontal > 0f -> -1
+            horizontal < 0f -> 1
+            else -> 0
+        }
+        if (!hid.sendReport(id, report(buttons, 0, 0, wheel, pan))) {
             failed = true
             close()
             return PointerDelivery.FAILED
@@ -125,15 +130,19 @@ class UhidPointerInjector(
         }
         // Release every held button before closing the virtual device. This
         // is idempotent and is safe even after a failed report write.
-        if (buttons != 0) hid.sendReport(id, report(0, 0, 0, 0))
+        if (buttons != 0 && !hid.sendReport(id, report(0, 0, 0, 0, 0))) {
+            // Metadata only; never log report payloads (AGENTS.md rule 4).
+            log.warn(TAG, "button release report failed during device close")
+        }
         buttons = 0
         hid.destroy(id)
         deviceId = null
         selectedDisplayId = -1
     }
 
-    private fun report(buttons: Int, dx: Int, dy: Int, wheel: Int): ByteArray =
-        byteArrayOf(buttons.toByte(), dx.toByte(), dy.toByte(), wheel.toByte())
+    /** Report layout matches MOUSE_DESCRIPTOR: [buttons, dx, dy, wheel, pan]. */
+    private fun report(buttons: Int, dx: Int, dy: Int, wheel: Int, pan: Int): ByteArray =
+        byteArrayOf(buttons.toByte(), dx.toByte(), dy.toByte(), wheel.toByte(), pan.toByte())
 
     private fun buttonBit(button: Int): Int? = when (button) {
         0 -> 0x01
@@ -170,8 +179,13 @@ class UhidPointerInjector(
         private const val REPORT_LIMIT = 127L
         private const val MAX_REPORTS = 1024
 
-        // Standard v1 relative mouse descriptor: buttons, signed X/Y, wheel.
-        // Keep this identical to protocol/fixtures/create-hid.bin.
+        // Semantic relative mouse descriptor: buttons, signed X/Y, wheel,
+        // and Consumer AC Pan (usage 0x0238, which the Linux generic HID
+        // layer maps to REL_HWHEEL) so horizontal scrolling rides the same
+        // native pipeline as vertical. This intentionally diverges from the
+        // historical raw v1 fixture protocol/fixtures/create-hid.bin
+        // (4-byte reports); keep the two descriptors independent constants.
+        // Byte-exact coverage lives in UhidPointerInjectorTest.
         val MOUSE_DESCRIPTOR = byteArrayOf(
             0x05, 0x01, 0x09, 0x02, 0xA1.toByte(), 0x01, 0x09, 0x01, 0xA1.toByte(), 0x00,
             0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
@@ -180,7 +194,10 @@ class UhidPointerInjector(
             0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81.toByte(), 0x25, 0x7F,
             0x75, 0x08, 0x95.toByte(), 0x02, 0x81.toByte(), 0x06,
             0x09, 0x38, 0x15, 0x81.toByte(), 0x25, 0x7F, 0x75, 0x08,
-            0x95.toByte(), 0x01, 0x81.toByte(), 0x06, 0xC0.toByte(), 0xC0.toByte(),
+            0x95.toByte(), 0x01, 0x81.toByte(), 0x06,
+            0x05, 0x0C, 0x0A.toByte(), 0x38, 0x02,
+            0x15, 0x81.toByte(), 0x25, 0x7F, 0x75, 0x08, 0x95.toByte(), 0x01, 0x81.toByte(), 0x06,
+            0xC0.toByte(), 0xC0.toByte(),
         )
     }
 }
