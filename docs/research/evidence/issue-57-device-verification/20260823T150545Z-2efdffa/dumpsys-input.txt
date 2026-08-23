@@ -27,13 +27,13 @@ Event Hub State:
       Path: /dev/input/event15
       Enabled: true
       Descriptor: 4a27bb63420d565ad5b7af7583ee85663e9e90eb
-      Location: 
+      Location:
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0003, vendor=0x046d, product=0xc077, version=0x0000
-      KeyLayoutFile: 
-      KeyCharacterMapFile: 
-      ConfigurationFile: 
+      KeyLayoutFile:
+      KeyCharacterMapFile:
+      ConfigurationFile:
       VideoDevice: <none>
     16: PFU Limited HHKB-Hybrid
       Classes: KEYBOARD | ALPHAKEY | EXTERNAL
@@ -42,26 +42,26 @@ Event Hub State:
       Descriptor: a130d63ad7d72e7b2df938a524572bc058145a60
       Location: usb-xhci-hcd.10.auto-1.1/input1
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0003, vendor=0x04fe, product=0x0021, version=0x0111
-      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:ffefffff) (96:febeffdf) (128:180117ff) (160:ff98187a) (192:07) (224:10000) 
+      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:ffefffff) (96:febeffdf) (128:180117ff) (160:ff98187a) (192:07) (224:10000)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: com.android.inputdevices/com.android.inputdevices.InputDeviceReceiver/keyboard_layout_english_us
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     105: Ampersand Keyboard
       Classes: KEYBOARD | ALPHAKEY | EXTERNAL
       Path: /dev/input/event14
       Enabled: true
       Descriptor: 45dd693031521900f038547baa8709cf60c2611f
-      Location: 
+      Location:
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0003, vendor=0x046d, product=0xc077, version=0x0000
-      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:1cfffff) (96:e080ffdf) 
+      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:1cfffff) (96:e080ffdf)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: com.android.inputdevices/com.android.inputdevices.InputDeviceReceiver/keyboard_layout_english_us
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     6: Headset
       Classes: KEYBOARD | SWITCH
@@ -70,12 +70,12 @@ Event Hub State:
       Descriptor: e9fbccb20aa36714786b4afad1fe05a9b8b78370
       Location: madera/extcon
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0000, vendor=0x0000, product=0x0000, version=0x0000
-      KeyBitmask: (96:c0000) (192:2000000) (224:04) (576:40) 
+      KeyBitmask: (96:c0000) (192:2000000) (224:04) (576:40)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: /system/usr/keychars/Generic.kcm
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     9: gpio_keys
       Classes: KEYBOARD
@@ -84,12 +84,12 @@ Event Hub State:
       Descriptor: 485d69228e24f5e46da1598745890b214130dbc4
       Location: gpio-keys/input0
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0019, vendor=0x0001, product=0x0001, version=0x0100
-      KeyBitmask: (96:1c0000) (672:80000000) 
+      KeyBitmask: (96:1c0000) (672:80000000)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: /system/usr/keychars/Generic.kcm
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     12: sec_touchpad
       Classes: KEYBOARD | TOUCH | TOUCH_MT
@@ -98,12 +98,12 @@ Event Hub State:
       Descriptor: 6bb78087f323d376bc537679f3f2a4c034fb4659
       Location: sec_touchscreen/input1
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0018, vendor=0x0000, product=0x0000, version=0x0000
-      KeyBitmask: (128:8000) (320:e520) (448:80) (672:40000000) 
+      KeyBitmask: (128:8000) (320:e520) (448:80) (672:40000000)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: /system/usr/keychars/Generic.kcm
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     13: sec_touchscreen
       Classes: KEYBOARD | TOUCH | TOUCH_MT
@@ -112,12 +112,12 @@ Event Hub State:
       Descriptor: 0fa9d3d0d40f7f5b316320876742e00ad5eb1ba9
       Location: sec_touchscreen/input1
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0018, vendor=0x0000, product=0x0000, version=0x0000
-      KeyBitmask: (128:8000) (320:420) (448:80) (672:40000000) 
+      KeyBitmask: (128:8000) (320:420) (448:80) (672:40000000)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: /system/usr/keychars/Generic.kcm
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     14: hall
       Classes: SWITCH
@@ -126,10 +126,10 @@ Event Hub State:
       Descriptor: 2786157a00c35a5b99a9677f95108b156b14eb18
       Location: hall
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0000, vendor=0x0000, product=0x0000, version=0x0000
-      KeyLayoutFile: 
-      KeyCharacterMapFile: 
+      KeyLayoutFile:
+      KeyCharacterMapFile:
       ConfigurationFile: /system/usr/idc/hall.idc
       VideoDevice: <none>
     10: certify_hall
@@ -139,10 +139,10 @@ Event Hub State:
       Descriptor: 5a992b125b028d8005f2be21d193b9e73694f332
       Location: certify_hall
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0000, vendor=0x0000, product=0x0000, version=0x0000
-      KeyLayoutFile: 
-      KeyCharacterMapFile: 
+      KeyLayoutFile:
+      KeyCharacterMapFile:
       ConfigurationFile: /system/usr/idc/certify_hall.idc
       VideoDevice: <none>
     15: PFU Limited HHKB-Hybrid
@@ -152,33 +152,33 @@ Event Hub State:
       Descriptor: 44939bab594507d56c95018d797b6064b1feede3
       Location: usb-xhci-hcd.10.auto-1.1/input0
       ControllerNumber: 0
-      UniqueId: 
+      UniqueId:
       Identifier: bus=0x0003, vendor=0x04fe, product=0x0021, version=0x0111
-      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:ffefffff) (96:febeffdf) (128:c14057ff) (160:ff9f207a) (192:07) (224:10000) 
+      KeyBitmask: (0:fffffffe) (32:ffffffff) (64:ffefffff) (96:febeffdf) (128:c14057ff) (160:ff9f207a) (192:07) (224:10000)
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: com.android.inputdevices/com.android.inputdevices.InputDeviceReceiver/keyboard_layout_english_us
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
     -1: Virtual
       Classes: KEYBOARD | ALPHAKEY | DPAD | VIRTUAL
       Path: <virtual>
       Enabled: true
       Descriptor: a718a782d34bc767f4689c232d64d527998ea7fd
-      Location: 
+      Location:
       ControllerNumber: 0
       UniqueId: <virtual>
       Identifier: bus=0x0000, vendor=0x0000, product=0x0000, version=0x0000
-      KeyBitmask: 
+      KeyBitmask:
       KeyLayoutFile: /system/usr/keylayout/Generic.kl
       KeyCharacterMapFile: /system/usr/keychars/Virtual.kcm
-      ConfigurationFile: 
+      ConfigurationFile:
       VideoDevice: <none>
   Unattached video devices:
     <none>
 
 Input Reader State (Nums of device: 11):
   Device 100: Ampersand Mouse
-    EventHub Devices: [ 106 ] 
+    EventHub Devices: [ 106 ]
     Generation: 1184
     IsExternal: true
     AssociatedDisplayPort: <none>
@@ -211,7 +211,7 @@ Input Reader State (Nums of device: 11):
       Down: false
       DownTime: 67000433578000
   Device 99: Ampersand Keyboard
-    EventHub Devices: [ 105 ] 
+    EventHub Devices: [ 105 ]
     Generation: 1180
     IsExternal: true
     AssociatedDisplayPort: <none>
@@ -231,7 +231,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x100000
       DownTime: 0
   Device 9: PFU Limited HHKB-Hybrid
-    EventHub Devices: [ 15 ] 
+    EventHub Devices: [ 15 ]
     Generation: 1121
     IsExternal: true
     AssociatedDisplayPort: <none>
@@ -251,7 +251,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x100000
       DownTime: 2439766041000
   Device 7: Headset
-    EventHub Devices: [ 6 ] 
+    EventHub Devices: [ 6 ]
     Generation: 21
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -274,7 +274,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x0
       DownTime: 0
   Device 6: gpio_keys
-    EventHub Devices: [ 9 ] 
+    EventHub Devices: [ 9 ]
     Generation: 18
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -294,7 +294,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x0
       DownTime: 65611720197000
   Device 5: certify_hall
-    EventHub Devices: [ 10 ] 
+    EventHub Devices: [ 10 ]
     Generation: 15
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -312,7 +312,7 @@ Input Reader State (Nums of device: 11):
       ModifySwitchCodes: 0xf -> 0x13
       ModifySwitchCodes: 0x10 -> 0x15
   Device -1: Virtual
-    EventHub Devices: [ -1 ] 
+    EventHub Devices: [ -1 ]
     Generation: 3
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -332,7 +332,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x0
       DownTime: 0
   Device 3: sec_touchscreen
-    EventHub Devices: [ 13 ] 
+    EventHub Devices: [ 13 ]
     Generation: 1068
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -450,7 +450,7 @@ Input Reader State (Nums of device: 11):
       Slot  9: inUse=false, x=   0, y=   0, trackingId=   -1, touchMajor=   0, pressure=   0, toolType=0, palm=0, grip=0
       PalmBit = 0x0
   Device 10: PFU Limited HHKB-Hybrid
-    EventHub Devices: [ 16 ] 
+    EventHub Devices: [ 16 ]
     Generation: 1120
     IsExternal: true
     AssociatedDisplayPort: <none>
@@ -470,7 +470,7 @@ Input Reader State (Nums of device: 11):
       MetaState: 0x100000
       DownTime: 0
   Device 2: hall
-    EventHub Devices: [ 14 ] 
+    EventHub Devices: [ 14 ]
     Generation: 6
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -488,7 +488,7 @@ Input Reader State (Nums of device: 11):
       ModifySwitchCodes: 0xf -> 0x13
       ModifySwitchCodes: 0x10 -> 0x15
   Device 4: sec_touchpad
-    EventHub Devices: [ 12 ] 
+    EventHub Devices: [ 12 ]
     Generation: 1067
     IsExternal: false
     AssociatedDisplayPort: <none>
@@ -714,14 +714,14 @@ Input Dispatcher State:
       6: name='e6519a5 com.android.systemui.ImageWallpaper', id=82, displayId=0, portalToDisplayId=-1, paused=false, focusable=false, hasWallpaper=false, visible=true, alpha=1.00, flags=NOT_FOCUSABLE | NOT_TOUCHABLE | LAYOUT_IN_SCREEN | LAYOUT_NO_LIMITS | SCALED | LAYOUT_INSET_DECOR, type=2013, samsungFlags=0x00000008, frame=[0,0][0,0], globalScale=1.000000, applicationInfo.name=, applicationInfo.token=<null>, touchableRegion=[0,0][1577,3040], pTouchableRegion=<empty>, 1HXY=[0.0, 0.0, 1.000], inputFeatures=0x0, ownerPid=1411, ownerUid=10051, dispatchingTimeout=10000ms, trustedOverlay=false, hasToken=true, touchOcclusionMode=BLOCK_UNTRUSTED
         transform (ROT_0) (IDENTITY)
   Global monitors in display 2:
-    0: 'PointerEventDispatcher2 (server)', filter: 0xffff 
+    0: 'PointerEventDispatcher2 (server)', filter: 0xffff
   Global monitors in display 6:
-    0: 'PointerEventDispatcher6 (server)', filter: 0xffff 
+    0: 'PointerEventDispatcher6 (server)', filter: 0xffff
   Global monitors in display 0:
-    0: 'PointerEventDispatcher0 (server)', filter: 0xffff 
+    0: 'PointerEventDispatcher0 (server)', filter: 0xffff
   Gesture monitors in display 0:
-    0: 'PalmMotion (server)', filter: 0xffff 
-    1: 'EOHGestureManager (server)', filter: 0xffff 
+    0: 'PalmMotion (server)', filter: 0xffff
+    1: 'EOHGestureManager (server)', filter: 0xffff
   RecentQueue: length=10
     MotionEvent, age=15482ms
     MotionEvent, age=15482ms

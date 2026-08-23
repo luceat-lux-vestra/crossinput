@@ -159,7 +159,7 @@ Display Devices: size=3
 LogicalDisplayMapper:
   mSingleDisplayDemoMode=false
   mCurrentLayout=[{addr: {port=0}, dispId: 0(ON)}]
-  
+
   Logical Displays: size=3
   Display 0:
     mDisplayId=0
@@ -176,7 +176,7 @@ LogicalDisplayMapper:
     mRequestedMinimalPostProcessing=false
     mFrameRateOverrides=[]
     mPendingFrameRateOverrideUids={}
-  
+
   Display 2:
     mDisplayId=2
     mPhase=1
@@ -192,7 +192,7 @@ LogicalDisplayMapper:
     mRequestedMinimalPostProcessing=false
     mFrameRateOverrides=[]
     mPendingFrameRateOverrideUids={}
-  
+
   Display 6:
     mDisplayId=6
     mPhase=1
@@ -208,7 +208,7 @@ LogicalDisplayMapper:
     mRequestedMinimalPostProcessing=false
     mFrameRateOverrides=[]
     mPendingFrameRateOverrideUids={}
-  
+
   DeviceStateToLayoutMap:
     Registered Layouts:
     state(-1): [{addr: {port=0}, dispId: 0(ON)}]
@@ -249,8 +249,8 @@ DisplayModeDirector
     mLastSensorData: 0.0
     mTimestamp: 1970-01-01 09:00:00.000
   UdfpsObserver
-    mLocalHbmEnabled: 
-    mGlobalHbmEnabled: 
+    mLocalHbmEnabled:
+    mGlobalHbmEnabled:
   SensorObserver
     mIsProxActive=false
     mDozeStateByDisplay:
@@ -458,7 +458,7 @@ HighBrightnessModeController:
   mCurrentMin=0.0
   mCurrentMax=1.0
   mHbmMode=off
-  mHbmData=HBM{minLux: 5000.0, transition: 1.0, timeWindow: 0ms, timeMax: 0ms, timeMin: 0ms, thermalStatusLimit: 0, allowInLowPowerMode: true} 
+  mHbmData=HBM{minLux: 5000.0, transition: 1.0, timeWindow: 0ms, timeMax: 0ms, timeMin: 0ms, thermalStatusLimit: 0, allowInLowPowerMode: true}
   mAmbientLux=70.0
   mIsInAllowedAmbientRange=false
   mIsAutoBrightnessEnabled=true
@@ -775,7 +775,7 @@ PersistentDataStore
         set at: 2024-01-24 07:49:02
         set by: sbs
         BrightnessConfiguration{[(0.0, 42.13086), (1.0, 67.553314), (2.0, 90.06332), (3.0, 97.47635), (4.0, 100.26783), (5.0, 102.28434), (6.0, 104.23507), (7.0, 106.173096), (9.0, 117.21785), (10.0, 123.486), (12.0, 140.68886), (15.0, 175.14328), (18.0, 184.3423), (21.0, 185.75041), (26.0, 187.72334), (31.0, 189.36702), (37.0, 191.0373), (45.0, 192.9047), (53.0, 194.4813), (64.0, 196.31592), (77.0, 198.133), (92.0, 199.8988), (111.0, 201.77943), (133.0, 203.6082), (160.0, 205.49524), (192.0, 207.37444), (230.0, 209.25308), (276.0, 211.16747), (331.0, 213.09325), (397.0, 215.03795), (477.0, 217.0197), (572.0, 218.99854), (687.0, 221.01291), (824.0, 223.0308), (989.0, 225.075), (1187.0, 240.60854), (1424.0, 261.12958), (1709.0, 286.93024), (2051.0, 308.53503), (2461.0, 311.35895), (2953.0, 314.20898), (3544.0, 317.08798), (4253.0, 380.519)], {}, 'sbs:0, shouldCollectColorSamples = false'}
-  
+
 
  dumpSetBrightnessConfiguration_1
 
@@ -1181,7 +1181,7 @@ PersistentDataStore
    weight:  (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (14400.0), (7934.3706), (2918.6794), (74.906136), (0.0),
    timeWeights:  (4.1607), (5.5476), (6.9344997), (9.2428), (11.5511), (13.8594), (16.1677), (18.476), (19.680252), (20.393665), (21.820492), (22.846958), (27.292046), (30.365217), (35.487175), (41.121017), (40.900467), (44.580143), (58.455788), (77.95217), (131.72995), (213.53865), (282.0211), (334.40466), (397.893), (368.29437), (286.29), (211.8162), (145.6419), (65.675934), (43.051712), (52.03537), (65.06298), (62.333614), (60.66176), (47.41162), (31.320433), (14.402906), (7.8273125), (0.36175036), (0.004462791), (0.0), (0.0),
    continuityWeights:  (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0), (0.0),
-  
+
 
  dumpSetBrightnessConfiguration_2
 

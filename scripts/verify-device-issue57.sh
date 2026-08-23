@@ -1156,7 +1156,3 @@ if [ "$OVERALL" != "FAIL" ]; then
 fi
 
 finish_summary
-
-
-
-
