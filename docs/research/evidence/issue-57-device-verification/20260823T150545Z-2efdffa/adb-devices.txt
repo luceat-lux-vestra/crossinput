@@ -1,0 +1,2 @@
+List of devices attached
+<redacted-adb-serial> device product:beyondxks model:SM_G977N device:beyondx transport_id:74

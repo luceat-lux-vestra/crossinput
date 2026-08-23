@@ -49,12 +49,19 @@ object Main {
         }
         log.info("Main", "pointer backend mode=${pointerMode.token}")
 
+        // Test-only deterministic fault injection (issue #60); absent = disabled.
+        val failUhidReport = FailUhidReportArg.fromArgs(args).getOrElse {
+            log.error("Main", it.message ?: "invalid ${FailUhidReportArg.FLAG} argument")
+            System.exit(2)
+            return
+        }
+
         val context = systemContext()
         if (context == null) {
             log.error("Main", "no system context (ActivityThread unavailable); aborting")
             return
         }
-        val hid = HidDeviceManager(log, context)
+        val hid = HidDeviceManager(log, context, UhidReportFault(failUhidReport))
         val inputManagerPointer = InputManagerPointerInjector(log, context)
         val uhidPointer = UhidPointerInjector(log, hid)
         val pointer = PointerDispatcher(log, uhidPointer, inputManagerPointer, pointerMode)
@@ -146,6 +153,40 @@ class MainShutdownLifecycle(
                 }
             }
         }
+    }
+}
+
+/**
+ * Test-only fault-injection option (issue #60): fail the Nth UHID report write
+ * so the real UHID failure path (cleanup, held-button release, InputManager
+ * failover) can be exercised deterministically on a device. Absent flag means
+ * disabled; a present but invalid value is a loud failure, mirroring the
+ * backend flags.
+ */
+object FailUhidReportArg {
+    const val FLAG = "--fail-uhid-report"
+
+    fun fromArgs(args: Array<out String>): Result<Int> {
+        var i = 0
+        while (i < args.size) {
+            val arg = args[i]
+            val token = when {
+                arg.startsWith("$FLAG=") -> arg.substringAfter('=')
+                arg == FLAG -> args.getOrNull(++i)
+                    ?: return Result.failure(IllegalArgumentException("$FLAG requires a non-negative integer"))
+                else -> {
+                    i++
+                    continue
+                }
+            }
+            val n = token.toIntOrNull()
+                ?: return Result.failure(IllegalArgumentException("invalid $FLAG value: $token (expected a non-negative integer)"))
+            if (n < 0) {
+                return Result.failure(IllegalArgumentException("invalid $FLAG value: $n (expected >= 0)"))
+            }
+            return Result.success(n)
+        }
+        return Result.success(0)
     }
 }
 
