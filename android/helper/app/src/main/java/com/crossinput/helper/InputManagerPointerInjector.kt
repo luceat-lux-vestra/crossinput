@@ -242,7 +242,10 @@ class InputManagerPointerInjector(
         val coords = MotionEvent.PointerCoords().apply {
             x = currentX
             y = currentY
-            if (horizontal != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, horizontal)
+            // CXI wire contract: positive horizontal = LEFT (mirrors macOS).
+            // AXIS_HSCROLL positive means RIGHT on Android, so negate here;
+            // passing the wire value through verbatim inverted the direction.
+            if (horizontal != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, -horizontal)
             if (vertical != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vertical)
         }
         val event = buildEvent(MotionEvent.ACTION_SCROLL, buttons, coords)
