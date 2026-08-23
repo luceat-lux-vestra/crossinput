@@ -1,0 +1,17 @@
+revision_requested=34e35dba7d52dcb43b56cc8eb42f34ac9ec20df9
+revision_verified=34e35dba7d52dcb43b56cc8eb42f34ac9ec20df9
+head_at_start=34e35dba7d52dcb43b56cc8eb42f34ac9ec20df9
+branch=fix/57-uhid-desktop-pointer-routing
+working_tree_dirty=0
+started_utc=20260823T184324Z
+host=Darwin 25.5.0 arm64
+with_failover=1
+skip_video=0
+serial=<redacted-adb-serial>
+device_selector=single-adb-device
+model=SM-G977N
+android_release=12
+sdk=31
+java_version=17.0.18
+java_vendor=unknown
+failover_hook_present=1
