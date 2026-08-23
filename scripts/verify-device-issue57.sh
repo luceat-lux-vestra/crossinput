@@ -85,6 +85,13 @@ for tool in git adb python3 jq; do
     }
 done
 
+# Evidence privacy lifecycle (raw identifiers live only in process state or
+# the temporary capture zone; the git-bound evidence directory receives
+# sanitized, residual-validated files exclusively, via publish_raw_evidence).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/evidence-privacy.sh"
+PRIVACY_FAIL_CODE="$EXIT_USAGE"
+privacy_init_identifiers
+
 REQUESTED_SHA="$(git rev-parse --verify "$REV^{commit}" 2>/dev/null)" || {
     echo "cannot resolve revision: $REV" >&2
     exit "$EXIT_USAGE"
@@ -110,8 +117,14 @@ else
 fi
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
+TMP_LOCAL="$(mktemp -d /tmp/cxi-verify.XXXXXX)"
+# Git-bound destination. Nothing is ever written here directly: captures go
+# to RAW_EV and are promoted by publish_raw_evidence after sanitization.
 EVIDENCE="docs/research/evidence/issue-57-device-verification/${TS}-${SHORT_SHA}"
 mkdir -p "$EVIDENCE"
+RAW_EV="$TMP_LOCAL/raw-evidence"
+mkdir -p "$RAW_EV"
+PUBLISHED_EVIDENCE=0
 
 declare -a RESULTS_ORDER=(
     auto_uhid_selection
@@ -159,9 +172,22 @@ note() { # note <key> <text> — append evidence note for a check
     printf -v "$note_var" '%s' "${current:+$current; }$2"
 }
 
-ev() { printf '%s/%s' "$EVIDENCE" "$1"; }
+# ev <name> -> path inside the RAW capture zone; publish_raw_evidence is the
+# only writer into $EVIDENCE.
+ev() { printf '%s/%s' "$RAW_EV" "$1"; }
 
-TMP_LOCAL="$(mktemp -d /tmp/cxi-verify.XXXXXX)"
+publish_raw_evidence() {
+    [ -d "$RAW_EV" ] || return 0
+    local f rel
+    while IFS= read -r f; do
+        rel="${f#"$RAW_EV"/}"
+        publish_sanitized "$f" "$EVIDENCE/$rel"
+    done < <(find "$RAW_EV" -type f)
+    find "$RAW_EV" -depth -type d -empty -delete 2>/dev/null || true
+    PUBLISHED_EVIDENCE=1
+}
+
+
 SCRCPLY_PID=""
 GETEVENT_PID=""
 DEVICE=""
@@ -182,9 +208,12 @@ cleanup() {
             "pkill -f 'crossinput-[h]elper.apk' 2>/dev/null; pkill -f 'cxi-[h]elper-stdin' 2>/dev/null; rm -f /data/local/tmp/cxi-helper-stdin /data/local/tmp/cxi-helper-stdout.bin /data/local/tmp/cxi-helper.log" \
             >/dev/null 2>&1 || true
     fi
-    # Aborted runs must not leave raw identifiers on disk either.
-    if declare -F sanitize_all_evidence >/dev/null 2>&1 && [ -n "${EVIDENCE:-}" ]; then
-        sanitize_all_evidence || true
+    # Aborted runs must not leave raw identifiers on disk either: the raw
+    # capture zone dies unconditionally and a never-published git-bound
+    # directory is removed wholesale (sanitizer failures already exit via
+    # privacy_fail inside publish_raw_evidence; nothing is masked here).
+    if [ -n "${RAW_EV:-}" ] && [ -n "${EVIDENCE:-}" ]; then
+        discard_unpublished_evidence "$RAW_EV" "$EVIDENCE" "${PUBLISHED_EVIDENCE:-0}"
     fi
     rm -rf "$TMP_LOCAL"
     exit "$rc"
@@ -446,7 +475,7 @@ if [ -z "$DEVICE" ]; then
     exit "$EXIT_USAGE"
 fi
 export DEVICE
-IDENT_DEVICE="$DEVICE"
+privacy_bind_device "$DEVICE"
 
 MODEL="$(adb -s "$DEVICE" shell getprop ro.product.model | tr -d '\r')"
 RELEASE="$(adb -s "$DEVICE" shell getprop ro.build.version.release | tr -d '\r')"
@@ -472,67 +501,8 @@ fi
     fi
 } >>"$(ev metadata.txt)"
 
-# ---- evidence redaction (fail-closed) ---------------------------------------
-# Raw host/device identifiers (adb serial, home paths, username) are kept in
-# process variables for the live session but must never persist into the
-# git-bound evidence directory. Every evidence file passes through
-# sanitize_file(); a residual identifier aborts the run instead of committing.
-# Fixed slots keep the value->marker mapping stable even when some values
-# (e.g. ANDROID_SERIAL) are unset.
-IDENT_USER="$(id -un)"
-IDENT_HOME="${HOME:-}"
-IDENT_ANDROID_SERIAL="${ANDROID_SERIAL:-}"
-IDENT_DEVICE="" # filled once the target device is selected
-
-sanitize_file() { # sanitize_file <path>
-    local f="$1" tmp val bad=0
-    [ -f "$f" ] || return 0
-    tmp="$(mktemp "$TMP_LOCAL/sanitize.XXXXXX")"
-    python3 - "$f" "$tmp" \
-        "$IDENT_USER" "$IDENT_HOME" "$IDENT_ANDROID_SERIAL" "$IDENT_DEVICE" <<'PY'
-import sys
-
-src, dst = sys.argv[1], sys.argv[2]
-user, home, aserial, device = sys.argv[3:7]
-data = open(src, "rb").read()
-# Most-specific first: replacing the bare username before $HOME would
-# rewrite /Users/<name> into /Users/<redacted-user> and defeat the home-path
-# match, leaving a host path fragment behind.
-for value, marker in (
-    (home, b"<redacted-home-path>"),
-    (aserial, b"<redacted-adb-serial>"),
-    (device, b"<redacted-adb-serial>"),
-    (user, b"<redacted-user>"),
-):
-    if value:
-        data = data.replace(value.encode("utf-8", "surrogateescape"), marker)
-open(dst, "wb").write(data)
-PY
-    for val in "$IDENT_USER" "$IDENT_HOME" "$IDENT_ANDROID_SERIAL" "$IDENT_DEVICE"; do
-        [ -n "$val" ] || continue
-        if grep -Fq -- "$val" "$tmp"; then
-            echo "refusing to persist '$val' in $f (fail-closed redaction)" >&2
-            bad=1
-        fi
-    done
-    if grep -Eq '/(Users|home)/' "$tmp"; then
-        echo "refusing to persist a host user path in $f (fail-closed redaction)" >&2
-        bad=1
-    fi
-    if [ "$bad" -ne 0 ]; then
-        rm -f "$tmp"
-        exit "$EXIT_USAGE"
-    fi
-    mv "$tmp" "$f"
-}
-
-sanitize_all_evidence() {
-    [ -d "$EVIDENCE" ] || return 0
-    find "$EVIDENCE" -type f | while IFS= read -r f; do
-        sanitize_file "$f"
-    done
-}
-
+# Evidence redaction lives in scripts/lib/evidence-privacy.sh (sourced above):
+# identifier state, sanitize_stream, publish_sanitized, discard semantics.
 adb -s "$DEVICE" exec-out dumpsys display >"$(ev dumpsys-display.txt)"
 
 # The home Mac default JVM may be newer than this project's Kotlin compiler
@@ -597,6 +567,10 @@ finish_summary() {
         echo "screen and are never collapsed into PASS. NOT_RUN items carry the"
         echo "reason in the notes column."
     } >"$(ev result.md)"
+
+    # Single promotion gate: only sanitized, residual-validated files ever
+    # reach the committed evidence directory.
+    publish_raw_evidence
 
     case "$OVERALL" in
         PASS | AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING) exit "$EXIT_OK" ;;

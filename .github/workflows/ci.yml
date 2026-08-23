@@ -59,3 +59,5 @@ jobs:
       - name: "bash -n"
         run: |
           find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: "Evidence sanitizer regression"
+        run: bash scripts/test-verify-device-evidence-sanitizer.sh
