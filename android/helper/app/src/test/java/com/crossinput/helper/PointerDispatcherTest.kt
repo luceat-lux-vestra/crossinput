@@ -66,6 +66,34 @@ class PointerDispatcherTest {
     }
 
     @Test
+    fun autoSelectionLogLineCarriesUhidAutoAndSystemRoutingMarkers() {
+        whenever(uhid.selectSystemRoute()).thenReturn(true)
+
+        val dispatcher = auto(desktopSink = true)
+
+        assertTrue(dispatcher.selectDisplay(display))
+        // The device driver greps exactly this line for auto_uhid_selection:
+        // "backend=uhid mode=auto" plus "routing=system". Plain-argument
+        // verify keeps the asserted string literal identical to production.
+        verify(log).info(
+            "PointerDispatcher",
+            "pointer backend selected backend=uhid mode=auto " +
+                "target=${display.displayId} routing=system",
+        )
+    }
+
+    @Test
+    fun autoClosesTheUhidDeviceWhenTargetIsNotADesktopSink() {
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
+
+        val dispatcher = auto(desktopSink = false)
+
+        assertTrue(dispatcher.selectDisplay(display))
+        verify(uhid).close()
+        verify(inputManager).selectDisplay(display)
+    }
+
+    @Test
     fun forcedUhidUsesSystemRoutingAndIgnoresTargetSelection() {
         whenever(uhid.selectSystemRoute()).thenReturn(true)
 
