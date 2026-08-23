@@ -79,6 +79,15 @@ public struct StateTransition: Sendable, Equatable {
 /// boundary it entered through and keep going, so brief wobbles and orthogonal
 /// movement never trigger an accidental return.
 ///
+/// Return-direction movement is credited by *requested* intent rather than by
+/// the amount the helper reports as accepted (issue #45): a helper whose
+/// cursor rests against a display bound clamps relative movement and reports
+/// zero accepted movement for a pull-back it fully absorbed. Crediting only
+/// accepted movement would pin the virtual axis at the boundary forever while
+/// delivery acknowledgements keep resetting the fail-safe watchdog — the
+/// permanent-trap signature. The user's intent cannot be absorbed by that
+/// clamp.
+///
 /// Direction conventions (verified against the CGEvent delta conventions on
 /// device: deltaX positive = right, deltaY positive = down):
 /// - left edge:    moving left  (dx < 0) goes inside  -> delta = -dx
@@ -211,18 +220,43 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     /// Relative pointer movement while the remote target owns the pointer.
     /// Called with the movement accepted by the semantic input-delivery
-    /// boundary, never with raw deltas from a failed send.
-    ///
-    /// A zero-zero call is a complete no-op: it neither consumes the
-    /// first-movement exemption nor changes the virtual position, state, or
-    /// transition callbacks.
+    /// boundary, never with raw deltas from a failed send. Legacy spelling:
+    /// requested and delivered movement are identical.
     public func pointerMoved(dx: CGFloat, dy: CGFloat) {
+        pointerMoved(requestedDx: dx, requestedDy: dy,
+                     deliveredDx: dx, deliveredDy: dy)
+    }
+
+    /// Relative pointer movement while the remote target owns the pointer,
+    /// reported as both the requested batch delta and the delta the helper
+    /// confirmed as accepted.
+    ///
+    /// Return-direction credit uses the full *requested* intent (issue #45):
+    /// when the Android cursor is pinned at a display bound in the pull-back
+    /// direction, the helper clamps the movement and acknowledges delivery
+    /// with zero accepted movement. Intent still accumulates toward
+    /// `-returnHysteresis` and fires `boundaryCrossed`, so a blocked pull-back
+    /// can never trap the pointer on the remote target. Movement deeper into
+    /// the remote target credits only the accepted amount so pushing against
+    /// the opposite bound cannot inflate the position.
+    ///
+    /// A call with no requested and no accepted movement is a complete no-op:
+    /// it neither consumes the first-movement exemption nor changes the
+    /// virtual position, state, or transition callbacks.
+    public func pointerMoved(requestedDx: CGFloat, requestedDy: CGFloat,
+                             deliveredDx: CGFloat, deliveredDy: CGFloat) {
         run {
             guard stateStorage == .remoteActive else { return }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
-            guard dx != 0 || dy != 0 else { return }
-            let delta = Self.androidDirectedDelta(entryEdge: entryEdgeStorage, dx: dx, dy: dy)
+            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else { return }
+            let edge = entryEdgeStorage
+            let requestedDelta = Self.androidDirectedDelta(entryEdge: edge, dx: requestedDx, dy: requestedDy)
+            let deliveredDelta = Self.androidDirectedDelta(entryEdge: edge, dx: deliveredDx, dy: deliveredDy)
+            // Issue #45: return-direction intent is credited in full even when
+            // the helper's display-bound clamp absorbed all of it; inward
+            // movement only ever advances by what was accepted.
+            let delta = requestedDelta < 0 ? requestedDelta : deliveredDelta
             let first = !hasReceivedFirstMove
             hasReceivedFirstMove = true
             if first {
@@ -237,9 +271,10 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             let position = virtualAxisPosition
             if isDiagnosticsEnabled {
                 Diagnostics.log(
-                    "edge pointerMoved entry=\(entryEdgeStorage.rawValue) state=\(stateStorage.rawValue) "
-                        + "movement=received first=\(first)"
-                )
+                    "edge pointerMoved entry=\(edge.rawValue) state=\(stateStorage.rawValue) "
+                        + "movement=received first=\(first) "
+                        + "boundaryClamped=\(requestedDelta < 0 && deliveredDelta != requestedDelta)"
+                    )
             }
             // The first event after entering never returns (issue #37); leftover
             // warp/synthetic deltas must not bounce the user out of the remote target.
