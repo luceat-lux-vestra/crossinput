@@ -1,0 +1,15 @@
+revision_requested=2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+revision_verified=2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+head_at_start=2efdffa79960dd3d8e4c1e65b63e947784cfcd50
+branch=(detached:2efdffa)
+working_tree_dirty=0
+started_utc=20260823T150545Z
+host=Darwin 25.5.0 arm64
+with_failover=1
+skip_video=0
+serial=adb-R3CM70F42SH-J81yRC._adb-tls-connect._tcp
+model=SM-G977N
+android_release=12
+sdk=31
+java_home=/Users/algorist/.sdkman/candidates/java/17.0.18-amzn
+failover_hook_present=0

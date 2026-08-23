@@ -1,0 +1,18 @@
+[Main] keyboard backend mode=auto
+[Main] pointer backend mode=input-manager
+[HidDeviceManager] device created id=1 name=Ampersand Keyboard inputDeviceId=101
+[UhidKeyboardInjector] UHID keyboard created id=1
+[KeyboardBackend] keyboard backend selected backend=uhid mode=auto
+[Main] handshake ok (v1 capabilities=3)
+[Main] listing 3 display(s)
+[InputManagerPointerInjector] selected target 2 (1920x1080)
+[PointerDispatcher] pointer backend selected backend=input-manager mode=input-manager
+[Main] selected target display id=2
+[InputManagerPointerInjector] injectInputEvent returned false
+[Main] pointer button delivery status=FAILED
+[InputManagerPointerInjector] injectInputEvent returned false
+[Main] pointer button delivery status=FAILED
+[InputManagerPointerInjector] injectInputEvent returned false
+[Main] pointer button delivery status=FAILED
+[InputManagerPointerInjector] injectInputEvent returned false
+[Main] pointer button delivery status=FAILED

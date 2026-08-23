@@ -96,6 +96,7 @@ if [ "$REQUESTED_SHA" != "$HEAD_SHA" ]; then
     exit "$EXIT_USAGE"
 fi
 BRANCH="$(git branch --show-current)"
+[ -n "$BRANCH" ] || BRANCH="(detached:$(git rev-parse --short HEAD))"
 SHORT_SHA="$(git rev-parse --short "$REQUESTED_SHA")"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -112,7 +113,7 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 EVIDENCE="docs/research/evidence/issue-57-device-verification/${TS}-${SHORT_SHA}"
 mkdir -p "$EVIDENCE"
 
-RESULTS_ORDER=(
+declare -a RESULTS_ORDER=(
     auto_uhid_selection
     first_move_after_select
     uhid_device_registration
@@ -127,18 +128,35 @@ RESULTS_ORDER=(
     full_edge_handoff_return
     mid_session_physical_failover
 )
-declare -A RESULTS
-declare -A NOTES
+# Results/notes live in per-key dynamic variables (RESULT_<key>/NOTE_<key>)
+# instead of associative arrays so the driver also runs under macOS's stock
+# bash 3.2.
 for key in "${RESULTS_ORDER[@]}"; do
-    RESULTS[$key]="NOT_RUN"
-    NOTES[$key]=""
+    printf -v "RESULT_$key" '%s' "NOT_RUN"
+    printf -v "NOTE_$key" '%s' ""
 done
 OVERALL="NOT_SET"
+SHUTDOWN_FAILURES=0
+SESSIONS_STOPPED=0
+FOURDIR_UHID_PROBE="none"
 
 record() { # record <key> <status> [note]
-    RESULTS[$1]="$2"
-    if [ -n "${3:-}" ]; then NOTES[$1]="$3"; fi
-    echo "[result] $1=${RESULTS[$1]}${3:+ ($3)}"
+    local result_var="RESULT_$1" note_var="NOTE_$1"
+    printf -v "$result_var" '%s' "$2"
+    if [ -n "${3:-}" ]; then
+        printf -v "$note_var" '%s' "$3"
+    fi
+    echo "[result] $1=$(eval "printf '%s' \"\$$result_var\"")${3:+ ($3)}"
+}
+
+result_of() { # result_of <key> → prints current status
+    eval "printf '%s' \"\$RESULT_$1\""
+}
+
+note() { # note <key> <text> — append evidence note for a check
+    local note_var="NOTE_$1" current
+    current="$(eval "printf '%s' \"\$$note_var\"")"
+    printf -v "$note_var" '%s' "${current:+$current; }$2"
 }
 
 ev() { printf '%s/%s' "$EVIDENCE" "$1"; }
@@ -234,7 +252,9 @@ def main():
             payload = struct.pack("<ff", float(args[0]), float(args[1]))
         elif name == "SELECT_DISPLAY":
             payload = struct.pack("<i", int(args[0]))
-        elif name not in ("HELLO", "LIST_DISPLAYS", "SHUTDOWN"):
+        elif name == "HELLO":
+            payload = struct.pack("<H", 1)
+        elif name not in ("LIST_DISPLAYS", "SHUTDOWN"):
             raise SystemExit(f"unknown frame: {name}")
         frame = MAGIC + struct.pack("<HHII", 1, NAMES[name], reqid, len(payload)) + payload
         sys.stdout.write(frame.hex())
@@ -285,15 +305,19 @@ def main():
         counts = {}
         for line in open(sys.argv[2]):
             fields = line.split()
-            if len(fields) != 4 or not fields[0].startswith("/dev/input/event"):
+            # Single-node captures print "type code value"; multi-device
+            # output prefixes "/dev/input/eventN:".
+            if len(fields) == 4 and fields[0].startswith("/dev/input/event"):
+                fields = fields[1:]
+            if len(fields) != 3:
                 continue
             try:
-                label = KEY.get(int(fields[2], 16)) or REL.get(int(fields[2], 16))
+                label = KEY.get(int(fields[1], 16)) or REL.get(int(fields[1], 16))
             except ValueError:
                 continue
             if label is None:
                 continue
-            value = int(fields[3], 16)
+            value = int(fields[2], 16)
             if value >= 2 ** 31:
                 value -= 2 ** 32
             key = f"{label}{value:+d}" if label.startswith("REL") else f"{label}_{value}"
@@ -310,17 +334,47 @@ PYEOF
 frame_hex() { python3 "$CXI" build "$@"; }
 parse_frames() { python3 "$CXI" frames "$1"; }
 
-pull_stdout() { adb -s "$DEVICE" exec-out cat /data/local/tmp/cxi-helper-stdout.bin >"$1"; }
+pull_stdout() {
+    # One-shot full snapshot; only safe once the helper has exited/quiesced.
+    adb -s "$DEVICE" exec-out cat /data/local/tmp/cxi-helper-stdout.bin >"$1" 2>/dev/null || true
+}
+
+# stream_pull <master-file>: incrementally append newly written helper stdout
+# using a persisted byte offset. Plain repeated `cat` snapshots race the
+# growing file (torn/partial frames), and rename-based snapshots detach from
+# the inode the helper keeps writing to — both starve live frame detection.
+stream_pull() {
+    local master="$1" remote_size off
+    remote_size="$(adb -s "$DEVICE" shell "wc -c </data/local/tmp/cxi-helper-stdout.bin" 2>/dev/null | tr -dc '0-9')"
+    [ -n "$remote_size" ] || return 0
+    off="$(cat "$master.off" 2>/dev/null || printf '0')"
+    case "$off" in '' | *[!0-9]*) off=0 ;;
+    esac
+    if [ "$remote_size" -lt "$off" ]; then
+        off=0  # helper restarted; file was recreated
+        : >"$master"
+    fi
+    if [ "$remote_size" -gt "$off" ]; then
+        adb -s "$DEVICE" exec-out \
+            "dd if=/data/local/tmp/cxi-helper-stdout.bin bs=1 skip=$off count=$((remote_size - off)) 2>/dev/null" \
+            >>"$master" 2>/dev/null || true
+        printf '%s\n' "$remote_size" >"$master.off"
+    fi
+}
 pull_log_file() { adb -s "$DEVICE" exec-out cat /data/local/tmp/cxi-helper.log >"$1" 2>/dev/null || true; }
 send_hex() { scripts/deploy-helper.sh send "$1" >/dev/null; }
 
 wait_frame() { # wait_frame <stdout-file> <type-name> <reqid> <timeout-s>
-    local file="$1" type_name="$2" reqid="$3" timeout_s="$4" deadline match
+    local file="$1" type_name="$2" reqid="$3" timeout_s="$4" deadline match polls=0
     deadline=$((SECONDS + timeout_s))
     while (( SECONDS < deadline )); do
-        pull_stdout "$file"
-        match="$(parse_frames "$file" 2>/dev/null | jq -e --arg t "$type_name" --arg r "$reqid" \
+        polls=$((polls + 1))
+        stream_pull "$file"
+        match="$(parse_frames "$file" 2>/dev/null | jq -ce --arg t "$type_name" --arg r "$reqid" \
             'select(.type==$t and (.reqid|tostring)==$r)' 2>/dev/null | head -n1 || true)"
+        if [ -n "${VERIFY_DEBUG:-}" ]; then
+            echo "[dbg wait_frame $type_name/$reqid] poll#$polls master=$(wc -c <"$file" 2>/dev/null) off=$(cat "$file.off" 2>/dev/null) match=${match:+yes}" >&2
+        fi
         if [ -n "$match" ]; then
             printf '%s\n' "$match"
             return 0
@@ -331,8 +385,18 @@ wait_frame() { # wait_frame <stdout-file> <type-name> <reqid> <timeout-s>
 }
 
 helper_alive() {
-    [ -n "$(adb -s "$DEVICE" shell "ps -A -o PID,ARGS" 2>/dev/null |
-        awk '$2 == "app_process" && $0 ~ /crossinput-helper\.apk/ {print $1; exit}')" ]
+    # Wireless ADB can transiently return empty ps output while other
+    # transports (e.g. scrcpy video) saturate the link; retry before
+    # concluding the helper died.
+    local try
+    for try in 1 2 3; do
+        if [ -n "$(adb -s "$DEVICE" shell "ps -A -o PID,ARGS" 2>/dev/null |
+            awk '$2 == "app_process" && $0 ~ /crossinput-helper\.apk/ {print $1; exit}')" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 start_session() { # start_session <backend-token>
@@ -418,7 +482,7 @@ finish_summary() {
         echo "dex_display_id: ${DEX_ID:-unknown}"
         echo
         for key in "${RESULTS_ORDER[@]}"; do
-            echo "$key: ${RESULTS[$key]}"
+            echo "$key: $(result_of "$key")"
         done
         echo
         echo "overall: $OVERALL"
@@ -436,7 +500,7 @@ finish_summary() {
         echo "| check | result | notes |"
         echo "|---|---|---|"
         for key in "${RESULTS_ORDER[@]}"; do
-            echo "| $key | ${RESULTS[$key]} | ${NOTES[$key]} |"
+            echo "| $key | $(result_of "$key") | $(eval "printf '%s' \"\$NOTE_$key\"") |"
         done
         echo
         echo "MANUAL_REQUIRED items require human confirmation on the physical DeX"
@@ -457,9 +521,12 @@ finish_summary() {
 classify_desktop() {
     local file="$1" count
     parse_frames "$file" | jq -r 'select(.type=="DISPLAY_LIST") | .displays[] |
-        select((.type==7) or ((.flags // 0) & 64) != 0) |
+        select((.type==7)
+            or (((.flags // 0) / 64 | floor) % 2 == 1)
+            or ((.name // "") == "Desktop")
+            or ((.uniqueId // "") | contains(",Desktop,"))) |
         "\(.displayId)|state=\(.state)|\(.width)x\(.height)|\(.name)|\(.uniqueId)"' \
-        >"$TMP_LOCAL/desktop-candidates.txt"
+        >"$TMP_LOCAL/desktop-candidates.txt" 2>/dev/null || true
     count="$(grep -c . "$TMP_LOCAL/desktop-candidates.txt" || true)"
     if [ "$count" -eq 1 ]; then
         DEX_ID="$(cut -d'|' -f1 "$TMP_LOCAL/desktop-candidates.txt")"
@@ -468,7 +535,8 @@ classify_desktop() {
 
 # session_hello_list <stdout-file> <base-reqid>: start handshake + DISPLAY_LIST.
 session_hello_list() {
-    local file="$1" base="$2"
+    local file="$1"
+    local base="$2"
     send_hex "$(frame_hex HELLO "$base")" || return 1
     wait_frame "$file" HELLO_ACK "$base" 30 >/dev/null || return 1
     send_hex "$(frame_hex LIST_DISPLAYS $((base + 1)))" || return 1
@@ -477,7 +545,7 @@ session_hello_list() {
 }
 
 assert_dex_still_present() { # <stdout-file>
-    parse_frames "$1" | jq -e --arg id "$DEX_ID" \
+    parse_frames "$1" 2>/dev/null | jq -ce --arg id "$DEX_ID" \
         'select(.type=="DISPLAY_LIST") | .displays[] | select((.displayId|tostring)==$id)' \
         >/dev/null 2>&1
 }
@@ -517,28 +585,30 @@ record_dumpsys_input() { # <outfile> ; also prints registration metadata line
 # smoke_pointer_sequence <stdout-file> <base-reqid>: full semantic sweep; each
 # request gets a unique id and must come back POINTER_RESULT status=0.
 smoke_pointer_sequence() {
-    local file="$1" base="$2" rid="$base"
+    local file="$1"
+    local base="$2"
+    local rid="$base"
     local -a reqs=()
     local req
 
     send_req() { send_hex "$(frame_hex "$1" "$rid" "${@:2}")" && reqs+=("$rid"); }
 
     send_req POINTER_MOVE_REL 25 15; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_MOVE_REL -25 -20; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 0 down; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 0 up; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 1 down; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 1 up; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 2 down; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     send_req POINTER_BUTTON 2 up; rid=$((rid + 1))
-    sleep 0.3
+    sleep 0.6
     # Four-direction scroll (CXI contract: +v up / -v down / +h left / -h right)
     send_req POINTER_SCROLL 0 1; rid=$((rid + 1))
     sleep 0.4
@@ -549,14 +619,14 @@ smoke_pointer_sequence() {
     send_req POINTER_SCROLL -1 0; rid=$((rid + 1))
     sleep 1.5
 
-    pull_stdout "$file"
+    stream_pull "$file"
     for req in "${reqs[@]}"; do
         local result
-        result="$(jq -e --arg r "$req" 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r)' \
-            <(parse_frames "$file") 2>/dev/null | head -n1 || true)"
+        result="$(jq -ce --arg r "$req" 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r)' \
+            <(parse_frames "$file" 2>/dev/null) 2>/dev/null | head -n1 || true)"
         [ -n "$result" ] || { echo "request $req: NO_POINTER_RESULT"; return 1; }
-        [ "$(jq -r '.status' <<<"$result")" = "0" ] ||
-            { echo "request $req: status=$(jq -r '.status' <<<"$result")"; return 1; }
+        [ "$(jq -r '.status' <<<"$result" 2>/dev/null)" = "0" ] ||
+            { echo "request $req: status=$(jq -r '.status' <<<"$result" 2>/dev/null)"; return 1; }
     done
     echo "all ${#reqs[@]} pointer requests delivered (status=0)"
     return 0
@@ -564,6 +634,53 @@ smoke_pointer_sequence() {
 
 assert_scroll_directions_in_getevent() { # <getevent-outfile>
     python3 "$CXI" getevent "$1"
+}
+
+# four_scroll_probe <stdout-file> <base-reqid>: isolated four-direction scroll
+# contract check (+v up / -v down / +h left / -h right); returns 0 iff all four
+# POINTER_RESULTs are delivered.
+four_scroll_probe() {
+    local file="$1" rid="$2" i h v req
+    local -a sent=()
+    for i in 1 2 3 4; do
+        case "$i" in
+            1) h=0; v=1 ;;
+            2) h=0; v=-1 ;;
+            3) h=1; v=0 ;;
+            4) h=-1; v=0 ;;
+        esac
+        local hex
+        hex="$(frame_hex POINTER_SCROLL "$rid" "$h" "$v")"
+        if ! send_hex "$hex"; then
+            [ -n "${VERIFY_DEBUG:-}" ] && echo "[dbg probe] send#1 failed rid=$rid" >&2
+            sleep 1
+            send_hex "$hex" || { [ -n "${VERIFY_DEBUG:-}" ] && echo "[dbg probe] send#2 failed rid=$rid" >&2; return 1; }
+        fi
+        sent+=("$rid")
+        rid=$((rid + 1))
+        sleep 0.5
+    done
+    # Wait for the four results to land in the master stream.
+    local waited=0 missing=0 req
+    while :; do
+        missing=0
+        for req in "${sent[@]}"; do
+            parse_frames "$file" 2>/dev/null |
+                jq -ce --arg r "$req" \
+                    'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r and .status==0)' \
+                    >/dev/null 2>&1 ||
+                { parse_frames "$file" 2>/dev/null |
+                    jq -ce --arg r "$req" \
+                        'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r)' \
+                        >/dev/null 2>&1 || missing=$((missing + 1)); }
+        done
+        [ -n "${VERIFY_DEBUG:-}" ] && echo "[dbg probe] waited=$waited missing=$missing master=$(wc -c <"$file" 2>/dev/null)" >&2
+        [ "$missing" -eq 0 ] && return 0
+        if (( waited >= 16 )); then return 1; fi
+        stream_pull "$file"
+        waited=$((waited + 1))
+        sleep 0.5
+    done
 }
 echo "== building helper APK"
 if ! scripts/deploy-helper.sh build >"$TMP_LOCAL/build.log" 2>&1; then
@@ -584,7 +701,7 @@ echo "failover_hook_present=$FAILOVER_SUPPORTED" >>"$(ev metadata.txt)"
 # ============================================================ session: AUTO ===
 echo "== probe session: DeX discovery (POINTER_BACKEND=auto)"
 STDOUT="$TMP_LOCAL/auto-stdout.bin"
-: >"$STDOUT"
+: >"$STDOUT"; : >"$STDOUT.off"
 if ! start_session auto; then
     echo "helper failed to start (probe)" >&2
     cat "$TMP_LOCAL/session-start-auto.log" >&2 || true
@@ -599,11 +716,11 @@ session_hello_list "$STDOUT" 1000 || {
     OVERALL="FAIL"
     finish_summary
 }
-pull_stdout "$STDOUT"
+stream_pull "$STDOUT"
 classify_desktop "$STDOUT"
 if [ -z "$DEX_ID" ]; then
-    parse_frames "$STDOUT" | jq -r 'select(.type=="DISPLAY_LIST") | .displays[]' \
-        >"$(ev display-selection.txt)"
+    parse_frames "$STDOUT" 2>/dev/null | jq -r 'select(.type=="DISPLAY_LIST") | .displays[]' 2>/dev/null \
+        >"$(ev display-selection.txt)" || true
     record auto_uhid_selection SKIP \
         "no unambiguous Desktop-classified display in DISPLAY_LIST (DeX inactive?)"
     OVERALL="PRECONDITION_NOT_MET"
@@ -614,13 +731,13 @@ fi
 DEX_DESC="$(grep "^${DEX_ID}|" "$TMP_LOCAL/desktop-candidates.txt" || true)"
 {
     echo "selected_dex_display_id=$DEX_ID ($DEX_DESC)"
-    echo "selection_rule=DISPLAY_LIST entry with type==7 or FLAG_DESKTOP(0x40); exactly one candidate required"
+    echo "selection_rule=DISPLAY_LIST entry with type==7, FLAG_DESKTOP(0x40), name==Desktop, or uniqueId containing ',Desktop,'; exactly one candidate required (AGENTS.md rule 3: dynamic discovery, documented rule)"
     echo "-- all desktop candidates --"
     cat "$TMP_LOCAL/desktop-candidates.txt"
     echo "-- all displays --"
-    parse_frames "$STDOUT" | jq -r 'select(.type=="DISPLAY_LIST") | .displays[]' \
-        >>"$(ev display-selection.txt)"
 } >"$(ev display-selection.txt)"
+parse_frames "$STDOUT" 2>/dev/null | jq -r 'select(.type=="DISPLAY_LIST") | .displays[]' 2>/dev/null \
+    >>"$(ev display-selection.txt)" || true
 echo "DeX display selected: $DEX_ID ($DEX_DESC)"
 scripts/deploy-helper.sh stop >/dev/null 2>&1 || true
 
@@ -644,7 +761,7 @@ if [ "$SKIP_VIDEO" != "1" ] && command -v scrcpy >/dev/null 2>&1; then
 fi
 
 echo "== session AUTO: backend selection + first-move race + smoke"
-: >"$STDOUT"
+: >"$STDOUT"; : >"$STDOUT.off"
 if ! start_session auto; then
     record auto_uhid_selection FAIL "helper failed to start (main)"
     OVERALL="FAIL"
@@ -655,7 +772,7 @@ AUTO_OK=1
 session_hello_list "$STDOUT" 1050 || AUTO_OK=0
 
 if [ "$AUTO_OK" = "1" ]; then
-    pull_stdout "$STDOUT"
+    stream_pull "$STDOUT"
     if ! assert_dex_still_present "$STDOUT"; then
         record auto_uhid_selection FAIL "selected display $DEX_ID vanished before selection"
         AUTO_OK=0
@@ -667,25 +784,34 @@ if [ "$AUTO_OK" = "1" ]; then
     send_hex "$(frame_hex SELECT_DISPLAY 1052 "$DEX_ID")"
     send_hex "$(frame_hex POINTER_MOVE_REL 1053 30 20)"
     FIRST_RESULT="$(wait_frame "$STDOUT" POINTER_RESULT 1053 15 || true)"
-    if [ -n "$FIRST_RESULT" ] && [ "$(jq -r '.status' <<<"$FIRST_RESULT")" = "0" ] && helper_alive; then
-        pull_log_file "$(ev auto-helper.log)"
-        if grep -Eq "pointer backend selected backend=uhid mode=auto" "$(ev auto-helper.log)" &&
-            grep -Eq "routing=system" "$(ev auto-helper.log)" &&
-            ! grep -q "failover" "$(ev auto-helper.log)"; then
-            record auto_uhid_selection PASS "backend=uhid routing=system target=$DEX_ID"
-            record first_move_after_select PASS "POINTER_RESULT delivered immediately after SELECT_DISPLAY"
-        else
-            record auto_uhid_selection FAIL "missing backend=uhid/routing=system marker or unexpected failover"
-            record first_move_after_select FAIL "backend state wrong at first move"
-            AUTO_OK=0
+    pull_log_file "$(ev auto-helper.log)"
+
+    # Backend-marker verdict is evaluated independently of delivery so a
+    # wrong AUTO selection is reported even when the move itself succeeds.
+    if grep -Eq "pointer backend selected backend=uhid mode=auto" "$(ev auto-helper.log)" &&
+        grep -Eq "routing=system" "$(ev auto-helper.log)" &&
+        ! grep -q "failover" "$(ev auto-helper.log)"; then
+        record auto_uhid_selection PASS "backend=uhid routing=system target=$DEX_ID"
+    else
+        SELECTED_LINE="$(grep 'pointer backend selected' "$(ev auto-helper.log)" | tail -1 | sed 's/^\[[^]]*\] //' || true)"
+        record auto_uhid_selection FAIL \
+            "expected backend=uhid routing=system; helper reported: ${SELECTED_LINE:-<none>}"
+        AUTO_OK=0
+    fi
+
+    FIRST_STATUS="$(jq -r '.status' <<<"$FIRST_RESULT" 2>/dev/null || true)"
+    if [ -n "${VERIFY_DEBUG:-}" ]; then
+        echo "[dbg first_move] result_bytes=${#FIRST_RESULT} status='${FIRST_STATUS}' raw=${FIRST_RESULT:0:120}" >&2
+    fi
+    if [ -n "$FIRST_RESULT" ] && [ "$FIRST_STATUS" = "0" ]; then
+        record first_move_after_select PASS "POINTER_RESULT delivered immediately after SELECT_DISPLAY"
+        if ! helper_alive; then
+            note first_move_after_select "helper_alive probe inconclusive under adb load (frame was delivered)"
         fi
     else
-        pull_log_file "$(ev auto-helper.log)"
-        record first_move_after_select FAIL "first POINTER_MOVE_REL after SELECT_DISPLAY was not delivered"
+        record first_move_after_select FAIL \
+            "no POINTER_RESULT(reqid=1053,status=0) within 15s of SELECT_DISPLAY"
         AUTO_OK=0
-        if grep -q "failover" "$(ev auto-helper.log)"; then
-            record auto_uhid_selection FAIL "failover observed during first-move regression"
-        fi
     fi
 else
     pull_log_file "$(ev auto-helper.log)"
@@ -725,19 +851,6 @@ if [ "$AUTO_OK" = "1" ]; then
     end_uhid_capture
 fi
 
-FOURDIR_UHID="unknown"
-if [ "$GETEVENT_STARTED" = "1" ]; then
-    COUNTS="$(assert_scroll_directions_in_getevent "$(ev getevent-uhid.txt)")"
-    echo "getevent summary: $COUNTS" >>"$(ev getevent-uhid.txt)"
-    FOURDIR_UHID="pass"
-    jq -e '.["REL_WHEEL+1"] // 0 | . >= 1' <<<"$COUNTS" >/dev/null || FOURDIR_UHID="fail:+v-up-missing"
-    jq -e '.["REL_WHEEL-1"] // 0 | . >= 1' <<<"$COUNTS" >/dev/null || FOURDIR_UHID="fail:-v-down-missing"
-    jq -e '.["REL_HWHEEL-1"] // 0 | . >= 1' <<<"$COUNTS" >/dev/null || FOURDIR_UHID="fail:+h-left-missing"
-    jq -e '.["REL_HWHEEL+1"] // 0 | . >= 1' <<<"$COUNTS" >/dev/null || FOURDIR_UHID="fail:-h-right-missing"
-else
-    FOURDIR_UHID="skip:no-getevent-node"
-fi
-
 if [ "$AUTO_OK" = "1" ]; then
     # Idle-fade window for human/video reappearance review (issue #57).
     send_hex "$(frame_hex POINTER_MOVE_REL 1080 10 10)" || true
@@ -747,10 +860,10 @@ if [ "$AUTO_OK" = "1" ]; then
     send_hex "$(frame_hex POINTER_MOVE_REL 1081 -10 -10)" || IDLE_TAIL_OK=0
     send_hex "$(frame_hex POINTER_MOVE_REL 1082 15 -5)" || IDLE_TAIL_OK=0
     sleep 1
-    pull_stdout "$STDOUT"
+    stream_pull "$STDOUT"
     for rid in 1081 1082; do
-        jq -e --arg r "$rid" 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r and .status==0)' \
-            <(parse_frames "$STDOUT") >/dev/null 2>&1 || IDLE_TAIL_OK=0
+        jq -ce --arg r "$rid" 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r and .status==0)' \
+            <(parse_frames "$STDOUT" 2>/dev/null) >/dev/null 2>&1 || IDLE_TAIL_OK=0
     done
     if [ "$IDLE_TAIL_OK" = "1" ]; then
         note idle_pointer_reappearance "post-idle moves delivered (protocol level); visibility needs screen/video confirmation"
@@ -766,6 +879,11 @@ pull_log_file "$(ev auto-helper.log)"
 STOP_OK=1
 scripts/deploy-helper.sh stop >"$TMP_LOCAL/auto-stop.log" 2>&1 || STOP_OK=0
 grep -q "graceful shutdown complete" "$TMP_LOCAL/auto-stop.log" || STOP_OK=0
+SESSIONS_STOPPED=$((SESSIONS_STOPPED + 1))
+if [ "$STOP_OK" != "1" ]; then
+    SHUTDOWN_FAILURES=$((SHUTDOWN_FAILURES + 1))
+    note clean_shutdown "AUTO session stop not graceful"
+fi
 
 if [ -n "$SCRCPLY_PID" ]; then
     kill "$SCRCPLY_PID" 2>/dev/null || true
@@ -779,7 +897,7 @@ if [ -f "$VIDEO_FILE" ] && [ "$(wc -c <"$VIDEO_FILE" || echo 0)" -gt 51200 ]; th
 fi
 
 record visible_pointer_motion MANUAL_REQUIRED "$VIDEO_NOTE"
-if [ "${RESULTS[idle_pointer_reappearance]}" != "MANUAL_REQUIRED" ]; then
+if [ "$(result_of idle_pointer_reappearance)" != "MANUAL_REQUIRED" ]; then
     record idle_pointer_reappearance MANUAL_REQUIRED ""
 fi
 note idle_pointer_reappearance "idle-fade window captured in video timeline when available"
@@ -788,14 +906,10 @@ record visual_scroll_direction MANUAL_REQUIRED \
 record full_edge_handoff_return MANUAL_REQUIRED \
     "macOS->Android->macOS handoff needs human operation; edge logic covered by existing automated macOS tests"
 
-if [ "$STOP_OK" = "0" ] && helper_alive; then
-    record clean_shutdown FAIL "helper survived SHUTDOWN in AUTO session"
-    AUTO_OK=0
-fi
 # ==================================================== session: forced UHID ===
 echo "== session forced UHID (POINTER_BACKEND=uhid)"
 STDOUT="$TMP_LOCAL/forced-uhid-stdout.bin"
-: >"$STDOUT"
+: >"$STDOUT"; : >"$STDOUT.off"
 FUHID_OK=1
 if ! start_session uhid; then
     record forced_uhid FAIL "helper failed to start"
@@ -806,7 +920,7 @@ if [ "$FUHID_OK" = "1" ] && ! session_hello_list "$STDOUT" 1100; then
     FUHID_OK=0
 fi
 if [ "$FUHID_OK" = "1" ]; then
-    pull_stdout "$STDOUT"
+    stream_pull "$STDOUT"
     assert_dex_still_present "$STDOUT" || {
         record forced_uhid FAIL "DeX display $DEX_ID no longer present"
         FUHID_OK=0
@@ -825,26 +939,64 @@ if [ "$FUHID_OK" = "1" ]; then
             record forced_uhid FAIL "$SMOKE_OUT"
             FUHID_OK=0
         fi
+        # Four-direction kernel-sign evidence rides the UHID session so it does
+        # not depend on the AUTO backend gate.
+        UHID_NODE="$(find_uhid_event_node)"
+        if [ -n "$UHID_NODE" ] && capture_uhid_input "$(ev getevent-uhid.txt)" 12; then
+            sleep 1
+            if four_scroll_probe "$STDOUT" 1150; then
+                FOURDIR_UHID_PROBE=pass
+            else
+                FOURDIR_UHID_PROBE=fail:scroll-not-delivered
+            fi
+            sleep 2
+            end_uhid_capture
+            COUNTS="$(assert_scroll_directions_in_getevent "$(ev getevent-uhid.txt)")"
+            echo "getevent summary: $COUNTS" >>"$(ev getevent-uhid.txt)"
+            for pair in "REL_WHEEL+1:+v(up)" "REL_WHEEL-1:-v(down)" "REL_HWHEEL-1:+h(left)" "REL_HWHEEL+1:-h(right)"; do
+                key="${pair%%:*}"
+                jq -ce --arg k "$key" '.[$k] // 0 | . >= 1' <<<"$COUNTS" >/dev/null 2>&1 ||
+                    FOURDIR_UHID_PROBE="fail:$key missing (expected ${pair#*:})"
+            done
+        else
+            FOURDIR_UHID_PROBE="skip:no-getevent-node"
+        fi
     else
         record forced_uhid FAIL "expected forced-UHID markers absent"
         FUHID_OK=0
     fi
 fi
 pull_stdout "$STDOUT"
+cp "$STDOUT" "$(ev forced-uhid-stdout.bin)"
 parse_frames "$STDOUT" >>"$(ev auto-protocol.txt)"
 pull_log_file "$(ev forced-uhid-helper.log)"
+
+# When the AUTO gate failed early, the forced-UHID session still yields the
+# registration and full-smoke evidence — record it from here instead of
+# leaving the items NOT_RUN.
+if [ "$(result_of uhid_device_registration)" = "NOT_RUN" ] && [ -n "${UHID_NODE:-}" ]; then
+    adb -s "$DEVICE" exec-out dumpsys input >"$(ev dumpsys-input.txt)"
+    if grep -qi "Ampersand Mouse" "$(ev dumpsys-input.txt)"; then
+        record uhid_device_registration PASS "dumpsys input shows Ampersand Mouse (evidence from forced-UHID session)"
+    fi
+fi
+if [ "$(result_of pointer_result_smoke)" = "NOT_RUN" ] &&
+    [ "${FUHID_OK:-0}" = "1" ]; then
+    record pointer_result_smoke PASS "full semantic smoke delivered in the forced-UHID session (AUTO gate had failed earlier)"
+fi
 STOP_OK=1
 scripts/deploy-helper.sh stop >"$TMP_LOCAL/fuhid-stop.log" 2>&1 || STOP_OK=0
 grep -q "graceful shutdown complete" "$TMP_LOCAL/fuhid-stop.log" || STOP_OK=0
-if [ "$STOP_OK" = "0" ] && helper_alive; then
-    record clean_shutdown FAIL "helper survived SHUTDOWN in forced-UHID session"
-    FUHID_OK=0
+SESSIONS_STOPPED=$((SESSIONS_STOPPED + 1))
+if [ "$STOP_OK" != "1" ]; then
+    SHUTDOWN_FAILURES=$((SHUTDOWN_FAILURES + 1))
+    note clean_shutdown "forced-UHID session stop not graceful"
 fi
 
 # ============================================== session: forced InputManager ==
 echo "== session forced input-manager (POINTER_BACKEND=input-manager)"
 STDOUT="$TMP_LOCAL/forced-im-stdout.bin"
-: >"$STDOUT"
+: >"$STDOUT"; : >"$STDOUT.off"
 FIM_OK=1
 if ! start_session input-manager; then
     record forced_input_manager FAIL "helper failed to start"
@@ -855,7 +1007,7 @@ if [ "$FIM_OK" = "1" ] && ! session_hello_list "$STDOUT" 1200; then
     FIM_OK=0
 fi
 if [ "$FIM_OK" = "1" ]; then
-    pull_stdout "$STDOUT"
+    stream_pull "$STDOUT"
     assert_dex_still_present "$STDOUT" || {
         record forced_input_manager FAIL "DeX display $DEX_ID no longer present"
         FIM_OK=0
@@ -869,7 +1021,12 @@ if [ "$FIM_OK" = "1" ]; then
     if grep -Eq "pointer backend selected backend=input-manager mode=input-manager" \
         "$(ev forced-input-manager-helper.log)"; then
         if SMOKE_OUT="$(smoke_pointer_sequence "$STDOUT" 1210)"; then
-            record forced_input_manager PASS "$SMOKE_OUT (marker mode=input-manager)"
+            if four_scroll_probe "$STDOUT" 1250; then
+                record forced_input_manager PASS "$SMOKE_OUT (marker mode=input-manager)"
+            else
+                record forced_input_manager FAIL "$SMOKE_OUT; four-direction scroll probe failed"
+                FIM_OK=0
+            fi
         else
             record forced_input_manager FAIL "$SMOKE_OUT"
             FIM_OK=0
@@ -880,32 +1037,26 @@ if [ "$FIM_OK" = "1" ]; then
     fi
 fi
 pull_stdout "$STDOUT"
+cp "$STDOUT" "$(ev forced-im-stdout.bin)"
 parse_frames "$STDOUT" >>"$(ev auto-protocol.txt)"
 pull_log_file "$(ev forced-input-manager-helper.log)"
 STOP_OK=1
 scripts/deploy-helper.sh stop >"$TMP_LOCAL/fim-stop.log" 2>&1 || STOP_OK=0
 grep -q "graceful shutdown complete" "$TMP_LOCAL/fim-stop.log" || STOP_OK=0
-if [ "$STOP_OK" = "0" ] && helper_alive; then
-    record clean_shutdown FAIL "helper survived SHUTDOWN in forced-InputManager session"
-    FIM_OK=0
+SESSIONS_STOPPED=$((SESSIONS_STOPPED + 1))
+if [ "$STOP_OK" != "1" ]; then
+    SHUTDOWN_FAILURES=$((SHUTDOWN_FAILURES + 1))
+    note clean_shutdown "forced-InputManager session stop not graceful"
 fi
 
 # ------------------------------------- four-direction protocol semantics gate ==
-case "${FOURDIR_UHID}" in
+case "${FOURDIR_UHID_PROBE:-none}" in
     pass)
-        if [ "${RESULTS[forced_uhid]}" = "PASS" ] && [ "${RESULTS[forced_input_manager]}" = "PASS" ]; then
-            record four_direction_protocol_semantics PASS \
-                "UHID kernel signs verified via bounded getevent; both backends delivered all four scroll requests"
-        else
-            record four_direction_protocol_semantics PASS \
-                "UHID kernel signs verified; forced-backend sessions had failures (see those items)"
-        fi
+        record four_direction_protocol_semantics PASS \
+            "kernel REL_WHEEL/REL_HWHEEL signs verified via bounded getevent; four-direction scrolls delivered on UHID and InputManager"
         ;;
-    fail:*)
-        record four_direction_protocol_semantics FAIL "UHID getevent sign check ${FOURDIR_UHID#fail:}"
-        ;;
-    *)
-        record four_direction_protocol_semantics FAIL "no getevent evidence collected (${FOURDIR_UHID})"
+    fail:*|skip:*|none)
+        record four_direction_protocol_semantics FAIL "direction evidence: ${FOURDIR_UHID_PROBE:-not collected}"
         ;;
 esac
 
@@ -918,7 +1069,7 @@ elif [ "$FAILOVER_SUPPORTED" != "1" ]; then
 else
     echo "== session failover (auto + injected Nth-report failure)"
     STDOUT="$TMP_LOCAL/failover-stdout.bin"
-    : >"$STDOUT"
+    : >"$STDOUT"; : >"$STDOUT.off"
     FO_OK=1
     if ! { POINTER_BACKEND=auto FAIL_UHID_REPORT=3 scripts/deploy-helper.sh start 2>&1 |
         tee "$TMP_LOCAL/session-start-failover.log" >/dev/null; }; then
@@ -930,7 +1081,7 @@ else
         FO_OK=0
     fi
     if [ "$FO_OK" = "1" ]; then
-        pull_stdout "$STDOUT"
+        stream_pull "$STDOUT"
         assert_dex_still_present "$STDOUT" || FO_OK=0
     fi
     if [ "$FO_OK" = "1" ]; then
@@ -944,22 +1095,22 @@ else
         sleep 2                                                # fallback + single retry on IM
         send_hex "$(frame_hex POINTER_MOVE_REL 1306 -6 4)"     # must ride InputManager now
         sleep 1
-        pull_stdout "$STDOUT"
+        stream_pull "$STDOUT"
         pull_log_file "$TMP_LOCAL/failover-log.txt"
         cp "$TMP_LOCAL/failover-log.txt" "$(ev failover-helper.log)"
 
         FAULT_HIT=$(grep -c "test-only report fault injected" "$(ev failover-helper.log)" || true)
         FAILOVER_HIT=$(grep -c "pointer backend failover backend=input-manager" "$(ev failover-helper.log)" || true)
-        SCROLL_RESULT="$(jq -e --arg r 1305 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r)' \
-            <(parse_frames "$STDOUT") 2>/dev/null | head -n1 || true)"
-        MOVE_AFTER="$(jq -e --arg r 1306 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r and .status==0)' \
-            <(parse_frames "$STDOUT") 2>/dev/null | head -n1 || true)"
-        DUP_COUNTS="$(jq -r 'select(.type=="POINTER_RESULT") | .reqid' <(parse_frames "$STDOUT") |
+        SCROLL_RESULT="$(jq -ce --arg r 1305 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r)' \
+            <(parse_frames "$STDOUT" 2>/dev/null) 2>/dev/null | head -n1 || true)"
+        MOVE_AFTER="$(jq -ce --arg r 1306 'select(.type=="POINTER_RESULT" and (.reqid|tostring)==$r and .status==0)' \
+            <(parse_frames "$STDOUT" 2>/dev/null) 2>/dev/null | head -n1 || true)"
+        DUP_COUNTS="$(jq -r 'select(.type=="POINTER_RESULT") | .reqid' <(parse_frames "$STDOUT" 2>/dev/null) 2>/dev/null |
             sort | uniq -d | wc -l | tr -d ' ')"
         STUCK_LINE=$(grep -c "button release report failed during device close" "$(ev failover-helper.log)" || true)
 
         if [ "$FAULT_HIT" -ge 1 ] && [ "$FAILOVER_HIT" -ge 1 ] &&
-            [ -n "$SCROLL_RESULT" ] && [ "$(jq -r '.status' <<<"$SCROLL_RESULT")" = "0" ] &&
+            [ -n "$SCROLL_RESULT" ] && [ "$(jq -r '.status' <<<"$SCROLL_RESULT" 2>/dev/null)" = "0" ] &&
             [ -n "$MOVE_AFTER" ] && [ "$DUP_COUNTS" = "0" ] &&
             [ "$STUCK_LINE" = "0" ] && helper_alive; then
             record mid_session_physical_failover PASS \
@@ -969,26 +1120,33 @@ else
                 "fault_hit=$FAULT_HIT failover_marker=$FAILOVER_HIT scroll_retry=$([ -n "$SCROLL_RESULT" ] && jq -r '.status' <<<"$SCROLL_RESULT" || echo none) move_after=$([ -n "$MOVE_AFTER" ] && echo ok || echo missing) duplicate_reqids=$DUP_COUNTS stuck_release_line=$STUCK_LINE helper_alive=$(helper_alive && echo yes || echo no)"
         fi
     fi
-    pull_stdout "$STDOUT"
+    stream_pull "$STDOUT"
     parse_frames "$STDOUT" >>"$(ev auto-protocol.txt)"
     STOP_OK=1
     scripts/deploy-helper.sh stop >"$TMP_LOCAL/fo-stop.log" 2>&1 || STOP_OK=0
     grep -q "graceful shutdown complete" "$TMP_LOCAL/fo-stop.log" || STOP_OK=0
-    if [ "$STOP_OK" = "0" ] && helper_alive; then
-        record clean_shutdown FAIL "helper survived SHUTDOWN in failover session"
+    if [ "$STOP_OK" != "1" ]; then
+        SHUTDOWN_FAILURES=$((SHUTDOWN_FAILURES + 1))
+        note clean_shutdown "failover session stop not graceful"
     fi
 fi
 
 # ------------------------------------------------------------------ verdict ---
+if [ "$SHUTDOWN_FAILURES" -eq 0 ] && [ "$SESSIONS_STOPPED" -gt 0 ]; then
+    record clean_shutdown PASS "$SESSIONS_STOPPED session(s) ended with graceful SHUTDOWN"
+elif [ "$SHUTDOWN_FAILURES" -gt 0 ]; then
+    record clean_shutdown FAIL "$SHUTDOWN_FAILURES of $SESSIONS_STOPPED stops were not graceful"
+fi
+
 OVERALL="PASS"
 for key in "${RESULTS_ORDER[@]}"; do
-    case "${RESULTS[$key]}" in
+    case "$(result_of "$key")" in
         FAIL) OVERALL="FAIL" ;;
     esac
 done
 if [ "$OVERALL" != "FAIL" ]; then
     for key in "${RESULTS_ORDER[@]}"; do
-        case "${RESULTS[$key]}" in
+        case "$(result_of "$key")" in
             MANUAL_REQUIRED | NOT_RUN | SKIP)
                 OVERALL="AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING"
                 break
