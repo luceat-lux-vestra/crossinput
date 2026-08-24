@@ -3,6 +3,10 @@ import Protocol
 import InputCapture
 import Diagnostics
 
+/// Outcome of one admitted pointer batch that entered the delivery lifecycle
+/// (ADR-0011). This type never reports queue-admission outcomes: an additive
+/// event shed by a saturated local queue was never admitted, so it has no
+/// delivery result.
 enum PointerDeliveryResult: Sendable, Equatable {
     // Movement results carry both the requested batch delta (what was asked
     // of the helper, after coalescing) and the accepted delta. The state
@@ -12,31 +16,37 @@ enum PointerDeliveryResult: Sendable, Equatable {
                            deliveredDx: Int32, deliveredDy: Int32)
     case partiallyDeliveredMovement(requestedDx: Int32, requestedDy: Int32,
                                     deliveredDx: Int32, deliveredDy: Int32)
+    /// A non-movement semantic batch was confirmed by the helper (scroll or
+    /// button). Scroll deltas stay inside `InputSender`; they have no consumer
+    /// past the watchdog/handoff boundary.
     case delivered
+    /// Admitted work invalidated by lifecycle/generation cancellation (local
+    /// return, session replacement, stale in-flight response).
     case cancelled
+    /// Genuine delivery or safety failure requiring the fail-safe force-return.
     case failed
-    /// Scroll results carry the requested batch deltas so handoff accounting
-    /// and diagnostics can track coalesced scroll work without logging user
-    /// input contents (issue #62).
-    case deliveredScroll(requestedHorizontal: Float, requestedVertical: Float)
 }
 
 /// Sends semantic CXI v1 pointer and keyboard events. HID descriptors,
 /// reports, button bitmasks, and backend choice are helper-owned details.
-/// Adjacent movement events and adjacent scroll events are coalesced into a
-/// bounded queue (issue #62); button transitions remain ordered boundaries
-/// and are never merged or dropped silently. Keyboard delivery has its own
-/// queue so a stalled pointer request cannot starve key-up or modifier
-/// cleanup.
 ///
-/// Bounded-queue overflow policy (issue #62):
-/// - Movement/scroll rejected because the queue is saturated are *local
-///   backpressure*: they are reported as `.cancelled` so the handoff
-///   controller keeps control on Android instead of misclassifying ordinary
-///   high-frequency scroll production as remote failure. The watchdog still
-///   guards against genuine stalls.
-/// - A button transition that cannot be enqueued losslessly remains a safety
-///   failure (`.failed`) and keeps the fail-safe force-return path.
+/// Architecture (ADR-0011): captured events pass through O(1) queue admission
+/// into bounded `PendingPointerBatch` transport batches. Adjacent additive
+/// events (move+move, scroll+scroll) merge into the tail batch, so one batch
+/// yields one remote request, one delivery result, one completion, and at
+/// most one handoff-accounting operation. Button transitions are state
+/// changes, not samples: they never merge and are never dropped silently.
+///
+/// Two lifecycle domains are kept separate:
+/// - *Admission* decides merge / append / local shed / safety rejection.
+///   Local queue saturation of an additive event sheds that event with no
+///   remote request, no delivery result, and no handoff accounting — local
+///   backpressure is not remote failure, so it can never surface as
+///   `remoteUnavailable`.
+/// - *Delivery* produces a `PointerDeliveryResult` per admitted batch.
+///   Genuine failures (request throw, timeout, malformed/unexpected response,
+///   helper-reported failure, partial movement, unretainable button) remain
+///   fail-safe.
 final class InputSender: @unchecked Sendable {
     private let session: SessionReference
     private let pointerQueue = DispatchQueue(label: "crossinput.pointer-delivery",
@@ -46,56 +56,31 @@ final class InputSender: @unchecked Sendable {
     private let stateLock = NSLock()
     private let maxPendingPointerItems: Int
     private let pointerRequestTimeout: TimeInterval
-    private var pendingPointers: [PendingPointer] = []
+    private var pendingPointers: [PendingPointerBatch] = []
     private var pointerWorkerScheduled = false
     private var pointerGeneration: UInt64 = 0
-    /// Aggregate metadata only — never scroll values or input contents.
-    private var coalescedScrollCount = 0
-    private var saturatedEnqueueCount = 0
+    /// Aggregate metadata only — never input values or payloads. Mutated
+    /// under stateLock; flushed to the log only after the lock is released.
+    private var coalescedScrollBatchCount = 0
+    private var locallyShedEventCount = 0
     /// Pointer buttons accepted by the helper for one session generation.
     /// Access is confined to pointerQueue so takeover cleanup can wait for an
     /// in-flight delivery and release exactly the state that reached Android.
     private var heldButtons: Set<UInt32> = []
     private var heldButtonsSessionGeneration: UInt64?
 
-    /// Fans the single batch result out to every completion contributed by
-    /// coalesced events, so each enqueue is acknowledged exactly once (issue
-    /// #62). Immutable after creation; appends copy-on-write under stateLock.
-    private final class CompletionList: @unchecked Sendable {
-        private let lock = NSLock()
-        private var items: [@Sendable (PointerDeliveryResult) -> Void] = []
-
-        init(_ completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
-            items.append(completion)
-        }
-
-        func appending(_ completion: @escaping @Sendable (PointerDeliveryResult) -> Void) -> CompletionList {
-            let copy = CompletionList { _ in }
-            lock.withLock { copy.items = items }
-            copy.appendUnderLock(completion)
-            return copy
-        }
-
-        private func appendUnderLock(_ completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
-            lock.withLock { items.append(completion) }
-        }
-
-        func deliver(_ result: PointerDeliveryResult) {
-            lock.withLock { let snapshot = items; return snapshot }.forEach { $0(result) }
-        }
-    }
-
-    private struct PendingPointer {
-        let event: PointerEvent
-        let completions: CompletionList
+    /// One transport batch: possibly many merged raw capture events, but
+    /// exactly one delivery acknowledgement obligation.
+    private struct PendingPointerBatch {
+        var event: PointerEvent
+        let completion: @Sendable (PointerDeliveryResult) -> Void
         let pointerGeneration: UInt64
         let sessionGeneration: UInt64
     }
 
-    /// Which event kinds may merge with an adjacent pending item of the same
-    /// kind, and what the accumulated kind is. Button transitions never merge:
-    /// dropping or reordering a down/up pair can leave remote button state
-    /// inconsistent (issue #62).
+    /// Returns the accumulated kind when `newer` may merge into an adjacent
+    /// `older` batch tail, else nil. Buttons never merge: dropping or
+    /// reordering a down/up pair can leave remote button state inconsistent.
     private static func coalesced(_ older: PointerEvent.Kind,
                                   _ newer: PointerEvent.Kind) -> PointerEvent.Kind? {
         switch (older, newer) {
@@ -123,65 +108,89 @@ final class InputSender: @unchecked Sendable {
         session.snapshot().connection != nil
     }
 
-    /// Enqueues one semantic delivery batch. Adjacent movement events and
-    /// adjacent scroll events for the same session may be coalesced into one
-    /// pending item whose accumulated delta is semantically equivalent to the
-    /// original sequence (issue #62). The completion is for that delivered
-    /// batch, not a per-original-event acknowledgement. The aggregate result
-    /// is therefore credited to handoff accounting exactly once.
+    /// Admits one captured event into the bounded pointer-batch queue.
+    ///
+    /// Admission policy (O(1), tail-only):
+    /// - compatible additive tail → merge into that batch (no new completion);
+    /// - space available → append a new batch;
+    /// - saturated queue + additive event (move/scroll) → locally shed. The
+    ///   event was never admitted, so its completion is never invoked and no
+    ///   delivery result exists;
+    /// - saturated queue + button → safety failure: the completion receives
+    ///   `.failed` and keeps the fail-safe force-return path.
+    ///
+    /// The completion is therefore invoked at most once per call, and only
+    /// when the event joined a delivery batch. Callers must not rely on a
+    /// callback for admission rejection.
     func enqueuePointer(_ event: PointerEvent,
                         completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
         let sessionSnapshot = session.snapshot()
-        var dropped: [(@Sendable (PointerDeliveryResult) -> Void, PointerDeliveryResult)] = []
+        var safetyFailed = false
         var shouldSchedule = false
+        var scrollMergedIntoTail = false
+        var shedLocally = false
+        var coalescedScrollTotal = 0
+        var shedEventTotal = 0
         stateLock.withLock {
             if let last = pendingPointers.last,
                last.sessionGeneration == sessionSnapshot.generation,
                let mergedKind = Self.coalesced(last.event.kind, event.kind) {
                 // Same-kind accumulation preserves ordering: merging only ever
-                // rewrites the tail item of the same kind, so move/scroll
-                // boundaries in front of it stay untouched.
-                let merged = PointerEvent(mergedKind)
-                pendingPointers[pendingPointers.count - 1] = PendingPointer(
-                    event: merged,
-                    completions: last.completions.appending(completion),
-                    pointerGeneration: last.pointerGeneration,
-                    sessionGeneration: last.sessionGeneration)
-                if case .scroll = event.kind {
-                    coalescedScrollCount += 1
-                    if coalescedScrollCount % 200 == 0 {
-                        // Rate-limited aggregate metadata only.
-                        Diagnostics.log("pointer scroll coalesced count=\(coalescedScrollCount)")
-                    }
-                }
+                // rewrites the tail batch's payload. Its existing completion
+                // stays the single acknowledgement for the whole batch.
+                pendingPointers[pendingPointers.count - 1].event = PointerEvent(mergedKind)
+                if case .scroll = event.kind { scrollMergedIntoTail = true }
             } else if pendingPointers.count < maxPendingPointerItems {
-                pendingPointers.append(PendingPointer(event: event,
-                                                       completions: CompletionList(completion),
-                                                       pointerGeneration: pointerGeneration,
-                                                       sessionGeneration: sessionSnapshot.generation))
-            } else if event.kind.isCoalescible {
-                // Local queue saturation for movement/scroll is backpressure,
-                // not remote failure (issue #62): report cancelled so control
-                // stays on Android. The watchdog still guards genuine stalls.
-                saturatedEnqueueCount += 1
-                if saturatedEnqueueCount % 100 == 0 {
-                    // Rate-limited aggregate metadata only.
-                    Diagnostics.log("pointer enqueue saturation count=\(saturatedEnqueueCount)")
-                }
-                dropped.append((completion, .cancelled))
+                pendingPointers.append(PendingPointerBatch(
+                    event: event,
+                    completion: completion,
+                    pointerGeneration: pointerGeneration,
+                    sessionGeneration: sessionSnapshot.generation))
+            } else if Self.isSheddable(event.kind) {
+                // Additive sample lost to local backpressure: later events of
+                // the same kind recover the semantic delta, so shedding is
+                // safe. No transport request, no delivery result, no handoff
+                // accounting; the watchdog remains the stall guard.
+                shedLocally = true
             } else {
-                // Losing an ordered button boundary is a safety failure, not
-                // a harmless coalescing decision; it keeps the fail-safe path.
-                dropped.append((completion, .failed))
+                // Losing an ordered button boundary cannot be recovered
+                // losslessly: safety failure keeps the fail-safe path.
+                safetyFailed = true
+            }
+            if scrollMergedIntoTail {
+                coalescedScrollBatchCount += 1
+                coalescedScrollTotal = coalescedScrollBatchCount
+            }
+            if shedLocally {
+                locallyShedEventCount += 1
+                shedEventTotal = locallyShedEventCount
             }
             if !pointerWorkerScheduled, !pendingPointers.isEmpty {
                 pointerWorkerScheduled = true
                 shouldSchedule = true
             }
         }
-        dropped.forEach { $0.0($0.1) }
+        // Diagnostics run strictly outside stateLock and report aggregate
+        // counts only (AGENTS.md rule 4).
+        if scrollMergedIntoTail, coalescedScrollTotal % 200 == 0 {
+            Diagnostics.log("pointer scroll batches coalesced count=\(coalescedScrollTotal)")
+        }
+        if shedLocally, shedEventTotal % 100 == 0 {
+            Diagnostics.log("pointer queue saturation shed count=\(shedEventTotal)")
+        }
+        if safetyFailed {
+            completion(.failed)
+        }
         if shouldSchedule {
             pointerQueue.async { [weak self] in self?.drainPointerQueue() }
+        }
+    }
+
+    /// Only move/scroll may be shed under pressure: their payload is additive.
+    private static func isSheddable(_ kind: PointerEvent.Kind) -> Bool {
+        switch kind {
+        case .move, .scroll: return true
+        case .button: return false
         }
     }
 
@@ -196,13 +205,13 @@ final class InputSender: @unchecked Sendable {
     /// invalidated in-flight request is reported as cancelled, never credited
     /// to the handoff position.
     func cancelPendingPointerEvents() {
-        let dropped: [PendingPointer] = stateLock.withLock {
+        let dropped: [PendingPointerBatch] = stateLock.withLock {
             pointerGeneration &+= 1
             let value = pendingPointers
             pendingPointers.removeAll(keepingCapacity: true)
             return value
         }
-        dropped.forEach { $0.completions.deliver(.cancelled) }
+        dropped.forEach { $0.completion(.cancelled) }
     }
 
     /// Waits until capture events queued before this call have reached the
@@ -249,7 +258,7 @@ final class InputSender: @unchecked Sendable {
 
     private func drainPointerQueue() {
         while true {
-            let item: PendingPointer? = stateLock.withLock {
+            let item: PendingPointerBatch? = stateLock.withLock {
                 guard !pendingPointers.isEmpty else {
                     pointerWorkerScheduled = false
                     return nil
@@ -259,11 +268,11 @@ final class InputSender: @unchecked Sendable {
             guard let item else { return }
             let result = deliverPointer(item)
             let stillCurrent = stateLock.withLock { pointerGeneration == item.pointerGeneration }
-            item.completions.deliver(stillCurrent ? result : .cancelled)
+            item.completion(stillCurrent ? result : .cancelled)
         }
     }
 
-    private func deliverPointer(_ item: PendingPointer) -> PointerDeliveryResult {
+    private func deliverPointer(_ item: PendingPointerBatch) -> PointerDeliveryResult {
         let snapshot = session.snapshot()
         guard snapshot.generation == item.sessionGeneration,
               let connection = snapshot.connection else { return .cancelled }
@@ -311,9 +320,6 @@ final class InputSender: @unchecked Sendable {
                         heldButtons.remove(button)
                     }
                 }
-                if case let .scroll(h, v) = event.kind {
-                    return .deliveredScroll(requestedHorizontal: h, requestedVertical: v)
-                }
                 guard isMovement,
                       case let .move(requestedDx, requestedDy) = event.kind else { return .delivered }
                 return .deliveredMovement(requestedDx: requestedDx,
@@ -352,23 +358,7 @@ final class InputSender: @unchecked Sendable {
         }
     }
 
-    private func saturatingAdd(_ lhs: Int32, _ rhs: Int32) -> Int32 {
+    private static func saturatingAdd(_ lhs: Int32, _ rhs: Int32) -> Int32 {
         Int32(clamping: Int64(lhs) + Int64(rhs))
-    }
-
-    fileprivate static func saturatingAdd(_ lhs: Int32, _ rhs: Int32) -> Int32 {
-        Int32(clamping: Int64(lhs) + Int64(rhs))
-    }
-}
-
-private extension PointerEvent.Kind {
-    /// Kinds whose semantic payload is additive, so losing one instance to
-    /// local backpressure is recoverable by later events of the same kind.
-    /// Button transitions are state-changing and never lossy.
-    var isCoalescible: Bool {
-        switch self {
-        case .move, .scroll: return true
-        case .button: return false
-        }
     }
 }

@@ -94,6 +94,15 @@ final class ControlHandoffController: @unchecked Sendable {
         apply(capture)
     }
 
+    /// Test seam: enqueues one captured pointer event through the production
+    /// capture→sender wiring so delivery handling exercises the same path as
+    /// live input. Not part of the runtime surface.
+    #if DEBUG
+    func enqueueForTesting(_ event: PointerEvent) {
+        capture.onPointerEvent?(event)
+    }
+    #endif
+
     private func apply(delivery: PointerDeliveryResult) {
         switch delivery {
         case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
@@ -118,10 +127,6 @@ final class ControlHandoffController: @unchecked Sendable {
         case .cancelled:
             recordCancelledDelivery()
         case .delivered:
-            capture.pokeWatchdog()
-        case .deliveredScroll:
-            // A confirmed scroll proves the pipeline is live but does not
-            // move the pointer, so it credits no handoff position (issue #62).
             capture.pokeWatchdog()
         case .failed:
             // A helper-side failure is a control-oriented availability loss;
