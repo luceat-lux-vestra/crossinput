@@ -11,6 +11,65 @@
   3. Video/screen capture
   4. A list of commands that reproduce the verification procedure
 
+## Verification levels
+
+Verification work is classified into three levels. The level determines what
+evidence a change requires; the >=100 physical-cycle criterion belongs only
+to Level 3 (see [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)).
+
+### Level 1 — Issue / PR acceptance
+
+Applies to every individual issue fix and PR. Required:
+
+- Unit/integration tests covering the affected behavior.
+- CI green on the PR HEAD.
+- Targeted real-device verification of the behavior the change touched
+  (reproduction of the original defect, then regression check).
+- Human visual confirmation when machine evidence cannot observe the surface
+  (e.g. pointer visibility, scroll direction on screen).
+
+A bug-fix PR never requires repetitive manual cycles (and never 100 cycles).
+The targeted checks are scoped to what the change could plausibly affect.
+
+### Level 2 — Feature stabilization
+
+Applies once all blocker/bug issues for a feature area are closed. Required:
+
+- A release-candidate build from the stabilization branch.
+- A representative physical smoke test of the whole feature on real hardware.
+- Diagnostics readiness: logs must be able to classify every failure mode the
+  feature can produce (entry, return, takeover, emergency return,
+  remoteUnavailable, watchdog recovery, transport failure, queue shed,
+  coalescing, cancelled-delivery burst, held-button cleanup).
+
+### Level 3 — Release stability
+
+Applies to the release candidate as a whole. Required:
+
+- At least 100 real physical completed handoff/return cycles accumulated on
+  the same release-candidate lineage — naturally during real use or through
+  an approved physical automation harness.
+- Sufficient diagnostics to classify each anomaly. Unclassified failures or
+  mixed build identities fail closed (no PASS).
+- Final stability verdict is made against this record, not against per-PR
+  evidence alone.
+
+## Physical handoff cycle definition
+
+One physical cycle is **not** a state-machine transition count. A valid
+cycle is:
+
+```
+local -> successful physical remoteActive entry -> usable remote session
+      -> return/local recovery
+```
+
+The target must be a real physical device (SM-G977N DeX). Synthetic
+unit/state-machine loops — e.g. `testOneHundredEdgeHandoffCyclesStaySafe` —
+remain useful deterministic regression tests but contribute zero physical
+cycles. See [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)
+for cycle counting, evidence windows, and fail-closed classification.
+
 ## Verification environment (current)
 
 | Item | Value |
@@ -259,13 +318,18 @@ local build is not a substitute for the device record.
 | Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |
 | Failure safety | helper kill, ADB disconnect, emergency hotkey, reconnect, held key/button cleanup, stale callback suppression | pending |
 | Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | selection/stale-response tests pass; removal/reappearance deferred to issue #17 |
-| Edge stability | 100 consecutive edge switches with no unexpected return or pointer trap | real app 100-cycle event-tap/helper record ✅; target-screen confirmation pending |
+| Edge stability | targeted physical handoff/return checks per change; >=100 physical cycles tracked at release level ([ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)) | real app 100-cycle event-tap/helper record ✅ (synthetic/regression evidence, zero physical-cycle credit); release-level accumulation pending |
 
 ## Edge switching stability (Phase 5)
 
-- The state-machine and real macOS event-tap/helper 100-cycle regressions pass.
-  The requirement is not declared complete until the target screen is
-  confirmed for the same run.
+- The state-machine and real macOS event-tap/helper 100-cycle regressions
+  remain useful deterministic regression tests. They are synthetic loops:
+  they contribute **zero** physical cycles toward the Level-3 gate.
+- Release stability is declared complete only under the Level-3 rule in
+  [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md): >=100 real
+  physical handoff/return cycles accumulated on a release-candidate build,
+  naturally or via approved physical automation — never by asking a user to
+  manually bounce the pointer 100 times in one sitting.
 - For each failure case, verify state machine logs + recovery path.
 
 ### A/B comparison protocol (origin/main vs fix branch, issue #37 / PR #38)
