@@ -65,7 +65,12 @@ and capability negotiation succeed, and replaces stale sessions;
 `TargetSelectionController` confirms `SELECT_DISPLAY` before publishing a
 selection and rejects stale responses; `InputSender` returns a semantic
 delivery result; and `ControlHandoffController` is the thin capture/safety
-composition boundary.
+composition boundary. The pointer queue is bounded: adjacent movement events
+and adjacent scroll events coalesce into one delivery batch (ADR-0011),
+button transitions stay ordered boundaries, and saturation sheds a
+coalescible kind locally — no transport request and no delivery result — so
+local pressure can never be reported as remote failure. One delivered batch
+yields exactly one acknowledgement and one handoff-accounting operation.
 The menu bar composition root wires the controllers, while `AppModel` exposes
 their presentation-facing state. Host display enumeration and persisted edge
 choices remain presentation/configuration concerns: every current macOS
