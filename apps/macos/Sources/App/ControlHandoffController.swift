@@ -119,6 +119,10 @@ final class ControlHandoffController: @unchecked Sendable {
             recordCancelledDelivery()
         case .delivered:
             capture.pokeWatchdog()
+        case .deliveredScroll:
+            // A confirmed scroll proves the pipeline is live but does not
+            // move the pointer, so it credits no handoff position (issue #62).
+            capture.pokeWatchdog()
         case .failed:
             // A helper-side failure is a control-oriented availability loss;
             // the state machine does not need to know whether ADB, UHID, or

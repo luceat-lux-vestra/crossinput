@@ -194,6 +194,233 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(session.sendCount, 1)
     }
 
+
+    // MARK: - Issue #62: scroll coalescing and backpressure semantics
+
+    func testHighFrequencyScrollsAreCoalescedAndBounded() {
+        let session = FakeSession(delay: 100_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference,
+                                 maxPendingPointerItems: 1,
+                                 pointerRequestTimeout: 1)
+        let failures = ResultBox<Int>()
+
+        for _ in 0..<500 {
+            sender.enqueuePointer(PointerEvent(.scroll(horizontal: 1, vertical: 2))) { result in
+                if case .failed = result { failures.set(failures.get() ?? 0 + 1) }
+            }
+        }
+        sender.waitForDrain()
+
+        XCTAssertLessThanOrEqual(session.requestCount, 10,
+                                 "coalescing must keep request count bounded")
+        XCTAssertEqual(failures.get() ?? 0, 0,
+                       "queue pressure must not be reported as failure")
+        XCTAssertEqual(session.acceptedScroll.0, 500, accuracy: 0.001)
+        XCTAssertEqual(session.acceptedScroll.1, 1000, accuracy: 0.001)
+    }
+
+    func testHorizontalAndVerticalScrollDeltasAccumulateIndependently() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        let lastResult = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: -3.5, vertical: 7))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 3.5, vertical: -9))) {
+            lastResult.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+
+        XCTAssertEqual(session.requestCount, 1, "adjacent scrolls must merge into one request")
+        XCTAssertEqual(lastResult.get(), .deliveredScroll(requestedHorizontal: 0, requestedVertical: -2))
+        XCTAssertEqual(session.acceptedScroll.0, 0, accuracy: 0.001)
+        XCTAssertEqual(session.acceptedScroll.1, -2, accuracy: 0.001)
+    }
+
+    func testOrderingBoundariesAroundCoalescedScrolls() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 2))) { _ in }
+        sender.waitForDrain()
+        XCTAssertEqual(session.requestTypes, [.pointerScroll, .pointerButton, .pointerScroll])
+
+        session.resetForAssertion()
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+        sender.enqueuePointer(PointerEvent(.move(dx: 5, dy: 5))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 2))) { _ in }
+        sender.waitForDrain()
+        XCTAssertEqual(session.requestTypes, [.pointerScroll, .pointerMoveRel, .pointerScroll])
+
+        session.resetForAssertion()
+        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+        sender.enqueuePointer(PointerEvent(.move(dx: 2, dy: 0))) { _ in }
+        sender.waitForDrain()
+        XCTAssertEqual(session.requestTypes, [.pointerMoveRel, .pointerScroll, .pointerMoveRel])
+    }
+
+    func testButtonDownScrollBurstButtonUpStaysOrderedAndLossless() {
+        let session = FakeSession(delay: 50_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference,
+                                 maxPendingPointerItems: 2,
+                                 pointerRequestTimeout: 1)
+
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
+        for i in 0..<200 {
+            sender.enqueuePointer(PointerEvent(.scroll(horizontal: Float(i % 3) - 1,
+                                                        vertical: 1))) { _ in }
+        }
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: false))) { _ in }
+        sender.waitForDrain()
+
+        XCTAssertEqual(session.pointerButtonEvents.count, 2,
+                       "exactly one down and one up request reach the helper")
+        XCTAssertEqual(session.pointerButtonEvents.map(\.1), [true, false],
+                       "button down/up must both reach the helper exactly once, in order")
+        let buttonIndices = session.requestTypes.enumerated().compactMap {
+            $0.element == .pointerButton ? $0.offset : nil
+        }
+        XCTAssertEqual(buttonIndices.first, 0, "button-down is the first request")
+        XCTAssertEqual(buttonIndices.last, session.requestTypes.count - 1,
+                       "button-up is the final request")
+    }
+
+    func testScrollSaturationIsCancelledNotFailed() {
+        let session = FakeSession(delay: 100_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference,
+                                 maxPendingPointerItems: 1,
+                                 pointerRequestTimeout: 1)
+        session.gateFirstRequest = true
+        let firstDone = DispatchSemaphore(value: 0)
+        final class Collector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [PointerDeliveryResult] = []
+            func append(_ item: PointerDeliveryResult) { lock.withLock { items.append(item) } }
+            var all: [PointerDeliveryResult] { lock.withLock { items } }
+        }
+        let collected = Collector()
+
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in
+            firstDone.signal()
+        }
+        // Hold the worker inside its in-flight request so nothing drains
+        // while the queue fills to capacity. Wait for the request to start,
+        // not to complete — the gate keeps it in flight.
+        XCTAssertEqual(session.requestStarted.wait(timeout: .now() + 1), .success)
+
+        // Fill the queue (capacity 1) with one pending MOVE. A move is a
+        // non-coalescible neighbor for scrolls, so incoming scrolls cannot
+        // merge into it and must hit the capacity limit.
+        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 1))) { _ in
+            firstDone.signal()
+        }
+
+        // ...then enqueue past capacity: these must be dropped locally as
+        // cancelled, never failed.
+        for _ in 0..<20 {
+            sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { result in
+                collected.append(result)
+            }
+        }
+        session.release()
+        sender.waitForDrain()
+
+        let cancelled = collected.all.filter { $0 == .cancelled }.count
+        let failed = collected.all.filter {
+            if case .failed = $0 { return true }; return false
+        }.count
+        XCTAssertEqual(failed, 0, "local saturation must never look like remote failure")
+        XCTAssertGreaterThan(cancelled, 0, "overflowing scrolls are dropped as cancelled")
+    }
+
+    func testButtonOverflowAtSaturationStillFailsClosed() {
+        let session = FakeSession(delay: 100_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference,
+                                 maxPendingPointerItems: 1,
+                                 pointerRequestTimeout: 1)
+        session.gateFirstRequest = true
+        let firstDone = DispatchSemaphore(value: 0)
+        let overflowResult = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in
+            firstDone.signal()
+        }
+        // Gate holds the button-down request in flight; wait for it to start.
+        XCTAssertEqual(session.requestStarted.wait(timeout: .now() + 1), .success)
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: false))) { result in
+            overflowResult.set(result)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(overflowResult.get(), .failed,
+                       "a button that cannot be enqueued losslessly keeps the fail-safe signal")
+    }
+
+    func testGenuineRequestFailureStillFails() {
+        let session = FailingSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 1)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) {
+            result.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .failed,
+                       "genuine transport/helper failure keeps the fail-safe signal")
+    }
+
+    func testCoalescedScrollOnReplacedSessionIsCancelledAndNeverDelivered() {
+        let oldSession = FakeSession(delay: 200_000_000)
+        let newSession = FakeSession()
+        let reference = SessionReference()
+        reference.set(oldSession)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 1)
+        let firstStarted = DispatchSemaphore(value: 0)
+        let scrollResult = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 1))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 4, vertical: 4))) { _ in }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 6, vertical: 6))) {
+            scrollResult.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(oldSession.requestStarted.wait(timeout: .now() + 1), .success)
+
+        reference.set(newSession)
+        sender.waitForDrain()
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(scrollResult.get(), .cancelled)
+        XCTAssertEqual(newSession.requestCount, 0,
+                       "stale coalesced scroll work must not reach the replacement session")
+        XCTAssertEqual(oldSession.acceptedScroll.0, 0, accuracy: 0.001)
+        XCTAssertEqual(oldSession.acceptedScroll.1, 0, accuracy: 0.001)
+    }
+
     private final class ResultBox<Value>: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Value?
@@ -213,6 +440,7 @@ final class InputSenderTests: XCTestCase {
         var onEvent: (@Sendable (CxiFrame) -> Void)?
         var onDisconnect: (@Sendable () -> Void)?
         private(set) var acceptedMovement: (Int32, Int32) = (0, 0)
+        private(set) var acceptedScroll: (Float, Float) = (0, 0)
         private(set) var requestTypes: [MessageType] = []
         private(set) var pointerButtonEvents: [(UInt32, Bool)] = []
         private(set) var sentPointerButtonEvents: [(UInt32, Bool)] = []
@@ -220,6 +448,26 @@ final class InputSenderTests: XCTestCase {
         private(set) var sendCount = 0
         let requestStarted = DispatchSemaphore(value: 0)
         let sendStarted = DispatchSemaphore(value: 0)
+
+        /// When gated, the first request blocks until release() is called.
+        var gateFirstRequest = false
+        private let gateSemaphore = DispatchSemaphore(value: 0)
+        private let gateLock = NSLock()
+        private var gateOpen = false
+
+        func release() {
+            gateLock.withLock { gateOpen = true }
+            gateSemaphore.signal()
+        }
+
+        private func waitForGate() {
+            while true {
+                if gateLock.withLock({ gateOpen }) { return }
+                if gateSemaphore.wait(timeout: .now() + 0.05) == .success {
+                    if gateLock.withLock({ gateOpen }) { return }
+                }
+            }
+        }
 
         init(response: CxiFrame? = nil, delay: UInt64 = 0, sendDelay: UInt64 = 0) {
             self.response = response
@@ -241,6 +489,10 @@ final class InputSenderTests: XCTestCase {
                     pointerButtonEvents.append((button, payload[4] != 0))
                 }
             }
+            if gateFirstRequest {
+                let open = gateLock.withLock { gateOpen }
+                if !open { waitForGate() }
+            }
             if delay > 0 {
                 if let timeout, Double(delay) / 1_000_000_000 > timeout {
                     try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -249,6 +501,16 @@ final class InputSenderTests: XCTestCase {
                 try await Task.sleep(nanoseconds: delay)
             }
             if let response { return response }
+            if type == .pointerScroll, payload.count >= 8 {
+                let h = payload.withUnsafeBytes { $0.loadUnaligned(as: Float.self) }
+                let v = payload.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: Float.self) }
+                lock.withLock {
+                    acceptedScroll.0 += h
+                    acceptedScroll.1 += v
+                }
+                return CxiFrame(type: .pointerResult, requestId: 1,
+                                payload: Messages.pointerResult(status: .delivered))
+            }
             if type == .pointerMoveRel, payload.count >= 8 {
                 let dx = payload.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
                 let dy = payload.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: Int32.self) }
@@ -281,6 +543,30 @@ final class InputSenderTests: XCTestCase {
                 Thread.sleep(forTimeInterval: Double(sendDelay) / 1_000_000_000)
             }
         }
+        func shutdownAndWait() { isConnected = false }
+
+        /// Test-only: clears recorded traffic between scenarios on one session.
+        func resetForAssertion() {
+            lock.withLock {
+                requestCount = 0
+                requestTypes.removeAll()
+                pointerButtonEvents.removeAll()
+            }
+        }
+    }
+
+    /// Connection whose every request throws — models genuine transport loss.
+    private final class FailingSession: SessionConnection, @unchecked Sendable {
+        let serial = "fake-failing"
+        var isConnected = true
+        var onEvent: (@Sendable (CxiFrame) -> Void)?
+        var onDisconnect: (@Sendable () -> Void)?
+
+        func connect() async throws {}
+        func request(_ type: MessageType, payload: Data, timeout: TimeInterval?) async throws -> CxiFrame {
+            throw ConnectionError.timeout("fake transport failure")
+        }
+        func send(_ frame: CxiFrame) throws {}
         func shutdownAndWait() { isConnected = false }
     }
 }
