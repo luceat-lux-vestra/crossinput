@@ -44,9 +44,13 @@ The architecture rebaseline is the current bounded work stream (issue #41):
 - Behavior-preserving regression coverage and real-device evidence.
 - HELLO capability negotiation rejects helpers that cannot return
   `POINTER_RESULT` or guarantee explicit selected-target routing.
-- Pointer delivery uses a bounded, coalescing movement queue; button, scroll,
-  keyboard, and safety events are not allowed to wait behind an unbounded move
-  backlog.
+- Pointer delivery uses a bounded queue that coalesces adjacent movement and
+  adjacent scroll events (ADR-0011); button transitions remain ordered
+  boundaries, and keyboard/safety events are not allowed to wait behind an
+  unbounded move backlog. Local queue saturation of coalescible kinds sheds
+  the event silently with no transport request; it is never reported as a
+  remote failure. One delivered batch yields exactly one handoff-accounting
+  operation.
 - Queued semantic input is tagged with a session generation so replacement
   connections cannot receive stale pointer or keyboard work; late pointer
   results cannot change handoff accounting.

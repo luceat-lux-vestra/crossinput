@@ -110,8 +110,9 @@ The rebaseline boundaries are implemented in the current v1 code:
   old helper before input begins when semantic `POINTER_RESULT` or explicit
   target routing is unavailable. The packaged app does not yet auto-deploy a
   matching helper.
-- `InputSender` bounds and coalesces pointer movement, keeps keyboard and
-  release paths independent, and cancels stale movement on local return.
+- `InputSender` bounds admission and coalesces adjacent movement and scroll
+  into semantic delivery batches (see ADR-0011), keeps keyboard and release
+  paths independent, and cancels stale batches on local return.
   External-control takeover also drains queued key releases and releases
   accepted held pointer buttons without delaying local pointer recovery.
 - `DisplayDiscovery` merges the public display list with optionally detected

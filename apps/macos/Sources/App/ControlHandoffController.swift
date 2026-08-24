@@ -40,11 +40,7 @@ final class ControlHandoffController: @unchecked Sendable {
             self.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
-            self?.sender.enqueuePointer(event) { [weak self] result in
-                Task { @MainActor in
-                    self?.apply(delivery: result)
-                }
-            }
+            self?.enqueue(event)
         }
         capture.onKeyEvent = { [weak self] event in
             self?.sender.enqueueKey(event)
@@ -92,6 +88,36 @@ final class ControlHandoffController: @unchecked Sendable {
 
     func applyEdgeConfig(_ apply: (InputCapture) -> Void) {
         apply(capture)
+    }
+    /// Production capture→sender wiring: one captured event, one admission
+    /// decision, and — only when the event became a new batch owner — one
+    /// delivery completion routed to handoff accounting on the main actor.
+    ///
+    /// Admission decisions never masquerade as remote results (ADR-0011):
+    /// - shed additive samples are silent lossy degradation;
+    /// - a safety-rejected button transition is a local fail-safe decision,
+    ///   handled here with the same control-oriented force-return as a
+    ///   genuine remote failure (dropping an ordered button boundary can
+    ///   strand remote button state).
+    private func enqueue(_ event: PointerEvent) {
+        let outcome = sender.enqueuePointer(event) { [weak self] result in
+            Task { @MainActor in
+                self?.apply(delivery: result)
+            }
+        }
+        guard outcome == .safetyRejected else { return }
+        Task { @MainActor in
+            self.handleButtonSafetyRejection()
+        }
+    }
+
+    private func handleButtonSafetyRejection() {
+        sender.cancelPendingPointerEvents()
+        // A rejected button transition means remote button state can no longer
+        // be trusted: release whatever was previously accepted by the helper
+        // before treating cleanup as complete (best effort, generation-safe).
+        sender.releaseRemotelyHeldButtons()
+        switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
     private func apply(delivery: PointerDeliveryResult) {
@@ -155,6 +181,14 @@ final class ControlHandoffController: @unchecked Sendable {
             }
         case .localActive, .returning, .disabled:
             sender.cancelPendingPointerEvents()
+            // Lifecycle invariant (issue #62 code-gate): when local suppression
+            // ends for ANY reason — normal boundary return, remote failure,
+            // emergency return, takeover, disable — no button previously
+            // accepted by the helper may stay held remotely. Best effort and
+            // session-generation-scoped; external-control takeovers arrive
+            // here via the same transition after InputCapture's synchronous
+            // onPointerStateReset.
+            sender.releaseRemotelyHeldButtons()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
             break
