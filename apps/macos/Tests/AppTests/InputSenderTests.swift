@@ -782,7 +782,15 @@ final class InputSenderTests: XCTestCase {
         }
         let attemptsBeforeCleanup = session.attemptCounter.value
 
-        sender.releaseRemotelyHeldButtons()
+        // Drive the synchronous cleanup directly so the accounting result
+        // can be asserted: a failed send counts as attempted, not succeeded.
+        let cleanup = sender.releaseHeldButtonsForCurrentSession()
+
+        XCTAssertEqual(cleanup,
+                       InputSender.HeldButtonCleanupResult(attempted: 3, succeeded: 2),
+                       "accounting must report the failed send as attempted-but-not-succeeded")
+        XCTAssertEqual(cleanup?.failed, 1)
+
         sender.waitForDrain()
 
         XCTAssertEqual(session.sentPointerButtonEvents.map(\.0), [0, 2],
@@ -791,6 +799,10 @@ final class InputSenderTests: XCTestCase {
                        "every held button was attempted exactly once")
         XCTAssertFalse(session.sentPointerButtonEvents.contains { $0.0 == 1 },
                        "button 1's best-effort send failed and must not be misreported as delivered")
+
+        // Tracking cleared regardless of the partial failure: a second pass
+        // has nothing to attempt and reports no result.
+        XCTAssertNil(sender.releaseHeldButtonsForCurrentSession())
     }
 
     /// Regression D: a safety rejection with nothing remotely held must not

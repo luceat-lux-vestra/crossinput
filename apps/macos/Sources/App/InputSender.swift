@@ -279,12 +279,24 @@ final class InputSender: @unchecked Sendable {
         keyboardQueue.async { [weak self] in
             guard let self else { return }
             pointerQueue.async { [weak self] in
-                self?.releaseHeldButtonsForCurrentSession()
+                _ = self?.releaseHeldButtonsForCurrentSession()
             }
         }
     }
 
-    private func releaseHeldButtonsForCurrentSession() {
+    /// Metadata-only outcome of one held-button cleanup pass. Exists so the
+    /// attempt/succeeded/failed accounting is unit-testable without parsing
+    /// log output; never contains button identifiers or payloads.
+    struct HeldButtonCleanupResult: Equatable {
+        let attempted: Int
+        let succeeded: Int
+        var failed: Int { attempted - succeeded }
+    }
+
+    /// Synchronous form used by the async path; internal so tests can assert
+    /// the attempt/succeeded/failed accounting directly. Must run only where
+    /// in-flight pointer work has settled (pointerQueue).
+    func releaseHeldButtonsForCurrentSession() -> HeldButtonCleanupResult? {
         let snapshot = session.snapshot()
         let buttons = heldButtons.sorted()
         let buttonGeneration = heldButtonsSessionGeneration
@@ -293,17 +305,29 @@ final class InputSender: @unchecked Sendable {
 
         guard buttonGeneration == snapshot.generation,
               let connection = snapshot.connection,
-              !buttons.isEmpty else { return }
+              !buttons.isEmpty else { return nil }
 
+        // Best-effort accounting: a failed send is attempted, not released.
+        var succeeded = 0
         for button in buttons {
             // Cleanup is best effort. Zero marks an uncorrelated response, so
             // it cannot satisfy an unrelated in-flight request.
-            try? connection.send(CxiFrame(
-                type: .pointerButton,
-                requestId: 0,
-                payload: Messages.pointerButton(button: button, down: false)))
+            do {
+                try connection.send(CxiFrame(
+                    type: .pointerButton,
+                    requestId: 0,
+                    payload: Messages.pointerButton(button: button, down: false)))
+                succeeded += 1
+            } catch {
+                // Swallowed by design: cleanup must never trap local control.
+            }
         }
-        Diagnostics.log("remote held-pointer-buttons released count=\(buttons.count)")
+        let result = HeldButtonCleanupResult(attempted: buttons.count, succeeded: succeeded)
+        // Metadata only (AGENTS.md rule 4): attempt/success/failure counts.
+        Diagnostics.log("remote held-pointer-buttons cleanup "
+            + "attempted=\(result.attempted) succeeded=\(result.succeeded) "
+            + "failed=\(result.failed)")
+        return result
     }
 
     private func drainPointerQueue() {

@@ -115,17 +115,22 @@ in-flight work settles. Cleanup ownership:
 - The same primitive is invoked at EVERY local-return boundary in
   `ControlHandoffController.apply(state:)` — normal boundary return,
   remoteUnavailable, emergency return, external-control takeover, disable —
-  making "no remotely accepted button survives local suppression end" a
-  general lifecycle invariant rather than a #62 special case.
-- Best-effort send failures are swallowed and tracking is cleared regardless:
-  cleanup must never trap local control or delay the fail-safe return.
-- No input values are logged; only aggregate metadata.
+  making "best-effort release attempted for all helper-acknowledged held
+  buttons" a general lifecycle invariant rather than a #62 special case.
+  After a transport failure the release may not have reached Android; the
+  guarantee is bounded by the best-effort send, and this is stated as such.
+- Send outcomes are counted accurately: diagnostics report
+  `attempted/succeeded/failed` per cleanup pass, and a failed send is never
+  counted as released. Tracking is cleared regardless; cleanup must never
+  trap local control or delay the fail-safe return. No retries in this PR.
+- No input values are logged; only aggregate metadata (counts).
 
 Regression coverage: delivered-down/rejected-up releases exactly one frame;
 generation-A cleanup never crosses into session B; multiple held buttons are
-attempted once each (sorted) even when one send throws; rejection without
-held buttons sends no spurious frame; existing external-control cleanup tests
-remain green.
+attempted once each (sorted) even when one send throws, with accounting
+proving `failed=1 succeeded=2 attempted=3`; rejection without held buttons
+sends no spurious frame; existing external-control cleanup tests remain
+green.
 
 ### 5. Failure taxonomy
 
