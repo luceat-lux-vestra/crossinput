@@ -19,7 +19,16 @@ Rules that agents (and developers) must follow when working on Ampersand.
 
 - "It works" claims must attach one of: real-device `dumpsys display` log, ADB `logcat` excerpt, video/screen capture, or a reproducible command list of the verification procedure.
 - DeX input routing verification follows the protocol in `docs/testing.md`.
-- Edge switching stability is not declared complete until 100 repeat edge-switch tests pass.
+- Edge-switching release stability is not declared complete until at least
+  100 real physical handoff/return cycles have been observed on a
+  release-candidate build with sufficient diagnostics to classify unexpected
+  failures. Cycles may accumulate naturally during real use or through an
+  approved physical automation harness; synthetic unit/state-machine loops do
+  not satisfy the physical-cycle requirement. Individual bug-fix PRs require
+  targeted physical verification of the affected behavior only — they never
+  require 100 repetitive manual cycles, and a user is never required to
+  manually repeat the same handoff 100 times in one sitting. See
+  `docs/testing.md` (verification levels) and ADR-0012 for the full policy.
 
 ## Workflow
 
