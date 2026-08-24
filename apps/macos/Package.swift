@@ -9,11 +9,15 @@ let package = Package(
     products: [
         .library(name: "AmpersandCore", targets: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch"]),
         .executable(name: "Ampersand", targets: ["App"]),
-        .executable(name: "cxi-smoke", targets: ["SmokeMain"])
+        .library(name: "Delivery", targets: ["Delivery"]),
+        .executable(name: "cxi-smoke", targets: ["SmokeMain"]),
+        .executable(name: "cxi-stress", targets: ["CxiStress"])
     ],
     targets: [
-        .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics"]),
+        .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics", "Delivery"]),
+        .executableTarget(name: "CxiStress", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics", "Delivery"], path: "Tools/CxiStress"),
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
+        .target(name: "Delivery", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics"]),
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
         .target(name: "InputCapture", dependencies: ["EdgeSwitch", "Diagnostics"]),

@@ -1,0 +1,13 @@
+revision_verified=40a0786137596088345855e6d8a2db491c49cc1f
+head_at_start=40a0786137596088345855e6d8a2db491c49cc1f
+started_utc=20260825T025810Z
+host=Darwin 25.5.0 arm64
+serial=<redacted-adb-serial>
+transport_class=wireless-mdns-tls
+device_selector=single-or-model-match
+model=SM-G977N
+android_release=12
+sdk=31
+scrcpy_video=OFF (default per work order section 10)
+transport_expectation=match (wireless-mdns-tls)
+dex_display_id=16

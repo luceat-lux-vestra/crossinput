@@ -3,6 +3,7 @@ import Protocol
 import AndroidBridge
 import AppSettings
 import Diagnostics
+import Delivery
 
 /// Owns normalized target snapshots and confirms selection with the helper
 /// before publishing selected state. A monotonically increasing token rejects

@@ -6,12 +6,13 @@ import Diagnostics
 /// Thread-safe reference used by capture/input delivery callbacks. The
 /// session controller remains the only owner that replaces the current
 /// session; input delivery never reaches into AppModel for a mutable handle.
-struct SessionSnapshot: Sendable {
-    let connection: (any SessionConnection)?
-    let generation: UInt64
+public struct SessionSnapshot: Sendable {
+    public let connection: (any SessionConnection)?
+    public let generation: UInt64
 }
 
-final class SessionReference: @unchecked Sendable {
+public final class SessionReference: @unchecked Sendable {
+    public init() {}
     private let lock = NSLock()
     private var session: (any SessionConnection)?
     private var generation: UInt64 = 0
@@ -19,32 +20,68 @@ final class SessionReference: @unchecked Sendable {
     /// Replacing or clearing the session advances the epoch. Queued input
     /// captures this value and can therefore never be redirected to a later
     /// connection.
-    func set(_ session: (any SessionConnection)?) {
+    public func set(_ session: (any SessionConnection)?) {
         lock.withLock {
             self.session = session
             generation &+= 1
         }
     }
 
-    func snapshot() -> SessionSnapshot {
+    public func snapshot() -> SessionSnapshot {
         lock.withLock { SessionSnapshot(connection: session, generation: generation) }
     }
 
-    func current() -> (any SessionConnection)? { snapshot().connection }
+    public func current() -> (any SessionConnection)? { snapshot().connection }
 }
+
 
 /// Owns connection/helper lifecycle, reconnect callbacks, and the current
 /// CXI session. `SessionState` is mutated here; AppModel mirrors it only as
 /// presentation-facing observable state.
 @MainActor
-final class SessionController {
+public final class SessionController {
     private let adbTransport: AdbTransport
     let reference: SessionReference
     private(set) var state: SessionState = .disconnected
 
-    var onStateChange: ((SessionState) -> Void)?
-    var onEvent: ((CxiFrame) -> Void)?
-    var onUnavailable: ((String) -> Void)?
+    public var onStateChange: ((SessionState) -> Void)?
+    public var onEvent: ((CxiFrame) -> Void)?
+    public var onUnavailable: ((String) -> Void)?
+
+    /// Production telemetry sink (review round 2, P1-6): invoked with every
+    /// completed request observation so the app can persist failure/late
+    /// metadata. The app wires this to Diagnostics; without a sink nothing
+    /// is recorded.
+    /// Unified production telemetry sink (review round 3): receives request
+    /// observations from RemoteSession AND semantic delivery observations
+    /// from InputSender, plus late-response records. Lock-protected — invoked
+    /// from arbitrary queues with no main-actor hop.
+    private let observationSinkLock = NSLock()
+    nonisolated(unsafe) private var _observationSinkBox: (@Sendable (RequestObservation) -> Void)?
+
+    /// Composition-time registration of the unified telemetry sink
+    /// (lock-protected; replaces any previous sink). Receives transport
+    /// request observations, InputSender delivery observations, and late
+    /// responses.
+    public func setObservationSink(_ sink: (@Sendable (RequestObservation) -> Void)?) {
+        observationSinkLock.lock()
+        _observationSinkBox = sink
+        observationSinkLock.unlock()
+    }
+
+    /// Reads the current sink under the lock (used by forwarding helpers).
+    nonisolated func currentObservationSink() -> (@Sendable (RequestObservation) -> Void)? {
+        observationSinkLock.lock()
+        defer { observationSinkLock.unlock() }
+        return _observationSinkBox
+    }
+
+    /// Dispatches one delivery-layer observation through the registered sink.
+    /// The app calls this when creating InputSender so pointer semantic
+    /// failures (malformed/unexpected/helper-failure) reach diagnostics too.
+    nonisolated public func forwardDeliveryObservation(_ observation: RequestObservation) {
+        currentObservationSink()?(observation)
+    }
 
     private var session: (any SessionConnection)?
     /// Candidate performing HELLO/capability negotiation. It is owned by the
@@ -55,20 +92,20 @@ final class SessionController {
     private var reconnectTask: Task<Void, Never>?
     private let sessionFactory: @Sendable (RemoteSession.Configuration) -> any SessionConnection
 
-    init(adbTransport: AdbTransport = AdbTransport(),
-         reference: SessionReference = SessionReference(),
-         sessionFactory: @escaping @Sendable (RemoteSession.Configuration) -> any SessionConnection = { RemoteSession(configuration: $0) }) {
+    public init(adbTransport: AdbTransport = AdbTransport(),
+                reference: SessionReference = SessionReference(),
+                sessionFactory: @escaping @Sendable (RemoteSession.Configuration) -> any SessionConnection = { RemoteSession(configuration: $0) }) {
         self.adbTransport = adbTransport
         self.reference = reference
         self.sessionFactory = sessionFactory
     }
 
-    var isConnected: Bool { session?.isConnected == true }
+    public var isConnected: Bool { session?.isConnected == true }
     var currentSerial: String { session?.serial ?? "" }
 
-    func firstConnectedSerial() -> String { adbTransport.firstConnectedSerial() }
+    public func firstConnectedSerial() -> String { adbTransport.firstConnectedSerial() }
 
-    func connect(serial: String) async throws -> any SessionConnection {
+    public func connect(serial: String) async throws -> any SessionConnection {
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionAttempt &+= 1
@@ -110,6 +147,21 @@ final class SessionController {
             }
             connectingSession = nil
             session = manager
+            if let remoteSession = manager as? RemoteSession {
+                // The sink is invoked directly off the reader queue — no
+                // main-actor hop on the hot path.
+                remoteSession.onObservation = { [weak self] observation in
+                    self?.currentObservationSink()?(observation)
+                }
+                remoteSession.onLateResponse = { [weak self] record in
+                    // Late responses are surfaced as a synthetic failure-
+                    // class observation so a single sink handles all layers.
+                    self?.currentObservationSink()?(RequestObservation(
+                        kind: record.requestKind,
+                        outcome: .lateResponse(requestKind: record.requestKind,
+                                              delayBeyondTimeout: record.delayBeyondTimeout)))
+                }
+            }
             reference.set(manager)
             setState(.ready)
             return manager
@@ -128,7 +180,7 @@ final class SessionController {
         }
     }
 
-    func disconnect() {
+    public func disconnect() {
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionAttempt &+= 1
@@ -144,7 +196,7 @@ final class SessionController {
 
     /// Moves the session to a failed terminal state and tears down any helper
     /// candidate or live channel so presentation and transport cannot diverge.
-    func fail(_ message: String) {
+    public func fail(_ message: String) {
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionAttempt &+= 1
@@ -165,7 +217,7 @@ final class SessionController {
     /// Owns wireless endpoint discovery and reconnect attempts. The caller
     /// supplies only the application-level action to run after a live serial
     /// is found; ADB syntax and retry policy stay inside the session layer.
-    func scheduleAutoReconnect(
+    public func scheduleAutoReconnect(
         serial: String,
         onConnected: @escaping @MainActor @Sendable (String) async -> Void
     ) {

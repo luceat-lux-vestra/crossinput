@@ -1,0 +1,29 @@
+serial_class=wireless-mdns-tls
+connecting...
+handshake_ok capabilities=3
+display id=0 type=1 desktop=false
+display id=16 type=2 desktop=false
+display id=2 type=5 desktop=true
+display_selected id=2
+admission accepted=39 coalesced=461 shed=0 safety_rejected=0
+delivery_results deliveredMovement=39 partial=0 delivered=0 cancelled=0 failed=0
+requests=39
+successes=39
+timeouts=0
+stream_closed=0
+write_failed=0
+unexpected_response=0
+malformed_response=0
+helper_reported_failure=0
+other_failure=0
+p50=0.064
+p90=0.085
+p95=0.106
+p99=0.117
+max_latency=0.117
+over_250ms=0
+over_500ms=0
+over_750ms=0
+over_1000ms=0
+late_responses=0
+result_written /tmp/cxi-stress.uMN39S/raw-evidence/stress-result-2026-08-25T025856Z.json

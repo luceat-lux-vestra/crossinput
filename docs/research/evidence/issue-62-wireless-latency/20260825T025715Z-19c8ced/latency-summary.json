@@ -1,0 +1,32 @@
+{
+  "profiles": {
+    "queue-pressure": {
+      "admission_accepted": 773,
+      "admission_coalesced": 379,
+      "admission_safety_rejected": 0,
+      "admission_shed": 384,
+      "count": 773,
+      "helper_reported_failure": 0,
+      "late_delay_seconds": [],
+      "late_responses": 0,
+      "malformed_response": 0,
+      "max": 0.1049,
+      "other_failure": 0,
+      "over_1000ms": 0,
+      "over_250ms": 0,
+      "over_500ms": 0,
+      "over_750ms": 0,
+      "p50": 0.0126,
+      "p90": 0.0191,
+      "p95": 0.0219,
+      "p99": 0.0407,
+      "requests": 773,
+      "stream_closed": 0,
+      "successes": 773,
+      "timeout_budgets": [],
+      "timeouts": 0,
+      "unexpected_response": 0,
+      "write_failed": 0
+    }
+  }
+}
