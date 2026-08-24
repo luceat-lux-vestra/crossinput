@@ -232,11 +232,19 @@ issue with reproducible measurements.
   - Lifecycle: replaced session never receives stale work (single owner
     cancellation); `cancelPendingPointerEvents` covers queued AND in-flight
     work with `.cancelled` and generates no new requests.
-  Local suite at final HEAD: 116 XCTest + 30 Swift Testing tests, 0 failures.
-- Physical acceptance on SM-G977N DeX (issue #62 procedure): scroll stress
-  must produce no `remoteActive -> returning reason=remoteUnavailable` line in
-  `diag.log`; 100-cycle edge handoff test must pass 100/100 before merge.
-  Physical validation follows code review PASS.
+  Local suite at final HEAD: 120 XCTest + 30 Swift Testing tests, 0 failures
+  (latest CI run #130, all four jobs PASS).
+- Targeted physical acceptance on SM-G977N DeX (issue #62 procedure,
+  Level 1 per ADR-0012): Mac -> DeX handoff entry; pointer remains usable;
+  aggressive vertical scroll burst produces no false return; horizontal/mixed
+  burst where physically practical produces no false return; pointer usable
+  after burst; buttons usable / no stuck state; intentional DeX -> Mac return
+  works; `diag.log` contains zero queue-pressure-induced
+  `remoteActive -> returning reason=remoteUnavailable` events. The former
+  "100-cycle edge handoff test must pass 100/100 before merge" requirement is
+  superseded by the release-stability gate in
+  [ADR-0012](ADR-0012-real-use-handoff-stability-evidence.md) and is not a
+  #62 PR acceptance criterion.
 
 ## Revisit Conditions
 
