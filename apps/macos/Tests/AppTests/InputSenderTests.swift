@@ -650,6 +650,180 @@ final class InputSenderTests: XCTestCase {
                        "the rejected button must never be sent")
     }
 
+    // MARK: Held-button cleanup (issue #62 code-gate: rejected buttonUp must
+    // not strand an already-accepted remote buttonDown)
+
+    /// Regression A: delivered-down / rejected-up. A button-down that the
+    /// helper already acknowledged, followed by a queue-saturation rejection
+    /// of its matching button-up, must produce exactly one best-effort
+    /// release frame so Android never keeps the button stuck. Fails on
+    /// HEAD 3225c38, where safety rejection only cancelled pending work.
+    func testRejectedButtonUpAfterDeliveredButtonDownReleasesHeldButton() async {
+        let fixture = makeFixture(maxPendingPointerItems: 1)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: fixture.sender,
+                                                  switchMachine: machine)
+        let sawLocal = CompletionCounter()
+        controller.onStateChange = { state in
+            if state == .local { sawLocal.call() }
+        }
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        sawLocal.reset()
+        // Step 2: deliver button-down successfully; the helper acknowledges it.
+        // The gated fake parks the request until released.
+        let downDone = DispatchSemaphore(value: 0)
+        fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in
+            downDone.signal()
+        }
+        awaitInFlight(fixture.session)
+        fixture.session.releaseGate()
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success,
+                       "button-down must be acknowledged as delivered")
+
+        // Steps 3-5: re-arm the gate so the next request parks inside the
+        // transport, saturate capacity 1 with a scroll tail, then submit the
+        // matching button-up — admission must reject it.
+        fixture.session.rearmGate()
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 0, vertical: 1))), .acceptedAsNewBatch)
+        awaitInFlight(fixture.session)
+
+        // The parked scroll vacated the queue; refill capacity 1 with an
+        // additive sample so the queue is genuinely saturated.
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.move(dx: 1, dy: 0))), .acceptedAsNewBatch)
+
+        // Route the rejected button-up through the controller's production
+        // capture seam so its safety-rejection handler runs.
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: false)))
+
+        machine.flushCallbacks()
+        await settleMainActor()
+        fixture.session.releaseGate() // let the parked scroll settle so the
+        fixture.sender.waitForDrain() // queued cleanup runs behind it
+        machine.flushCallbacks()
+        await settleMainActor()
+        machine.flushCallbacks()
+
+        XCTAssertEqual(machine.state, .localActive, "fail-safe return still applies")
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.count, 1,
+                       "exactly one best-effort release reaches the helper")
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.0, 0,
+                       "the held button is released")
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.1, false,
+                       "cleanup sends button-UP, not the rejected original event re-admitted")
+    }
+
+    /// Regression B: generation safety. Buttons accepted on session A must
+    /// never be released into replacement session B; A's stale held-button
+    /// record is dropped without injecting frames into B.
+    func testHeldButtonCleanupNeverCrossesSessionGeneration() {
+        let oldSession = FakeSession()
+        let newSession = FakeSession()
+        let reference = SessionReference()
+        reference.set(oldSession)
+        let sender = InputSender(session: reference)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success)
+
+        reference.set(newSession)
+        sender.releaseRemotelyHeldButtons()
+        sender.waitForDrain()
+
+        XCTAssertEqual(newSession.sentPointerButtonEvents.count, 0,
+                       "stale-generation cleanup must not send releases into session B")
+        XCTAssertEqual(oldSession.sentPointerButtonEvents.count, 0,
+                       "session A is gone; nothing to clean up there either")
+    }
+
+    /// Regression C: multiple held buttons are each released exactly once,
+    /// in deterministic (sorted) order, and the tracking set is cleared even
+    /// when one best-effort send throws.
+    func testMultipleHeldButtonsReleasedOnceEachAndStateClearedOnFailure() {
+        // Records every attempted cleanup frame even when the transport
+        // throws, so we can assert each held button was attempted exactly
+        // once despite a best-effort failure.
+        final class CountingSendSession: FakeSession, @unchecked Sendable {
+            let attemptCounter = CompletionCounter()
+            override func send(_ frame: CxiFrame) throws {
+                defer { attemptCounter.call() }
+                if frame.requestId == 0, frame.type == .pointerButton,
+                   frame.payload.count >= 5 {
+                    let button = frame.payload.withUnsafeBytes { raw in
+                        UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
+                    }
+                    if button == 1 { // make button 1's release fail
+                        throw ConnectionError.protocolError("best-effort cleanup failure")
+                    }
+                }
+                try super.send(frame)
+            }
+        }
+        let session = CountingSendSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        for button in [UInt32(2), UInt32(0), UInt32(1)] {
+            let done = DispatchSemaphore(value: 0)
+            sender.enqueuePointer(PointerEvent(.button(button: button, down: true))) { _ in
+                done.signal()
+            }
+            XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        }
+        let attemptsBeforeCleanup = session.attemptCounter.value
+
+        sender.releaseRemotelyHeldButtons()
+        sender.waitForDrain()
+
+        XCTAssertEqual(session.sentPointerButtonEvents.map(\.0), [0, 2],
+                       "releases go out in sorted order for buttons whose send succeeded")
+        XCTAssertEqual(session.attemptCounter.value - attemptsBeforeCleanup, 3,
+                       "every held button was attempted exactly once")
+        XCTAssertFalse(session.sentPointerButtonEvents.contains { $0.0 == 1 },
+                       "button 1's best-effort send failed and must not be misreported as delivered")
+    }
+
+    /// Regression D: a safety rejection with nothing remotely held must not
+    /// fabricate a cleanup frame; local fail-safe recovery still applies.
+    func testSafetyRejectionWithoutHeldButtonsSendsNoCleanupFrame() async {
+        let fixture = makeFixture(maxPendingPointerItems: 1)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: fixture.sender,
+                                                  switchMachine: machine)
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        // Saturate with a gated scroll; no button was ever delivered.
+        controller.capture.onPointerEvent?(PointerEvent(.scroll(horizontal: 1, vertical: 0)))
+        awaitInFlight(fixture.session)
+        controller.capture.onPointerEvent?(PointerEvent(.scroll(horizontal: 2, vertical: 0)))
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: true)))
+        machine.flushCallbacks()
+        await settleMainActor()
+        fixture.session.releaseGate() // settle the parked scroll
+        fixture.sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(fixture.session.sentFrames.contains { $0.requestId == 0 },
+                       "no spurious uncorrelated cleanup frames may be sent")
+    }
+
     // MARK: Genuine remote failures remain fail-safe (ADR-0011)
 
     func testGenuineRequestFailureStillFails() {
@@ -936,7 +1110,7 @@ final class InputSenderTests: XCTestCase {
         var isNil: Bool { lock.withLock { value == nil } }
     }
 
-    private final class FakeSession: SessionConnection, @unchecked Sendable {
+    class FakeSession: SessionConnection, @unchecked Sendable {
         let serial = "fake"
         let response: CxiFrame?
         let delay: UInt64

@@ -111,12 +111,12 @@ final class ControlHandoffController: @unchecked Sendable {
         }
     }
 
-    /// Local queue saturation rejected a stateful button transition before it
-    /// was ever sent. The helper's remote button state is untouched, but the
-    /// local/remote button pairing can no longer be trusted, so control
-    /// returns to macOS via the standard fail-safe path.
     private func handleButtonSafetyRejection() {
         sender.cancelPendingPointerEvents()
+        // A rejected button transition means remote button state can no longer
+        // be trusted: release whatever was previously accepted by the helper
+        // before treating cleanup as complete (best effort, generation-safe).
+        sender.releaseRemotelyHeldButtons()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
@@ -181,6 +181,14 @@ final class ControlHandoffController: @unchecked Sendable {
             }
         case .localActive, .returning, .disabled:
             sender.cancelPendingPointerEvents()
+            // Lifecycle invariant (issue #62 code-gate): when local suppression
+            // ends for ANY reason — normal boundary return, remote failure,
+            // emergency return, takeover, disable — no button previously
+            // accepted by the helper may stay held remotely. Best effort and
+            // session-generation-scoped; external-control takeovers arrive
+            // here via the same transition after InputCapture's synchronous
+            // onPointerStateReset.
+            sender.releaseRemotelyHeldButtons()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
             break

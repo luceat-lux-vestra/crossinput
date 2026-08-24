@@ -263,15 +263,28 @@ final class InputSender: @unchecked Sendable {
     /// wait for a remote request or transport write.
     func resetCapturedInputState() {
         cancelPendingPointerEvents()
+        releaseRemotelyHeldButtons()
+    }
+
+    /// Best-effort release of every button previously accepted by the helper,
+    /// after all queued/in-flight pointer work has settled so `heldButtons`
+    /// reflects what actually reached Android. Runs on `pointerQueue` behind
+    /// any in-flight delivery; never blocks the caller.
+    ///
+    /// Ownership: buttons are tracked per session generation, so a stale
+    /// generation's cleanup can never inject releases into a replacement
+    /// session. Send failures are swallowed (best effort) — cleanup must not
+    /// trap local control; the fail-safe return proceeds regardless.
+    func releaseRemotelyHeldButtons() {
         keyboardQueue.async { [weak self] in
             guard let self else { return }
             pointerQueue.async { [weak self] in
-                self?.releaseHeldButtonsAfterExternalTakeover()
+                self?.releaseHeldButtonsForCurrentSession()
             }
         }
     }
 
-    private func releaseHeldButtonsAfterExternalTakeover() {
+    private func releaseHeldButtonsForCurrentSession() {
         let snapshot = session.snapshot()
         let buttons = heldButtons.sorted()
         let buttonGeneration = heldButtonsSessionGeneration
@@ -290,7 +303,7 @@ final class InputSender: @unchecked Sendable {
                 requestId: 0,
                 payload: Messages.pointerButton(button: button, down: false)))
         }
-        Diagnostics.log("external-control input state reset buttons=\(buttons.count)")
+        Diagnostics.log("remote held-pointer-buttons released count=\(buttons.count)")
     }
 
     private func drainPointerQueue() {

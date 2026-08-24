@@ -92,6 +92,7 @@ them, and diagnostics do not justify carrying unused payloads through layers.
 Invariant: **local queue saturation must never imply `remoteUnavailable`.**
 
 ### 4. Buttons are state transitions, never samples
+
 A button down/up pair alters persistent remote state. Buttons never coalesce,
 never reorder, and are never dropped silently. If bounded admission cannot
 retain a button losslessly, the enqueue returns `.safetyRejected` with no
@@ -101,6 +102,31 @@ not a remote verdict: `ControlHandoffController` owns the fail-safe response
 keeping remote failure semantics reserved for genuine transport/helper
 failures.
 
+Safety rejection does not merely return control locally. A rejected
+`buttonUp` can strand an already-accepted remote `buttonDown`, so
+`InputSender` tracks every button the helper acknowledged as held (per
+session generation) and exposes `releaseRemotelyHeldButtons()`: a best-effort,
+ordered release of exactly those buttons, scheduled on the pointer queue after
+in-flight work settles. Cleanup ownership:
+
+- Buttons are recorded only when the helper confirmed delivery; cleanup sends
+  releases only for the current session's generation, so a stale generation's
+  record can never inject frames into a replacement session.
+- The same primitive is invoked at EVERY local-return boundary in
+  `ControlHandoffController.apply(state:)` — normal boundary return,
+  remoteUnavailable, emergency return, external-control takeover, disable —
+  making "no remotely accepted button survives local suppression end" a
+  general lifecycle invariant rather than a #62 special case.
+- Best-effort send failures are swallowed and tracking is cleared regardless:
+  cleanup must never trap local control or delay the fail-safe return.
+- No input values are logged; only aggregate metadata.
+
+Regression coverage: delivered-down/rejected-up releases exactly one frame;
+generation-A cleanup never crosses into session B; multiple held buttons are
+attempted once each (sorted) even when one send throws; rejection without
+held buttons sends no spurious frame; existing external-control cleanup tests
+remain green.
+
 ### 5. Failure taxonomy
 
 | Condition | Domain | Result/action |
@@ -108,7 +134,7 @@ failures.
 | move/scroll merged into tail | admission | `.coalescedIntoExistingBatch`, no new completion |
 | new move/scroll/button with space | admission | `.acceptedAsNewBatch`, completion owns batch result |
 | move/scroll saturation | admission | `.shedLocally`, no result |
-| button saturation | admission/safety | `.safetyRejected`, controller fail-safe force-return |
+| button saturation | admission/safety | `.safetyRejected`, controller fail-safe force-return + best-effort release of remotely held buttons |
 | delivered move | delivery | one `.deliveredMovement` |
 | delivered scroll/button | delivery | `.delivered` |
 | timeout / transport exception / unexpected response / malformed payload / helper failure | delivery | `.failed` |
