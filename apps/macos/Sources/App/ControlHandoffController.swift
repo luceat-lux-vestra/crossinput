@@ -40,11 +40,7 @@ final class ControlHandoffController: @unchecked Sendable {
             self.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
-            self?.sender.enqueuePointer(event) { [weak self] result in
-                Task { @MainActor in
-                    self?.apply(delivery: result)
-                }
-            }
+            self?.enqueue(event)
         }
         capture.onKeyEvent = { [weak self] event in
             self?.sender.enqueueKey(event)
@@ -93,15 +89,36 @@ final class ControlHandoffController: @unchecked Sendable {
     func applyEdgeConfig(_ apply: (InputCapture) -> Void) {
         apply(capture)
     }
-
-    /// Test seam: enqueues one captured pointer event through the production
-    /// capture→sender wiring so delivery handling exercises the same path as
-    /// live input. Not part of the runtime surface.
-    #if DEBUG
-    func enqueueForTesting(_ event: PointerEvent) {
-        capture.onPointerEvent?(event)
+    /// Production capture→sender wiring: one captured event, one admission
+    /// decision, and — only when the event became a new batch owner — one
+    /// delivery completion routed to handoff accounting on the main actor.
+    ///
+    /// Admission decisions never masquerade as remote results (ADR-0011):
+    /// - shed additive samples are silent lossy degradation;
+    /// - a safety-rejected button transition is a local fail-safe decision,
+    ///   handled here with the same control-oriented force-return as a
+    ///   genuine remote failure (dropping an ordered button boundary can
+    ///   strand remote button state).
+    private func enqueue(_ event: PointerEvent) {
+        let outcome = sender.enqueuePointer(event) { [weak self] result in
+            Task { @MainActor in
+                self?.apply(delivery: result)
+            }
+        }
+        guard outcome == .safetyRejected else { return }
+        Task { @MainActor in
+            self.handleButtonSafetyRejection()
+        }
     }
-    #endif
+
+    /// Local queue saturation rejected a stateful button transition before it
+    /// was ever sent. The helper's remote button state is untouched, but the
+    /// local/remote button pairing can no longer be trusted, so control
+    /// returns to macOS via the standard fail-safe path.
+    private func handleButtonSafetyRejection() {
+        sender.cancelPendingPointerEvents()
+        switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
 
     private func apply(delivery: PointerDeliveryResult) {
         switch delivery {

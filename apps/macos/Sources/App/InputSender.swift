@@ -4,9 +4,10 @@ import InputCapture
 import Diagnostics
 
 /// Outcome of one admitted pointer batch that entered the delivery lifecycle
-/// (ADR-0011). This type never reports queue-admission outcomes: an additive
-/// event shed by a saturated local queue was never admitted, so it has no
-/// delivery result.
+/// (ADR-0011). This type never reports queue-admission outcomes: admission
+/// decisions are returned separately from `enqueuePointer` as
+/// `PointerAdmissionOutcome`, so a local decision can never be mistaken for
+/// a remote verdict.
 enum PointerDeliveryResult: Sendable, Equatable {
     // Movement results carry both the requested batch delta (what was asked
     // of the helper, after coalescing) and the accepted delta. The state
@@ -16,15 +17,39 @@ enum PointerDeliveryResult: Sendable, Equatable {
                            deliveredDx: Int32, deliveredDy: Int32)
     case partiallyDeliveredMovement(requestedDx: Int32, requestedDy: Int32,
                                     deliveredDx: Int32, deliveredDy: Int32)
-    /// A non-movement semantic batch was confirmed by the helper (scroll or
-    /// button). Scroll deltas stay inside `InputSender`; they have no consumer
-    /// past the watchdog/handoff boundary.
+    /// An admitted non-movement batch (scroll or button) was confirmed by
+    /// the helper. Scroll deltas stay inside `InputSender`; they have no
+    /// consumer past the watchdog/handoff boundary.
     case delivered
     /// Admitted work invalidated by lifecycle/generation cancellation (local
     /// return, session replacement, stale in-flight response).
     case cancelled
-    /// Genuine delivery or safety failure requiring the fail-safe force-return.
+    /// Genuine delivery failure of admitted work: request throw, timeout,
+    /// malformed/unexpected response, helper-reported failure, or partial
+    /// movement. Always fail-safe.
     case failed
+}
+
+/// What `enqueuePointer` did with one captured event. This is the entire
+/// admission contract; it is orthogonal to `PointerDeliveryResult`.
+enum PointerAdmissionOutcome: Sendable, Equatable {
+    /// Appended as a new pending batch. The completion passed with this
+    /// enqueue is the batch's single acknowledgement: it is invoked exactly
+    /// once with the batch's delivery result (or `.cancelled`).
+    case acceptedAsNewBatch
+    /// Merged into the adjacent tail batch. The tail batch's original
+    /// completion owns the single delivery result; this enqueue's completion,
+    /// if any, is never invoked.
+    case coalescedIntoExistingBatch
+    /// Dropped under bounded backpressure before admission (move/scroll
+    /// only). The event never joined a batch, so no callback exists or
+    /// fires, no remote request is made, and no handoff accounting occurs.
+    case shedLocally
+    /// A button transition could not be enqueued losslessly at queue
+    /// saturation. This is a local safety decision, not a remote failure:
+    /// the completion is never invoked, and `InputSender`'s client owns the
+    /// fail-safe response (see `ControlHandoffController`).
+    case safetyRejected
 }
 
 /// Sends semantic CXI v1 pointer and keyboard events. HID descriptors,
@@ -70,10 +95,12 @@ final class InputSender: @unchecked Sendable {
     private var heldButtonsSessionGeneration: UInt64?
 
     /// One transport batch: possibly many merged raw capture events, but
-    /// exactly one delivery acknowledgement obligation.
+    /// exactly one delivery acknowledgement obligation. The completion is
+    /// supplied by the enqueue that created the batch and may be nil when a
+    /// caller only needs the synchronous admission outcome.
     private struct PendingPointerBatch {
         var event: PointerEvent
-        let completion: @Sendable (PointerDeliveryResult) -> Void
+        let completion: (@Sendable (PointerDeliveryResult) -> Void)?
         let pointerGeneration: UInt64
         let sessionGeneration: UInt64
     }
@@ -110,25 +137,32 @@ final class InputSender: @unchecked Sendable {
 
     /// Admits one captured event into the bounded pointer-batch queue.
     ///
-    /// Admission policy (O(1), tail-only):
-    /// - compatible additive tail → merge into that batch (no new completion);
-    /// - space available → append a new batch;
-    /// - saturated queue + additive event (move/scroll) → locally shed. The
-    ///   event was never admitted, so its completion is never invoked and no
-    ///   delivery result exists;
-    /// - saturated queue + button → safety failure: the completion receives
-    ///   `.failed` and keeps the fail-safe force-return path.
+    /// Returns the admission decision synchronously; the completion is bound
+    /// to delivery, not admission (ADR-0011):
+    /// - `.acceptedAsNewBatch` — the completion is the batch's single
+    ///   acknowledgement and is invoked exactly once with the batch's
+    ///   `PointerDeliveryResult` (`delivered*`, `partiallyDeliveredMovement`,
+    ///   `failed`, or lifecycle `.cancelled`).
+    /// - `.coalescedIntoExistingBatch` — the tail batch's original completion
+    ///   owns the single result; this enqueue's completion is never invoked.
+    /// - `.shedLocally` — a saturated queue dropped an additive sample before
+    ///   admission: no callback exists or fires, no remote request, no
+    ///   handoff accounting. Loss degrades input fidelity only; lost delta is
+    ///   never recovered by later events.
+    /// - `.safetyRejected` — a button transition could not be enqueued
+    ///   losslessly at saturation. The completion is never invoked; the
+    ///   client's fail-safe path handles the rejection.
     ///
-    /// The completion is therefore invoked at most once per call, and only
-    /// when the event joined a delivery batch. Callers must not rely on a
-    /// callback for admission rejection.
+    /// Admission is O(1): tail inspection, tail merge, capacity check,
+    /// amortized-O(1) append. No backward scans, no callback bookkeeping.
+    @discardableResult
     func enqueuePointer(_ event: PointerEvent,
-                        completion: @escaping @Sendable (PointerDeliveryResult) -> Void) {
+                        completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil)
+        -> PointerAdmissionOutcome {
         let sessionSnapshot = session.snapshot()
-        var safetyFailed = false
+        var outcome: PointerAdmissionOutcome?
         var shouldSchedule = false
         var scrollMergedIntoTail = false
-        var shedLocally = false
         var coalescedScrollTotal = 0
         var shedEventTotal = 0
         stateLock.withLock {
@@ -140,30 +174,35 @@ final class InputSender: @unchecked Sendable {
                 // stays the single acknowledgement for the whole batch.
                 pendingPointers[pendingPointers.count - 1].event = PointerEvent(mergedKind)
                 if case .scroll = event.kind { scrollMergedIntoTail = true }
+                outcome = .coalescedIntoExistingBatch
             } else if pendingPointers.count < maxPendingPointerItems {
                 pendingPointers.append(PendingPointerBatch(
                     event: event,
                     completion: completion,
                     pointerGeneration: pointerGeneration,
                     sessionGeneration: sessionSnapshot.generation))
+                outcome = .acceptedAsNewBatch
             } else if Self.isSheddable(event.kind) {
-                // Additive sample lost to local backpressure: later events of
-                // the same kind recover the semantic delta, so shedding is
-                // safe. No transport request, no delivery result, no handoff
+                // Additive sample lost to bounded backpressure. This degrades
+                // input fidelity only: move/scroll are transient additive
+                // samples, so their loss never leaves persistent remote state
+                // inconsistent. Subsequent events resume normal operation;
+                // the lost delta itself is NOT recovered by later events.
+                // No transport request, no delivery result, no handoff
                 // accounting; the watchdog remains the stall guard.
-                shedLocally = true
+                locallyShedEventCount += 1
+                shedEventTotal = locallyShedEventCount
+                outcome = .shedLocally
             } else {
                 // Losing an ordered button boundary cannot be recovered
-                // losslessly: safety failure keeps the fail-safe path.
-                safetyFailed = true
+                // losslessly: local safety rejection keeps remote button
+                // state untouched and defers the fail-safe decision to the
+                // client instead of masquerading as a remote failure.
+                outcome = .safetyRejected
             }
             if scrollMergedIntoTail {
                 coalescedScrollBatchCount += 1
                 coalescedScrollTotal = coalescedScrollBatchCount
-            }
-            if shedLocally {
-                locallyShedEventCount += 1
-                shedEventTotal = locallyShedEventCount
             }
             if !pointerWorkerScheduled, !pendingPointers.isEmpty {
                 pointerWorkerScheduled = true
@@ -175,15 +214,13 @@ final class InputSender: @unchecked Sendable {
         if scrollMergedIntoTail, coalescedScrollTotal % 200 == 0 {
             Diagnostics.log("pointer scroll batches coalesced count=\(coalescedScrollTotal)")
         }
-        if shedLocally, shedEventTotal % 100 == 0 {
+        if shedEventTotal > 0, shedEventTotal % 100 == 0 {
             Diagnostics.log("pointer queue saturation shed count=\(shedEventTotal)")
-        }
-        if safetyFailed {
-            completion(.failed)
         }
         if shouldSchedule {
             pointerQueue.async { [weak self] in self?.drainPointerQueue() }
         }
+        return outcome ?? .safetyRejected
     }
 
     /// Only move/scroll may be shed under pressure: their payload is additive.
@@ -211,7 +248,7 @@ final class InputSender: @unchecked Sendable {
             pendingPointers.removeAll(keepingCapacity: true)
             return value
         }
-        dropped.forEach { $0.completion(.cancelled) }
+        dropped.forEach { $0.completion?(.cancelled) }
     }
 
     /// Waits until capture events queued before this call have reached the
@@ -268,7 +305,7 @@ final class InputSender: @unchecked Sendable {
             guard let item else { return }
             let result = deliverPointer(item)
             let stillCurrent = stateLock.withLock { pointerGeneration == item.pointerGeneration }
-            item.completion(stillCurrent ? result : .cancelled)
+            item.completion?(stillCurrent ? result : .cancelled)
         }
     }
 

@@ -97,7 +97,7 @@ final class InputSenderTests: XCTestCase {
         sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in }
         sender.enqueueKey(CapturedKeyEvent(keyCode: 29, metaState: 0, action: 1, repeatCount: 0))
 
-        Thread.sleep(forTimeInterval: 0.03)
+        XCTAssertEqual(session.sendStarted.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(session.sendCount, 1)
         sender.waitForDrain()
     }
@@ -197,125 +197,213 @@ final class InputSenderTests: XCTestCase {
 
 
     // MARK: - Issue #62: batch admission and delivery semantics
+    //
+    // Determinism rules for every test in this section:
+    // - No polling and no arbitrary sleeps. A request that must be observed
+    //   in flight parks on `FakeSession.requestEntered`, which the fake
+    //   signals synchronously on entry to `request`; the request stays
+    //   blocked until `releaseGate()`.
+    // - Queue shape is constructed deliberately: while the worker is parked
+    //   inside the gated request, subsequently enqueued events sit in
+    //   `pendingPointers` in exactly their enqueue order.
 
-    /// Counts completions per enqueue so callback cardinality can be asserted
-    /// against the helper's request count (ADR-0011: one batch = one result).
+    /// Counts completions so callback cardinality can be asserted against
+    /// the helper's request count (ADR-0011: one admitted batch yields
+    /// exactly one delivery result and one handoff-accounting operation).
     private final class CompletionCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
         func call() { lock.withLock { count += 1 } }
+        func reset() { lock.withLock { count = 0 } }
         var value: Int { lock.withLock { count } }
     }
 
-    // Batch callback cardinality regression: a parked button boundary keeps
-    // the queue stable while nine raw moves coalesce into ONE queued batch.
-    // The rejected fan-out implementation invoked ten callbacks here.
-    func testTenRawMovesCoalesceIntoOneRequestAndOneCallback() {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference)
-        let callbacks = CompletionCounter()
-
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("first request never became in-flight"); return }
-        }
-
-        for _ in 0..<9 {
-            sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in callbacks.call() }
-        }
-        session.releaseGate()
-        sender.waitForDrain()
-
-        XCTAssertEqual(session.requestCount, 2, "button boundary + one merged move batch")
-        XCTAssertEqual(callbacks.value, 1,
-                       "nine merges must collapse into ONE acknowledgement, never nine")
-        XCTAssertEqual(session.requestTypes.filter { $0 == .pointerButton }.count, 1,
-                       "button appears exactly once")
-        XCTAssertEqual(session.acceptedMovement.0, 9,
-                       "aggregate delta of the coalesced move batch is preserved")
+    private struct Fixture {
+        let session: FakeSession
+        let reference: SessionReference
+        let sender: InputSender
     }
 
-    // End-to-end handoff accounting: duplicated accounting would over-credit
-    // return-direction movement and force an early boundary return.
-    func testCoalescedReturnMoveCreditsHandoffOnce() async {
+    private func makeFixture(maxPendingPointerItems: Int = 64,
+                             pointerRequestTimeout: TimeInterval = 5) -> Fixture {
         let session = FakeSession()
         session.gateAllRequests = true
         let reference = SessionReference()
         reference.set(session)
-        let sender = InputSender(session: reference)
+        let sender = InputSender(session: reference,
+                                 maxPendingPointerItems: maxPendingPointerItems,
+                                 pointerRequestTimeout: pointerRequestTimeout)
+        return Fixture(session: session, reference: reference, sender: sender)
+    }
+
+    /// Waits for the worker to be provably inside the fake transport.
+    private func awaitInFlight(_ session: FakeSession,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(session.requestEntered.wait(timeout: .now() + 2), .success,
+                       "request never became in-flight", file: file, line: line)
+    }
+
+    /// Drains pending MainActor delivery tasks after a synchronous drain so
+    /// controller-applied state changes become observable.
+    private func settleMainActor() async {
+        for _ in 0..<50 { await Task.yield() }
+    }
+
+    // MARK: Admission/delivery contract (ADR-0011)
+
+    /// The admission outcome is the entire per-enqueue contract: only the
+    /// enqueue that created a batch owns its single completion; coalesced,
+    /// shed, and safety-rejected enqueues have no callback at any point.
+    func testAdmissionOutcomesAreSeparateFromDeliveryResults() {
+        let fixture = makeFixture()
+        let moveOwner = ResultBox<PointerDeliveryResult>()
+        let secondMoveOwner = ResultBox<PointerDeliveryResult>()
+        let scrollOwner = ResultBox<PointerDeliveryResult>()
+        let coalescedCallbacks = CompletionCounter()
+
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.move(dx: 1, dy: 0))) { moveOwner.set($0) },
+            .acceptedAsNewBatch)
+        awaitInFlight(fixture.session)
+
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.move(dx: 2, dy: 0))) { secondMoveOwner.set($0) },
+            .acceptedAsNewBatch, "the in-flight head left the queue, so this move starts a new batch")
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 3, vertical: 4))) { scrollOwner.set($0) },
+            .acceptedAsNewBatch, "kind change is an ordering boundary")
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 5, vertical: 6))) { _ in coalescedCallbacks.call() },
+            .coalescedIntoExistingBatch)
+
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertEqual(fixture.session.requestTypes,
+                       [.pointerMoveRel, .pointerMoveRel, .pointerScroll])
+        XCTAssertEqual(coalescedCallbacks.value, 0,
+                       "the coalesced enqueue must never receive a delivery callback")
+        XCTAssertNotNil(moveOwner.get())
+        XCTAssertNotNil(secondMoveOwner.get(),
+                       "each new-batch owner receives exactly one aggregate result")
+        XCTAssertEqual(scrollOwner.get(), .delivered,
+                       "the scroll batch owner receives exactly one aggregate result")
+    }
+
+    /// Cardinality regression for the PR #63 blocker (commit ae15c22 fanned
+    /// the aggregate batch result out to every contributing completion):
+    /// exactly ten raw moves are enqueued, so there must be exactly one
+    /// pointerMoveRel request and exactly one movement completion carrying
+    /// the aggregate. The fan-out implementation produces ten completions.
+    func testTenRawMovesProduceOneMoveRequestAndOneMovementCompletion() {
+        let fixture = makeFixture()
+        let rawMoveCount = 10
+
+        fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
+        awaitInFlight(fixture.session)
+
+        let movementCompletions = CompletionCounter()
+        let aggregate = ResultBox<PointerDeliveryResult>()
+        for i in 0..<rawMoveCount {
+            if i == 0 {
+                fixture.sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { result in
+                    if case .deliveredMovement = result { movementCompletions.call() }
+                    aggregate.set(result)
+                }
+            } else {
+                fixture.sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in
+                    movementCompletions.call()
+                }
+            }
+        }
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertEqual(fixture.session.requestCount, 2,
+                       "parked button boundary plus ONE merged movement batch")
+        XCTAssertEqual(fixture.session.requestTypes.filter { $0 == .pointerMoveRel }.count, 1,
+                       "ten raw moves collapse into exactly one pointerMoveRel request")
+        XCTAssertEqual(movementCompletions.value, 1,
+                       "one admitted batch = exactly one movement completion, never \(rawMoveCount)")
+        XCTAssertEqual(aggregate.get(),
+                       .deliveredMovement(requestedDx: Int32(rawMoveCount), requestedDy: 0,
+                                          deliveredDx: Int32(rawMoveCount), deliveredDy: 0),
+                       "the aggregate delta of all \(rawMoveCount) moves is preserved")
+        XCTAssertEqual(fixture.session.acceptedMovement.0, Int32(rawMoveCount))
+    }
+
+
+    /// Integration proof that a coalesced aggregate movement batch is applied
+    /// to handoff accounting EXACTLY ONCE through the production wiring
+    /// (capture seam -> InputSender -> delivery completion ->
+    /// ControlHandoffController.apply(delivery:) -> EdgeSwitchStateMachine).
+    ///
+    /// Mutation proof (PR #63 blocker, commit ae15c22): that implementation
+    /// invoked one completion per contributing enqueue with the aggregate
+    /// result. Here the coalesced (-9 * 10 = -90) return-direction batch is
+    /// the FIRST movement after entering remoteActive, so the first-movement
+    /// exemption (issue #37) absorbs the single credit. Under the fan-out
+    /// implementation the exemption absorbs only the first of ten identical
+    /// credits; the remaining nine drive the virtual position far past
+    /// -hysteresis and force an immediate boundaryCrossed return. This test
+    /// fails on ae15c22 and passes only when accounting happens once.
+    ///
+    /// Observation uses `controller.onStateChange` (the controller's outward
+    /// seam) and final machine state; the production machine.onStateChange
+    /// wiring installed by the controller stays connected throughout.
+    func testCoalescedFirstMovementBatchIsAppliedExactlyOnce() async {
+        let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: sender,
+        let controller = ControlHandoffController(sender: fixture.sender,
                                                   switchMachine: machine)
-        let states = ResultBox<HandoffState>()
-        machine.onStateChange = { states.set($0.to) }
+        let sawLocal = CompletionCounter()
+        controller.onStateChange = { state in
+            if state == .local { sawLocal.call() }
+        }
 
         machine.activate()
         machine.pointerAtEdge(.right) // localActive -> edgeArmed -> remoteActive
         machine.flushCallbacks()
+        await settleMainActor()
         XCTAssertEqual(machine.state, .remoteActive)
+        sawLocal.reset() // ignore the activation-time local transition
 
-        controller.enqueueForTesting(PointerEvent(.move(dx: 1, dy: 0)))
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
+        // A parked button boundary keeps the queue stable; buttons produce no
+        // movement credit and do not consume the first-movement exemption.
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: true)))
+        awaitInFlight(fixture.session)
+
+        let rawMoveCount = 10
+        for _ in 0..<rawMoveCount {
+            controller.capture.onPointerEvent?(PointerEvent(.move(dx: -9, dy: 0)))
         }
-        for _ in 0..<9 {
-            controller.enqueueForTesting(PointerEvent(.move(dx: 1, dy: 0)))
-        }
-        session.releaseGate()
-        sender.waitForDrain()
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
         machine.flushCallbacks()
-        // Completion handling hops through Task { @MainActor }; yield so the
-        // actor drains pending delivery tasks before asserting.
-        for _ in 0..<50 { await Task.yield() }
+        await settleMainActor()
 
-        // Pull back: the aggregated credit crosses -hysteresis exactly once.
-        controller.enqueueForTesting(PointerEvent(.move(dx: -100, dy: 0)))
-        sender.waitForDrain()
+        XCTAssertEqual(machine.state, .remoteActive,
+                       "the exempted first movement must not return control")
+        XCTAssertEqual(sawLocal.value, 0,
+                       "fan-out accounting would over-credit and force an early return")
+
+        // The exemption must not make legitimate return harder: an ordinary
+        // return-direction batch still crosses the hysteresis exactly once.
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: -100, dy: 0)))
+        fixture.sender.waitForDrain()
         machine.flushCallbacks()
-        for _ in 0..<50 { await Task.yield() }
+        await settleMainActor()
 
-        XCTAssertEqual(states.get(), .localActive,
-                       "return-direction movement must fire exactly one return")
+        XCTAssertEqual(machine.state, .localActive,
+                       "a deliberate return after the exempted batch must still work")
+        XCTAssertEqual(sawLocal.value, 1)
     }
 
-    // Deterministic scroll coalescing: the first transport request is held by
-    // the gate so queue state is known before adjacent scrolls are admitted.
-    func testAdjacentScrollsCoalesceWhileFirstRequestIsGated() {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference)
+    // MARK: Deterministic scroll coalescing matrix (ADR-0011)
 
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 2.5, vertical: 3))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
-
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 1.5, vertical: -1))) { _ in }
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: -1, vertical: 4))) { _ in }
-        session.releaseGate()
-        sender.waitForDrain()
-
-        // Gated head (2.5, 3) is in flight; the next two scrolls form a
-        // second batch and merge together: requests = head + merged batch.
-        XCTAssertEqual(session.requestTypes.count, 2,
-                       "gated head batch plus one merged scroll batch")
-        XCTAssertEqual(session.acceptedScroll.0, 2.5 + 1.5 - 1, accuracy: 0.0001,
-                       "horizontal accumulates across both batches")
-        XCTAssertEqual(session.acceptedScroll.1, 3.0 + 3.0, accuracy: 0.0001,
-                       "vertical accumulates across both batches")
-    }
-
+    /// Each case parks the worker on a gated button boundary so the two
+    /// scrolls are provably pending adjacent in the queue before the worker
+    /// can dequeue anything, then verifies the exact aggregate.
     func testScrollMatrixAccumulatesWithTolerance() {
         let cases: [(Float, Float, Float, Float)] = [
             (2, 0, 3, 0),      // (+h, 0) + (+h, 0)
@@ -327,19 +415,79 @@ final class InputSenderTests: XCTestCase {
             (2, 3, -5, -7),    // (+h, +v) + (-h, -v)
         ]
         for (h1, v1, h2, v2) in cases {
-            let session = FakeSession()
-            let reference = SessionReference()
-            reference.set(session)
-            let sender = InputSender(session: reference)
+            let fixture = makeFixture()
 
-            sender.enqueuePointer(PointerEvent(.scroll(horizontal: h1, vertical: v1))) { _ in }
-            sender.enqueuePointer(PointerEvent(.scroll(horizontal: h2, vertical: v2))) { _ in }
-            sender.waitForDrain()
+            fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
+            awaitInFlight(fixture.session)
 
-            XCTAssertEqual(session.requestCount, 1, "\(h1),\(v1)+\(h2),\(v2)")
-            XCTAssertEqual(session.acceptedScroll.0, h1 + h2, accuracy: 0.0001)
-            XCTAssertEqual(session.acceptedScroll.1, v1 + v2, accuracy: 0.0001)
+            XCTAssertEqual(fixture.sender.enqueuePointer(
+                PointerEvent(.scroll(horizontal: h1, vertical: v1))),
+                .acceptedAsNewBatch)
+            XCTAssertEqual(fixture.sender.enqueuePointer(
+                PointerEvent(.scroll(horizontal: h2, vertical: v2))),
+                .coalescedIntoExistingBatch)
+
+            fixture.session.releaseGate()
+            fixture.sender.waitForDrain()
+
+            XCTAssertEqual(fixture.session.requestTypes, [.pointerButton, .pointerScroll],
+                           "\(h1),\(v1)+\(h2),\(v2): adjacent scrolls must form one request")
+            XCTAssertEqual(fixture.session.acceptedScroll.0, h1 + h2, accuracy: 0.0001)
+            XCTAssertEqual(fixture.session.acceptedScroll.1, v1 + v2, accuracy: 0.0001)
         }
+    }
+
+    /// Button boundaries survive a scroll burst losslessly: the worker is
+    /// parked on the gated button-down while the whole burst queues and
+    /// coalesces, so ordering is proven, not hoped for.
+    func testButtonDownScrollBurstButtonUpStaysOrderedAndLossless() {
+        let fixture = makeFixture()
+
+        let downCallbacks = CompletionCounter()
+        fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { result in
+            if case .failed = result { downCallbacks.call() }
+        }
+        let burstSize = 200
+        let scrollOwner = ResultBox<PointerDeliveryResult>()
+        var expectedV: Float = 0
+        for i in 0..<burstSize {
+            let v = Float(i % 3) - 1
+            expectedV += v
+            if i == 0 {
+                fixture.sender.enqueuePointer(
+                    PointerEvent(.scroll(horizontal: Float(i % 3) - 1, vertical: v))) {
+                    scrollOwner.set($0)
+                }
+            } else {
+                fixture.sender.enqueuePointer(
+                    PointerEvent(.scroll(horizontal: Float(i % 3) - 1, vertical: v))) { _ in }
+            }
+        }
+        let upCallbacks = CompletionCounter()
+        fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: false))) { result in
+            if case .failed = result { upCallbacks.call() }
+        }
+
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertEqual(fixture.session.pointerButtonEvents.count, 2,
+                       "exactly one down and one up request reach the helper")
+        XCTAssertEqual(fixture.session.pointerButtonEvents.map(\.1), [true, false],
+                       "button down/up must both reach the helper exactly once, in order")
+        let buttonIndices = fixture.session.requestTypes.enumerated().compactMap {
+            $0.element == .pointerButton ? $0.offset : nil
+        }
+        XCTAssertEqual(buttonIndices.first, 0, "button-down is the first request")
+        XCTAssertEqual(buttonIndices.last, fixture.session.requestTypes.count - 1,
+                       "button-up is the final request")
+        XCTAssertEqual(fixture.session.requestTypes.filter { $0 == .pointerScroll }.count, 1,
+                       "the whole burst coalesces into a single scroll request")
+        XCTAssertEqual(fixture.session.acceptedScroll.1, expectedV, accuracy: 0.0001,
+                       "the burst aggregate is preserved end-to-end")
+        XCTAssertEqual(scrollOwner.get(), .delivered)
+        XCTAssertEqual(downCallbacks.value, 0, "no button safety failure")
+        XCTAssertEqual(upCallbacks.value, 0, "no silent button drop")
     }
 
     func testOrderingBoundariesRemainSeparateRequests() {
@@ -360,136 +508,149 @@ final class InputSenderTests: XCTestCase {
                     expected: [.pointerMoveRel, .pointerScroll, .pointerMoveRel])
     }
 
-    func testButtonDownScrollBurstButtonUpStaysOrderedAndLossless() {
-        let session = FakeSession(delay: 50_000_000)
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference,
-                                 maxPendingPointerItems: 2,
-                                 pointerRequestTimeout: 1)
-
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
-        for i in 0..<200 {
-            sender.enqueuePointer(PointerEvent(.scroll(horizontal: Float(i % 3) - 1,
-                                                        vertical: 1))) { _ in }
-        }
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: false))) { _ in }
-        sender.waitForDrain()
-
-        XCTAssertEqual(session.pointerButtonEvents.count, 2,
-                       "exactly one down and one up request reach the helper")
-        XCTAssertEqual(session.pointerButtonEvents.map(\.1), [true, false],
-                       "button down/up must both reach the helper exactly once, in order")
-        let buttonIndices = session.requestTypes.enumerated().compactMap {
-            $0.element == .pointerButton ? $0.offset : nil
-        }
-        XCTAssertEqual(buttonIndices.first, 0, "button-down is the first request")
-        XCTAssertEqual(buttonIndices.last, session.requestTypes.count - 1,
-                       "button-up is the final request")
-    }
-
     private func assertOrder(_ kinds: [PointerEvent.Kind],
                              expected: [MessageType],
                              file: StaticString = #filePath,
                              line: UInt = #line) {
-        let session = FakeSession()
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference)
+        let fixture = makeFixture()
         for kind in kinds {
-            sender.enqueuePointer(PointerEvent(kind)) { _ in }
+            fixture.sender.enqueuePointer(PointerEvent(kind)) { _ in }
         }
-        sender.waitForDrain()
-        XCTAssertEqual(session.requestTypes, expected, file: file, line: line)
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        XCTAssertEqual(fixture.session.requestTypes, expected, file: file, line: line)
     }
 
-    func testMoveSaturationShedsLocallyWithoutDeliveryResult() {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference,
-                                 maxPendingPointerItems: 1,
-                                 pointerRequestTimeout: 1)
+    // MARK: Local saturation policy (ADR-0011: shedding is not failure)
 
-        sender.enqueuePointer(PointerEvent(.move(dx: 9, dy: 9))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
+    /// Move saturation: an incompatible scroll tail fills capacity so the
+    /// incoming moves cannot merge. Shedding must stay silent locally: no
+    /// remote request, no delivery result, no callback, no remote-failure
+    /// signal. Lost additive samples degrade fidelity only; the lost delta
+    /// is NOT recovered by later events.
+    func testMoveSaturationShedsLocallyWithoutDeliveryResult() {
+        let fixture = makeFixture(maxPendingPointerItems: 1)
+
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.move(dx: 9, dy: 9))), .acceptedAsNewBatch)
+        awaitInFlight(fixture.session)
 
         // Fill capacity 1 with a scroll boundary so incoming moves cannot
         // merge and must hit the saturation policy.
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 0, vertical: 1))), .acceptedAsNewBatch)
         let shedCallbacks = CompletionCounter()
         for _ in 0..<20 {
-            sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 1))) { _ in shedCallbacks.call() }
+            XCTAssertEqual(fixture.sender.enqueuePointer(
+                PointerEvent(.move(dx: 1, dy: 1))) { _ in shedCallbacks.call() },
+                .shedLocally)
         }
-        session.releaseGate()
-        sender.waitForDrain()
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
 
         XCTAssertEqual(shedCallbacks.value, 0,
                        "shed additive events were never admitted: no delivery result exists")
+        XCTAssertEqual(fixture.session.requestTypes, [.pointerMoveRel, .pointerScroll],
+                       "shed events must not generate remote traffic")
     }
 
+    /// Scroll saturation mirrors move saturation: local backpressure never
+    /// surfaces as a remote failure.
     func testScrollSaturationShedsLocallyWithoutDeliveryResult() {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference,
-                                 maxPendingPointerItems: 1,
-                                 pointerRequestTimeout: 1)
+        let fixture = makeFixture(maxPendingPointerItems: 1)
 
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 0, vertical: 1))), .acceptedAsNewBatch)
+        awaitInFlight(fixture.session)
 
-        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 1))) { _ in }
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.move(dx: 1, dy: 1))), .acceptedAsNewBatch)
         let shedCallbacks = CompletionCounter()
         for _ in 0..<20 {
-            sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 2))) { _ in shedCallbacks.call() }
+            XCTAssertEqual(fixture.sender.enqueuePointer(
+                PointerEvent(.scroll(horizontal: 0, vertical: 2))) { _ in shedCallbacks.call() },
+                .shedLocally)
         }
-        session.releaseGate()
-        sender.waitForDrain()
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
 
         XCTAssertEqual(shedCallbacks.value, 0,
                        "local saturation must never produce a remote-failure signal")
+        XCTAssertEqual(fixture.session.requestTypes.filter { $0 == .pointerScroll }.count, 1)
     }
 
-    func testButtonOverflowAtSaturationStillFailsClosed() {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference,
-                                 maxPendingPointerItems: 1,
-                                 pointerRequestTimeout: 1)
+    /// A button transition that cannot be enqueued losslessly is a LOCAL
+    /// safety decision: the completion is never invoked and no button frame
+    /// is sent; the client owns the fail-safe response.
+    func testButtonOverflowAtSaturationIsSafetyRejectedSilently() {
+        let fixture = makeFixture(maxPendingPointerItems: 1)
 
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) { _ in }
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))), .acceptedAsNewBatch)
+        awaitInFlight(fixture.session)
+        XCTAssertEqual(fixture.sender.enqueuePointer(
+            PointerEvent(.scroll(horizontal: 0, vertical: 1))), .acceptedAsNewBatch)
 
         let overflowResult = ResultBox<PointerDeliveryResult>()
         let done = DispatchSemaphore(value: 0)
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: false))) { result in
+        let outcome = fixture.sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: false))) { result in
             overflowResult.set(result)
             done.signal()
         }
-        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
-        XCTAssertEqual(overflowResult.get(), .failed,
-                       "a button that cannot be enqueued losslessly keeps the fail-safe signal")
-        session.releaseGate()
-        sender.waitForDrain()
+
+        XCTAssertEqual(outcome, .safetyRejected)
+        XCTAssertEqual(done.wait(timeout: .now() + 0.2), .timedOut,
+                       "a safety-rejected button must not produce a delivery callback")
+        XCTAssertNil(overflowResult.get(),
+                     "no delivery result may exist for a rejected enqueue")
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        XCTAssertEqual(fixture.session.pointerButtonEvents.map(\.1), [true],
+                       "only the admitted button-down ever reaches the helper")
     }
+
+    /// Controller-level effect of a button safety rejection while
+    /// remoteActive: the standard fail-safe path returns control to macOS.
+    /// No movement was ever delivered, so the only possible route to
+    /// localActive here is the safety-rejection handler.
+    func testButtonSafetyRejectionAtSaturationReturnsControlToLocal() async {
+        let fixture = makeFixture(maxPendingPointerItems: 2)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: fixture.sender,
+                                                  switchMachine: machine)
+        let sawLocal = CompletionCounter()
+        controller.onStateChange = { state in
+            if state == .local { sawLocal.call() }
+        }
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        sawLocal.reset() // ignore the activation-time local transition
+
+        // Fill capacity 2: one scroll in flight, two scrolls queued behind it
+        // (kind-compatible tails would merge, so alternate kinds).
+        controller.capture.onPointerEvent?(PointerEvent(.scroll(horizontal: 1, vertical: 0)))
+        awaitInFlight(fixture.session)
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: 1, dy: 0)))
+        controller.capture.onPointerEvent?(PointerEvent(.scroll(horizontal: 1, vertical: 0)))
+
+        // Saturated queue: this button cannot be preserved.
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: true)))
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive,
+                       "an unpreservable button transition must trip the fail-safe return")
+        XCTAssertEqual(sawLocal.value, 1)
+        XCTAssertFalse(fixture.session.requestTypes.contains(.pointerButton),
+                       "the rejected button must never be sent")
+    }
+
+    // MARK: Genuine remote failures remain fail-safe (ADR-0011)
 
     func testGenuineRequestFailureStillFails() {
         let session = FailingSession()
@@ -526,6 +687,45 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(result.get(), .failed)
     }
 
+    func testRequestTimeoutStillFails() {
+        // The fake delays 200 ms; the request timeout is 50 ms, so the
+        // transport surfaces ConnectionError.timeout.
+        let session = FakeSession(delay: 200_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 0.05)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.move(dx: 5, dy: 5))) {
+            result.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(result.get(), .failed,
+                       "a timed-out request is a genuine delivery failure")
+    }
+
+    func testMalformedPointerResultPayloadStillFails() {
+        // Correct frame type, undecodable payload (invalid status byte).
+        let session = FakeSession(response: CxiFrame(type: .pointerResult,
+                                                      requestId: 1,
+                                                      payload: Data([0xAB])))
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 1)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 0, vertical: 1))) {
+            result.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .failed,
+                       "a malformed helper response is a genuine delivery failure")
+    }
+
     func testHelperReportedFailureStillFails() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult, requestId: 1,
@@ -545,40 +745,38 @@ final class InputSenderTests: XCTestCase {
     }
 
     func testPartialMovementBehaviorIsPreservedAfterCoalescing() {
-        let session = FakeSession(response: CxiFrame(
+        let fixture = makeFixture()
+
+        // Park a button boundary in flight so the move burst forms one
+        // QUEUED batch that merges fully before delivery.
+        fixture.sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
+        awaitInFlight(fixture.session)
+
+        // The parked button consumed the gated request; arm the override so
+        // the NEXT request (the merged movement batch) gets the partial result.
+        fixture.session.respondWith(CxiFrame(
             type: .pointerResult,
             requestId: 1,
             payload: Messages.pointerResult(status: .partiallyDelivered,
                                              deliveredDx: 127,
                                              deliveredDy: 0)))
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference)
-        let result = ResultBox<PointerDeliveryResult>()
-        let done = DispatchSemaphore(value: 0)
-
-        // Park a button boundary in flight so the move burst forms one
-        // QUEUED batch that merges fully before delivery.
-        sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
         // The FIRST enqueue owns the batch's single acknowledgement; later
         // merges keep that original completion by design (ADR-0011).
-        sender.enqueuePointer(PointerEvent(.move(dx: 150, dy: 0))) {
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+        fixture.sender.enqueuePointer(PointerEvent(.move(dx: 150, dy: 0))) {
             result.set($0)
             done.signal()
         }
-        sender.enqueuePointer(PointerEvent(.move(dx: 150, dy: 0))) { _ in }
-        session.releaseGate()
-        sender.waitForDrain()
+        fixture.sender.enqueuePointer(PointerEvent(.move(dx: 150, dy: 0))) { _ in }
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
         XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(result.get(), .partiallyDeliveredMovement(requestedDx: 300, requestedDy: 0,
-                                                                  deliveredDx: 127, deliveredDy: 0))
+                                                                 deliveredDx: 127, deliveredDy: 0))
     }
+
+    // MARK: Session-generation semantics (ADR-0011)
 
     func testCoalescedBatchOnReplacedSessionIsCancelledAndNeverDelivered() {
         let oldSession = FakeSession()
@@ -586,16 +784,14 @@ final class InputSenderTests: XCTestCase {
         let newSession = FakeSession()
         let reference = SessionReference()
         reference.set(oldSession)
-        let sender = InputSender(session: reference, pointerRequestTimeout: 1)
+        let sender = InputSender(session: reference, pointerRequestTimeout: 5)
 
         sender.enqueuePointer(PointerEvent(.button(button: 0, down: true))) { _ in }
-        var polls = 0
-        while oldSession.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 4, vertical: 4))) { _ in }
-        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 6, vertical: 6))) { _ in }
+        awaitInFlight(oldSession)
+
+        let staleCallbacks = CompletionCounter()
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 4, vertical: 4))) { _ in staleCallbacks.call() }
+        sender.enqueuePointer(PointerEvent(.scroll(horizontal: 6, vertical: 6))) { _ in staleCallbacks.call() }
 
         reference.set(newSession)
         oldSession.releaseGate()
@@ -603,40 +799,132 @@ final class InputSenderTests: XCTestCase {
 
         XCTAssertEqual(newSession.requestCount, 0,
                        "stale coalesced work must not reach the replacement session")
+        XCTAssertEqual(staleCallbacks.value, 1,
+                       "the two scrolls coalesced into ONE batch, so its single "
+                       + "owner observes exactly one cancellation")
         XCTAssertEqual(newSession.acceptedScroll.0, 0, accuracy: 0.0001)
     }
 
-    func testCancelledInFlightBatchNeverCreditsMovement() async {
-        let session = FakeSession()
-        session.gateAllRequests = true
-        let reference = SessionReference()
-        reference.set(session)
-        let sender = InputSender(session: reference, pointerRequestTimeout: 5)
+    // MARK: Pointer-generation semantics (cancelPendingPointerEvents)
+
+    /// Cancelling the pointer generation must invalidate BOTH queued batches
+    /// (immediately) and the in-flight request (when its stale response
+    /// arrives). Nothing may be re-sent and no movement credited.
+    func testPointerGenerationCancellationCoversQueuedAndInFlightWork() {
+        let fixture = makeFixture()
+
+        let inFlightResult = ResultBox<PointerDeliveryResult>()
+        let inFlightDone = DispatchSemaphore(value: 0)
+        fixture.sender.enqueuePointer(PointerEvent(.move(dx: -100, dy: 0))) { result in
+            inFlightResult.set(result)
+            inFlightDone.signal()
+        }
+        awaitInFlight(fixture.session)
+
+        let queuedResults = ResultBox<PointerDeliveryResult>()
+        let queuedDone = DispatchSemaphore(value: 0)
+        fixture.sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { result in
+            queuedResults.set(result)
+            queuedDone.signal()
+        }
+        fixture.sender.enqueuePointer(PointerEvent(.scroll(horizontal: 1, vertical: 1))) { result in
+            queuedResults.set(result)
+            queuedDone.signal()
+        }
+
+        fixture.sender.cancelPendingPointerEvents()
+        XCTAssertEqual(queuedDone.wait(timeout: .now() + 1), .success,
+                       "queued batches are cancelled synchronously")
+
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        XCTAssertEqual(inFlightDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(inFlightResult.get(), .cancelled,
+                       "a stale in-flight response must surface as cancelled")
+        XCTAssertEqual(queuedResults.get(), .cancelled)
+        XCTAssertEqual(fixture.session.requestCount, 1,
+                       "cancellation must not generate any new remote request")
+    }
+
+    /// Sender-level half of the stale-in-flight invariant (issue #45/#63):
+    /// a cancelled in-flight return-direction batch reports `.cancelled`,
+    /// never a deliverable movement result.
+    func testCancelledInFlightDeliveryReportsCancelledResult() {
+        let fixture = makeFixture()
+
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+        fixture.sender.enqueuePointer(PointerEvent(.move(dx: -100, dy: 0))) {
+            result.set($0)
+            done.signal()
+        }
+        awaitInFlight(fixture.session)
+
+        fixture.sender.cancelPendingPointerEvents()
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .cancelled,
+                       "the invalidated in-flight request must not report delivery")
+    }
+
+    /// Controller-level mutation killer for stale in-flight accounting.
+    ///
+    /// Required structure (hysteresis 60):
+    /// 1. remoteActive established.
+    /// 2. A successful inward movement consumes the first-movement exemption.
+    /// 3. A return-direction -100 request is created and observed in flight.
+    /// 4. cancelPendingPointerEvents() bumps the pointer generation.
+    /// 5. The stale request then returns success.
+    ///
+    /// If the generation/stale-result protection were removed, the -100
+    /// success would be credited (-100 <= -60), forcing an immediate
+    /// boundaryCrossed return; this test asserts the session stays
+    /// remoteActive, so that mutation fails the test.
+    func testCancelledInFlightReturnMovementNeverCreditsHandoff() async {
+        let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: sender,
+        let controller = ControlHandoffController(sender: fixture.sender,
                                                   switchMachine: machine)
-        machine.onStateChange = { _ in }
+        let sawLocal = CompletionCounter()
+        controller.onStateChange = { state in
+            if state == .local { sawLocal.call() }
+        }
 
         machine.activate()
         machine.pointerAtEdge(.right)
         machine.flushCallbacks()
+        await settleMainActor()
         XCTAssertEqual(machine.state, .remoteActive)
+        sawLocal.reset() // ignore the activation-time local transition
 
-        controller.enqueueForTesting(PointerEvent(.move(dx: 40, dy: 40)))
-        var polls = 0
-        while session.requestsInFlight == 0 {
-            usleep(5_000); polls += 1
-            if polls > 2000 { XCTFail("request never became in-flight"); return }
-        }
-
-        sender.cancelPendingPointerEvents()
-        session.releaseGate()
-        sender.waitForDrain()
+        // Step 2: legitimate inward movement, delivered successfully; this
+        // consumes the first-movement exemption.
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: 40, dy: 40)))
+        awaitInFlight(fixture.session)
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
         machine.flushCallbacks()
-        for _ in 0..<50 { await Task.yield() }
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        sawLocal.reset() // ignore transitions emitted before the stale phase
+
+        // Steps 3-5: return-direction movement large enough to cross the
+        // return threshold if accidentally credited.
+        fixture.session.rearmGate()
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: -100, dy: 0)))
+        awaitInFlight(fixture.session)
+        fixture.sender.cancelPendingPointerEvents()
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
 
         XCTAssertEqual(machine.state, .remoteActive,
-                       "cancelled stale in-flight movement must not update handoff position")
+                       "cancelled stale in-flight movement must not force a return")
+        XCTAssertEqual(sawLocal.value, 0,
+                       "-100 <= -hysteresis must never be credited after cancellation")
     }
 
     private final class ResultBox<Value>: @unchecked Sendable {
@@ -645,6 +933,7 @@ final class InputSenderTests: XCTestCase {
 
         func set(_ value: Value) { lock.withLock { self.value = value } }
         func get() -> Value? { lock.withLock { value } }
+        var isNil: Bool { lock.withLock { value == nil } }
     }
 
     private final class FakeSession: SessionConnection, @unchecked Sendable {
@@ -666,14 +955,16 @@ final class InputSenderTests: XCTestCase {
         private(set) var sendCount = 0
         let requestStarted = DispatchSemaphore(value: 0)
         let sendStarted = DispatchSemaphore(value: 0)
-        private let inFlightLock = NSLock()
-        private var inFlightStorage = 0
-        /// Requests currently inside the fake transport. Observing >0 proves
-        /// a request is in flight regardless of where it is blocked.
-        var requestsInFlight: Int { inFlightLock.withLock { inFlightStorage } }
 
-        /// Test gate: when true, every request blocks inside the fake until
-        /// releaseGate() is called. Deterministic pending-queue control.
+        /// Signalled synchronously on entry to `request` when the gate is
+        /// armed: observing it proves the request is inside the transport,
+        /// with no polling and no timing assumptions.
+        let requestEntered = DispatchSemaphore(value: 0)
+
+        /// When enabled, requests block inside the fake until `releaseGate()`
+        /// is called. The open state LATCHES: after releaseGate(), later
+        /// requests pass through freely until `rearmGate()` closes the gate
+        /// again for the next request.
         var gateAllRequests = false
         private let gateLock = NSLock()
         private var gateOpen = false
@@ -682,22 +973,36 @@ final class InputSenderTests: XCTestCase {
             gateLock.withLock { gateOpen = true }
         }
 
+        /// Closes the gate again so the NEXT request parks deterministically.
+        func rearmGate() {
+            gateLock.withLock { gateOpen = false }
+        }
+
+        func connect() async throws {}
+
         init(response: CxiFrame? = nil, delay: UInt64 = 0, sendDelay: UInt64 = 0) {
             self.response = response
             self.delay = delay
             self.sendDelay = sendDelay
         }
+        /// Overrides every subsequent response until changed. Used after a
+        /// gated request is parked so the override reaches the NEXT request.
+        func respondWith(_ frame: CxiFrame) {
+            responseBox.lock.withLock { responseBox.value = frame }
+        }
+        private let responseBox = ResponseBox()
 
-        func connect() async throws {}
+        private final class ResponseBox: @unchecked Sendable {
+            let lock = NSLock()
+            var value: CxiFrame?
+        }
 
         func request(_ type: MessageType, payload: Data, timeout: TimeInterval?) async throws -> CxiFrame {
-            inFlightLock.withLock { inFlightStorage += 1 }
-            defer { inFlightLock.withLock { inFlightStorage -= 1 } }
-            if gateAllRequests {
-                // Block after entering, before recording, so the test can
-                // observe a request that is provably in flight.
+            if gateAllRequests, !gateLock.withLock({ gateOpen }) {
+                // Prove entry first, then block until the test releases us.
+                requestEntered.signal()
                 while !gateLock.withLock({ gateOpen }) {
-                    try await Task.sleep(nanoseconds: 5_000_000)
+                    try await Task.sleep(nanoseconds: 2_000_000)
                 }
             }
             requestStarted.signal()
@@ -726,6 +1031,11 @@ final class InputSenderTests: XCTestCase {
                 }
                 try await Task.sleep(nanoseconds: delay)
             }
+            if let override = responseBox.lock.withLock({ responseBox.value }) {
+                // Sticky: every later request uses this response until
+                // respondWith changes or clears it.
+                return override
+            }
             if let response { return response }
             if type == .pointerMoveRel, payload.count >= 8 {
                 let dx = payload.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
@@ -744,7 +1054,6 @@ final class InputSenderTests: XCTestCase {
         }
 
         func send(_ frame: CxiFrame) throws {
-            sendStarted.signal()
             lock.withLock {
                 sendCount += 1
                 sentFrames.append(frame)
@@ -755,6 +1064,7 @@ final class InputSenderTests: XCTestCase {
                     sentPointerButtonEvents.append((button, frame.payload[4] != 0))
                 }
             }
+            sendStarted.signal()
             if sendDelay > 0 {
                 Thread.sleep(forTimeInterval: Double(sendDelay) / 1_000_000_000)
             }

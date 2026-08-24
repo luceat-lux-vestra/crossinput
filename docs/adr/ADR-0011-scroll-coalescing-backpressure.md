@@ -68,13 +68,16 @@ count after coalescing.
 ### 3. Admission and delivery are different lifecycle domains
 
 **Admission** decides what enters a batch: merge into a compatible tail,
-append a new batch, locally shed an additive event under saturation, or fail
-safe on an unretainable button. An additive event shed at admission was never
-admitted for delivery: it produces **no transport request, no
-`PointerDeliveryResult`, no completion invocation, no watchdog poke, and no
-handoff accounting**. Local queue saturation is therefore not observable as
-any delivery outcome at all — it cannot masquerade as `.cancelled` or
-`.failed`.
+append a new batch, locally shed an additive event under saturation, or
+safety-reject an unretainable button. `enqueuePointer` reports its decision
+synchronously as a `PointerAdmissionOutcome`
+(`acceptedAsNewBatch` / `coalescedIntoExistingBatch` / `shedLocally` /
+`safetyRejected`), so admission is fully observable without touching the
+delivery domain. An additive event shed at admission was never admitted for
+delivery: it produces **no transport request, no `PointerDeliveryResult`, no
+completion invocation, no watchdog poke, and no handoff accounting**. Local
+queue saturation is therefore not observable as any delivery outcome at all
+— it cannot masquerade as `.cancelled` or `.failed`.
 
 **Delivery** produces one `PointerDeliveryResult` per admitted batch:
 `.deliveredMovement` / `.partiallyDeliveredMovement` (with requested and
@@ -89,24 +92,26 @@ them, and diagnostics do not justify carrying unused payloads through layers.
 Invariant: **local queue saturation must never imply `remoteUnavailable`.**
 
 ### 4. Buttons are state transitions, never samples
-
 A button down/up pair alters persistent remote state. Buttons never coalesce,
 never reorder, and are never dropped silently. If bounded admission cannot
-retain a button losslessly, that is a safety failure: the enqueue caller's
-completion receives `.failed` synchronously and the existing fail-safe
-force-return path applies.
+retain a button losslessly, the enqueue returns `.safetyRejected` with no
+delivery callback and no button frame sent. This is a local safety decision,
+not a remote verdict: `ControlHandoffController` owns the fail-safe response
+(cancel pending work, force-return with `reason: .remoteUnavailable`),
+keeping remote failure semantics reserved for genuine transport/helper
+failures.
 
 ### 5. Failure taxonomy
 
 | Condition | Domain | Result/action |
 |---|---|---|
-| move/scroll merged into tail | admission | accepted into existing batch |
-| new move/scroll/button with space | admission | new batch |
-| move/scroll saturation | admission | local shed, no result |
-| button saturation | admission/safety | synchronous `.failed`, fail-safe |
+| move/scroll merged into tail | admission | `.coalescedIntoExistingBatch`, no new completion |
+| new move/scroll/button with space | admission | `.acceptedAsNewBatch`, completion owns batch result |
+| move/scroll saturation | admission | `.shedLocally`, no result |
+| button saturation | admission/safety | `.safetyRejected`, controller fail-safe force-return |
 | delivered move | delivery | one `.deliveredMovement` |
 | delivered scroll/button | delivery | `.delivered` |
-| timeout / transport exception / unexpected response / helper failure | delivery | `.failed` |
+| timeout / transport exception / unexpected response / malformed payload / helper failure | delivery | `.failed` |
 | partial movement | delivery | existing partial safety path |
 | stale session / stale pointer generation | lifecycle | `.cancelled` |
 
@@ -164,19 +169,39 @@ issue with reproducible measurements.
 
 ## Validation
 
-- Unit/integration: `InputSenderTests` — gated deterministic cardinality test
-  (button boundary parked in flight; nine moves coalesce into one queued
-  batch; request/callback counts asserted equal), end-to-end handoff
-  accounting through `ControlHandoffController` + `EdgeSwitchStateMachine`
-  (return fires from a single aggregated credit), gate-held scroll coalescing
-  with exact accumulated deltas, seven-case horizontal/vertical accumulation
-  matrix with tolerance, ordering boundaries (scroll→button→scroll,
-  scroll→move→scroll, move→scroll→move, buttonDown→burst→buttonUp),
-  deterministic saturation tests asserting zero delivery results for shed
-  additive events, button overflow failing closed, genuine transport/helper/
-  unexpected-response failures, partial movement after coalescing, replaced
-  session never receiving stale work, cancelled in-flight movement never
-  crediting handoff position. Full suite: 112 tests, 0 failures.
+- Unit/integration (`InputSenderTests`, all deterministic — semaphore-gated
+  fake transport, no polling/sleeps for synchronization):
+  - Admission contract: `testAdmissionOutcomesAreSeparateFromDeliveryResults`
+    asserts each `PointerAdmissionOutcome` and that only batch owners ever
+    receive a completion.
+  - Cardinality regression: `testTenRawMovesProduceOneMoveRequestAndOneMovementCompletion`
+    (button boundary parked in flight; exactly ten raw moves; exactly one
+    `pointerMoveRel` request, one movement completion, aggregate delta
+    preserved). This fails on the rejected fan-out implementation.
+  - Handoff accounting once: `testCoalescedFirstMovementBatchIsAppliedExactlyOnce`
+    routes through the production capture→sender→controller→state-machine
+    wiring observed via `controller.onStateChange` (production callbacks stay
+    connected); fails on the fan-out implementation because nine duplicate
+    credits would cross `-hysteresis`.
+  - Mutation-killing stale in-flight test:
+    `testCancelledInFlightReturnMovementNeverCreditsHandoff` (hysteresis 60;
+    exemption consumed by an inward move; return-direction −100 cancelled
+    in flight; stale success must not credit). Removing generation/stale-result
+    protection makes this fail (−100 ≤ −60 would force return).
+  - Seven-case scroll accumulation matrix, gate-held scroll coalescing,
+    ordering boundaries (scroll→button→scroll, scroll→move→scroll,
+    move→scroll→move), buttonDown→200-scroll burst→buttonUp lossless.
+  - Saturation: shed moves/scrolls assert `.shedLocally`, zero callbacks,
+    zero extra remote requests; button overflow asserts `.safetyRejected`,
+    no callback, no button frame; controller-level safety rejection returns
+    control to macOS.
+  - Failures preserved: timeout, transport throw, unexpected response type,
+    malformed pointer-result payload, helper-reported failure, partial
+    movement after coalescing.
+  - Lifecycle: replaced session never receives stale work (single owner
+    cancellation); `cancelPendingPointerEvents` covers queued AND in-flight
+    work with `.cancelled` and generates no new requests.
+  Local suite at final HEAD: 116 XCTest + 30 Swift Testing tests, 0 failures.
 - Physical acceptance on SM-G977N DeX (issue #62 procedure): scroll stress
   must produce no `remoteActive -> returning reason=remoteUnavailable` line in
   `diag.log`; 100-cycle edge handoff test must pass 100/100 before merge.
