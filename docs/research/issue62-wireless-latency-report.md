@@ -1,7 +1,7 @@
 # Issue #62 — Wireless ADB Latency/Timeout Investigation
 
 **Status:** INVESTIGATION COMPLETE (observability + harness + measurement)
-**Tested HEAD:** `40a0786137596088345855e6d8a2db491c49cc1f`
+**Tested HEAD (executable code):** `f7fc64ff66ee7739466c6821a965db68fee1aad9` — physical run executed at this exact push; evidence committed separately as docs-only commit B per review process note.
 **Date:** 2026-08-25 (rev 3 — post-review-round-2; supersedes rev 1/2)
 **Related:** issue #62, PR #63, PR #66 review, ADR-0011, ADR-0012
 
@@ -31,7 +31,7 @@
 | Host | Darwin 25.5.0 arm64, headless over SSH |
 | Display | DeX desktop display discovered at runtime (`dex_display_id=16`) |
 | Competing load | scrcpy OFF |
-| Evidence | `docs/research/evidence/issue-62-wireless-latency/20260825T025810Z-40a0786/` |
+| Evidence | `docs/research/evidence/issue-62-wireless-latency/20260825T033214Z-f7fc64f/` |
 
 ## Workloads executed (wireless ADB)
 
@@ -41,12 +41,12 @@ production request latency (request issue → correlated POINTER_RESULT).
 | Profile | events | remote reqs | coalesced | shed | p50 | p95 | p99 | max | timeouts | late |
 |---|---|---|---|---|---|---|---|---|---|---|
 | baseline (serial) | 500 | 500 | 0 | 0 | 11.3 ms | 19.3 ms | 27.1 ms | 31.3 ms | 0 | 0 |
-| scroll-burst (25×20) | 500 | 37 | 463 | 0 | 64.4 ms | 97.3 ms | 105.6 ms | 105.6 ms | 0 | 0 |
-| move-burst (same shape) | 500 | 39 | 461 | 0 | 64.1 ms | 106.2 ms | 117.5 ms | 117.5 ms | 0 | 0 |
+| scroll-burst (25×20) | 500 | 39 | 461 | 0 | 64.4 ms | 97.3 ms | 108.3 ms | 108.3 ms | 0 | 0 |
+| move-burst (same shape) | 500 | 39 | 461 | 0 | 64.1 ms | 106.2 ms | 125.9 ms | 125.9 ms | 0 | 0 |
 | mixed move+scroll | 500 | 500 | 0* | 0 | 10.7 ms | 19.2 ms | 23.6 ms | 25.6 ms | 0 | 0 |
-| burst-idle cycles | 480 | 35 | 445 | 0 | 72.5 ms | 99.9 ms | 113.9 ms | 113.9 ms | 0 | 0 |
-| queue-pressure (25×128 alternating) | 3,200 | 1,616 | 784 | 800 | 14.2 ms | 21.7 ms | 75.6 ms | 123.4 ms | 0 | 0 |
-| **Total** | **5,680** | **2,727** | | **800** | | | | | **0** | **0** |
+| burst-idle cycles | 480 | 39 | 441 | 0 | 72.5 ms | 99.9 ms | 119.3 ms | 119.3 ms | 0 | 0 |
+| queue-pressure (25×128 alternating) | 3,200 | 1,620 | 780 | 800 | 14.2 ms | 21.7 ms | 69.1 ms | 145.1 ms | 0 | 0 |
+| **Total** | **5,680** | **2,737** | | **800** | | | | | **0** | **0** |
 
 *mixed alternates kinds every event, so tail merging rarely engages by design.
 

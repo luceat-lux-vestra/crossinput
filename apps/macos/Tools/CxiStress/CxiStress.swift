@@ -25,6 +25,7 @@ import Diagnostics
 struct CxiStress {
     static func main() async throws {
         let config = parseArgs()
+        var selectedDesktopDisplayId: Int?
         Diagnostics.logURL = tempLogURL()
 
         let transport = AdbTransport()
@@ -70,11 +71,12 @@ struct CxiStress {
         // Review round 3: fail-closed on the DeX/desktop target. Falling
         // back to any display would let a non-DeX run pass as #62 evidence.
         guard let desktop = displays.first(where: { $0.isDesktop }) else {
-            fputs("ERROR: no DeX desktop display found; refusing to run " +
+            fputs("ERROR: no DeX/desktop display found; refusing to run " +
                   "(exit 3, precondition unavailable)\n", stderr)
             session.shutdownAndWait()
             exit(3)
         }
+        selectedDesktopDisplayId = Int(desktop.displayId)  // UInt32 -> Int
         _ = try await session.request(.selectDisplay,
                                       payload: Messages.selectDisplay(displayId: desktop.displayId))
         print("display_selected id=\(desktop.displayId) desktop=true")
@@ -130,7 +132,8 @@ struct CxiStress {
                                          lateResponses: session.snapshotLateResponses(),
                                          capabilities: session.helperCapabilities.rawValue,
                                          admission: admissionBox.snapshot(),
-                                         deliveryResults: admissionBox.deliverySnapshot())
+                                         deliveryResults: admissionBox.deliverySnapshot(),
+                                         desktopDisplayId: selectedDesktopDisplayId)
 
         for line in counterBox.counter.summaryLines() {
             print(line)

@@ -420,6 +420,9 @@ public final class InputSender: @unchecked Sendable {
                         outcome: .helperReportedFailure(requestType: RequestObservation.Kind(of: type))))
                     return .failed
                 }
+                observe(RequestObservation(
+                    kind: RequestObservation.Kind(of: type),
+                    outcome: .partialDelivery(requestType: RequestObservation.Kind(of: type))))
                 return .partiallyDeliveredMovement(requestedDx: requestedDx,
                                                    requestedDy: requestedDy,
                                                    deliveredDx: result.deliveredDx,
@@ -431,20 +434,18 @@ public final class InputSender: @unchecked Sendable {
                 return .failed
             }
         } catch {
-            // Full failure taxonomy (issue #62, review round 2): decode
-            // failures are classified as malformedResponse — the advertised
-            // taxonomy must be complete. DecodeError is unambiguously a
-            // protocol-decoder error; everything else that is not a
-            // ConnectionError falls through to otherFailure.
-            if let connectionError = error as? ConnectionError {
-                observe(RemoteSession.observation(
-                    for: connectionError,
-                    requestType: Self.requestKind(for: event.kind),
-                    timeoutBudget: pointerRequestTimeout))
-            } else if error is DecodeError {
+            // Telemetry ownership (review round 4): RemoteSession already
+            // observes transport outcomes (timeout / streamClosed /
+            // writeFailed) exactly once. Re-emitting them here would double
+            // log the same failure in production diagnostics. InputSender
+            // owns SEMANTIC outcomes only: decode failures (malformed) and
+            // anything else above the transport layer.
+            if error is DecodeError {
                 observe(RequestObservation(
                     kind: Self.requestKind(for: event.kind),
                     outcome: .malformedResponse(requestType: Self.requestKind(for: event.kind))))
+            } else if error is ConnectionError {
+                // Transport outcome — owned by RemoteSession. Do not re-emit.
             } else {
                 observe(RequestObservation(
                     kind: Self.requestKind(for: event.kind),

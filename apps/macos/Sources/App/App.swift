@@ -385,6 +385,8 @@ extension AppModel {
             Diagnostics.log("request helper-failure type=\(requestType.rawValue)")
         case .lateResponse(let requestKind, let delay):
             Diagnostics.log("late response after timeout type=\(requestKind.rawValue) delayBeyondDeadline=\(delay)s")
+        case .partialDelivery(let requestType):
+            Diagnostics.log("pointer partial-delivery type=\(requestType.rawValue) (product fail-safe)")
         case .otherFailure(let requestType, _):
             Diagnostics.log("request other-failure type=\(requestType.rawValue)")
         }

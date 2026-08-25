@@ -38,9 +38,14 @@ struct OutcomeCounter {
         // explainable from the evidence itself.
         var deliveredMovementCount = 0
         var partiallyDeliveredMovementCount = 0
+        var partialDeliveryObservations = 0
         var deliveredCount = 0
         var cancelledCount = 0
         var failedCount = 0
+        /// Authoritative DeX/desktop display id actually selected by the
+        /// production path (review round 4: shell-side dumpsys guessing is
+        /// not authoritative).
+        var selectedDesktopDisplayId: Int? = nil
     }
 
     var record = Record()
@@ -82,11 +87,15 @@ struct OutcomeCounter {
             case .lateResponse(_, let delay):
                 record.lateResponses += 1
                 record.lateDelaySeconds.append(delay)
+            case .partialDelivery:
+                break // semantic-only; counted at the delivery layer below
             }
         case .delivery:
             switch observation.outcome {
             case .success, .timedOut, .streamClosed, .writeFailed:
                 break // already accounted at the session layer
+            case .partialDelivery:
+                record.partiallyDeliveredMovementCount += 1
             case .unexpectedResponse:
                 record.unexpectedResponse += 1
             case .malformedResponse:
@@ -165,7 +174,8 @@ final class CounterBox: @unchecked Sendable {
                   capabilities: UInt32,
                   admission: (accepted: Int, coalesced: Int, shed: Int, rejected: Int),
                   deliveryResults: (deliveredMovement: Int, partial: Int,
-                                    delivered: Int, cancelled: Int, failed: Int)) -> OutcomeCounter.Record {
+                                    delivered: Int, cancelled: Int, failed: Int),
+                  desktopDisplayId: Int?) -> OutcomeCounter.Record {
         lock.withLock {
             _counter.record.lateResponses += lateResponses.count
             _counter.record.lateDelaySeconds.append(
@@ -183,6 +193,7 @@ final class CounterBox: @unchecked Sendable {
             _counter.record.deliveredCount = deliveryResults.delivered
             _counter.record.cancelledCount = deliveryResults.cancelled
             _counter.record.failedCount = deliveryResults.failed
+            _counter.record.selectedDesktopDisplayId = desktopDisplayId
             return _counter.record
         }
     }

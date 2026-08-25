@@ -64,5 +64,9 @@ jobs:
         # against synthetic raw evidence so a NameError/regression in the
         # summary pipeline fails CI instead of surfacing only on a device.
         run: python3 scripts/test-issue62-aggregator.py
+      - name: "Issue62 rc-path fixture"
+        # The driver must survive a missing result JSON (cxi-stress exit 3
+        # writes no JSON) and take the PRECONDITION path instead.
+        run: bash scripts/test-issue62-rc-path.sh
       - name: "Evidence sanitizer regression"
         run: bash scripts/test-verify-device-evidence-sanitizer.sh

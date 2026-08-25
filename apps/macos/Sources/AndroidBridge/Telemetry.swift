@@ -58,6 +58,10 @@ public struct RequestObservation: Sendable, Equatable {
         case otherFailure(requestType: Kind, errorDescription: String)
         /// A valid response arrived after its requester's deadline expired.
         case lateResponse(requestKind: Kind, delayBeyondTimeout: Double)
+        /// Helper accepted the batch but delivered only part of a movement.
+        /// Product fail-safe target (force-return), so it must be visible
+        /// in diagnostics even though the CXI response itself was healthy.
+        case partialDelivery(requestType: Kind)
     }
 
     public let kind: Kind

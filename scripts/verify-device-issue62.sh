@@ -206,7 +206,11 @@ ids = sorted({int(m) for m in re.findall(r"mDisplayId=(\d+)", content)})
 print(ids[-1] if ids else "")
 ' "$DEX_DISPLAYS_FILE" 2>/dev/null || true)"
 if [ -n "$DEX_ID" ]; then
-    echo "dex_display_id=$DEX_ID" >>"$(ev metadata.txt)"
+    # Provisional shell-side guess (largest mDisplayId). The AUTHORITATIVE
+    # id is what cxi-stress actually selected via isDesktop — recorded into
+    # each profile's JSON as selectedDesktopDisplayId and copied into
+    # metadata after the runs.
+    echo "dex_display_id_shell_guess=$DEX_ID" >>"$(ev metadata.txt)"
 else
     if [ "${ALLOW_NON_WIRELESS_DIAGNOSTIC:-0}" != "1" ]; then
         echo "FAIL-CLOSED: no DeX/desktop display detected (work order section 9)." >&2
@@ -224,12 +228,20 @@ echo "== building cxi-stress and helper =="
 }
 STRESS_BIN="$MACOS_DIR/.build/debug/cxi-stress"
 
-scripts/deploy-helper.sh start >/dev/null 2>&1 || {
-    echo "helper failed to start" >&2
+# Review round 4: deploy the APK ONLY. The production AdbTransport.launch()
+# owns the helper lifecycle — it pkills any existing helper and starts its
+# own persistent `adb shell -T app_process` channel. Running
+# `deploy-helper.sh start` here would spawn a second detached
+# tail -f | app_process helper that AdbTransport immediately kills, adding a
+# pointless launch/kill cycle (and an orphaned feeder) before measurement.
+scripts/deploy-helper.sh deploy >/dev/null 2>&1 || {
+    echo "helper APK deployment failed" >&2
     exit "$EXIT_PRECONDITION"
 }
-CLEANUP_HELPER=1
-stop_helper() { [ "${CLEANUP_HELPER:-0}" = "1" ] && scripts/deploy-helper.sh stop >/dev/null 2>&1 || true; }
+
+# The production path owns helper startup/teardown; nothing to stop here.
+# (AdbTransport closes its own channel when the stress tool shuts down.)
+stop_helper() { :; }
 
 # ------------------------------------------------------------- workloads -----
 PROFILES=(baseline scroll-burst move-burst mixed burst-idle queue-pressure)
@@ -256,7 +268,18 @@ for p in "${PROFILES[@]}"; do
     RC=$?
     set -e
 
-    RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1)"
+    # Review round 4: handle precondition/usage exits BEFORE touching the
+    # result JSON — a DeX-missing run (rc=3) exits before writing any JSON,
+    # and the unguarded lookup below would abort under set -euo pipefail
+    # before the proper RC=3 -> stop_helper -> exit 3 path can run.
+    if [ "$RC" = "3" ] || [ "$RC" = "2" ]; then
+        OVERALL="PRECONDITION_NOT_MET"
+        stop_helper
+        PUBLISHED_EVIDENCE=0
+        exit "$EXIT_PRECONDITION"
+    fi
+
+    RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1 || true)"
     if [ -n "$RESULT_FILE" ] && [ -f "$RESULT_FILE" ]; then
         mv "$RESULT_FILE" "$(ev latency-$p.json)"
     fi
@@ -268,13 +291,7 @@ for p in "${PROFILES[@]}"; do
     SUMMARY_LINES+=("$p: rc=$RC requests_success=$SUCCESSES timeouts=$TIMEOUTS late_responses=$LATE")
     echo "   $p: rc=$RC successes=$SUCCESSES timeouts=$TIMEOUTS late=$LATE"
 
-    # rc 3/2 are environment errors -> precondition exit; rc 1 marks product failure
-    if [ "$RC" = "3" ] || [ "$RC" = "2" ]; then
-        OVERALL="PRECONDITION_NOT_MET"
-        stop_helper
-        PUBLISHED_EVIDENCE=0
-        exit "$EXIT_PRECONDITION"
-    elif [ "$RC" != "0" ]; then
+    if [ "$RC" != "0" ]; then
         OVERALL="FAIL"
     fi
 
@@ -300,6 +317,13 @@ for p in "${PROFILES[@]}"; do
             ;;
     esac
 done
+
+# Authoritative desktop display id: what cxi-stress actually selected via
+# isDesktop (review round 4). Overrides the shell-side guess in metadata.
+AUTH_DEX_ID="$(jq -r '.selectedDesktopDisplayId // empty' "$(ev latency-baseline.json)" 2>/dev/null || true)"
+if [ -n "${AUTH_DEX_ID:-}" ]; then
+    echo "dex_display_id=$AUTH_DEX_ID (authoritative: selected by production path)" >>"$(ev metadata.txt)"
+fi
 
 python3 - "$RAW_EV" <<'PYEOF'
 import json, os, sys
