@@ -86,6 +86,12 @@ private final class BlockingRequestResult: @unchecked Sendable {
 
 /// Owns the CXI handshake, request correlation, event dispatch, and timeouts.
 /// ADB process and byte-stream ownership belongs to `AdbTransport`.
+///
+/// Issue #62 observability: every completed request yields a metadata-only
+/// `RequestObservation` (outcome taxonomy, latency), and responses arriving
+/// for already-timed-out requests are classified as LATE through bounded
+/// `TimeoutTombstones` instead of being silently forwarded as uncorrelated
+/// events. No input payload ever enters an observation.
 public final class RemoteSession: SessionConnection, @unchecked Sendable {
     public struct Configuration: Sendable {
         public var transport: AdbTransport
@@ -135,6 +141,34 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
     private var nextRequestId: UInt32 = 1
     private var parser = FrameParser()
     private let readerQueue = DispatchQueue(label: "crossinput.reader")
+
+    /// Metadata-only diagnostics (issue #62). `onObservation` fires once per
+    /// completed request from arbitrary queues; `lateResponses` accumulates on
+    /// `readerQueue` behind `lateLock`, capped at `maxLateResponses` (oldest
+    /// dropped first). Read it via `snapshotLateResponses()`.
+    public var onObservation: (@Sendable (RequestObservation) -> Void)?
+    public let timeoutTombstones = TimeoutTombstones()
+
+    /// Cap on retained late-response records (review fix: unbounded growth
+    /// in long sessions is a memory leak; diagnostics need only a bounded
+    /// window).
+    public static let maxLateResponses = 256
+
+    /// Production sink for late responses (review round 3): invoked from the
+    /// reader queue when a response arrives after its requester timed out.
+    /// Without this, a field "timeout vs valid result after deadline" event
+    /// never reaches diagnostics.
+    public var onLateResponse: (@Sendable (LateResponseRecord) -> Void)?
+    private let lateLock = NSLock()
+    private var _lateResponses: [LateResponseRecord] = []
+
+    /// Synchronized snapshot of retained late-response records.
+    public func snapshotLateResponses() -> [LateResponseRecord] {
+        lateLock.withLock { _lateResponses }
+    }
+
+    /// Test seam: injects the monotonic microsecond clock.
+    var nowMicros: @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds) / 1_000 }
 
     private struct PendingRequest {
         let continuation: CheckedContinuation<CxiFrame, Error>
@@ -201,13 +235,57 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
     /// Sends a request frame and awaits the matching response.
     public func request(_ type: MessageType, payload: Data,
                         timeout: TimeInterval? = nil) async throws -> CxiFrame {
+        let startedMicros = nowMicros()
+        do {
+            let frame = try await requestUncounted(type, payload: payload, timeout: timeout)
+            let elapsed = Double(nowMicros() - startedMicros) / 1_000_000
+            emit(RequestObservation(kind: RequestObservation.Kind(of: type),
+                                    outcome: .success(elapsed: elapsed)))
+            return frame
+        } catch let error as ConnectionError {
+            emit(Self.observation(for: error,
+                                  requestType: RequestObservation.Kind(of: type),
+                                  timeoutBudget: timeout ?? config.requestTimeout))
+            throw error
+        } catch {
+            emit(RequestObservation(
+                kind: RequestObservation.Kind(of: type),
+                outcome: .otherFailure(requestType: RequestObservation.Kind(of: type),
+                                       errorDescription: String(describing: error))))
+            throw error
+        }
+    }
+
+    /// Core request path without observation bookkeeping, so the public
+    /// `request` wraps exactly one observation per completed request.
+    private func requestUncounted(_ type: MessageType, payload: Data,
+                                  timeout: TimeInterval?) async throws -> CxiFrame {
         try await withCheckedThrowingContinuation { continuation in
             let id = allocateRequestId()
             let deadline = timeout ?? config.requestTimeout
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let removed = self.pendingLock.withLock { self.pending.removeValue(forKey: id) }
-                removed?.continuation.resume(throwing: ConnectionError.timeout("no response to \(type) (req \(id))"))
+                let kind = RequestObservation.Kind(of: type)
+                // Atomic eviction + tombstone (review fix, round 2): the
+                // tombstone is recorded ONLY when the timeout actually wins
+                // the race (removed != nil). If a response already evicted
+                // the entry, that request succeeded — recording a tombstone
+                // would let a subsequent same-id response be misclassified
+                // as LATE. Holding pendingLock across both operations keeps
+                // eviction and tombstone indivisible; dispatch's removal
+                // runs on readerQueue under the same lock, so ordering is
+                // total and exactly one side wins per request id.
+                self.pendingLock.withLock {
+                    guard let removed = self.pending.removeValue(forKey: id) else {
+                        return // response won: request already succeeded
+                    }
+                    self.timeoutTombstones.record(
+                        id: id,
+                        requestKind: kind,
+                        timeoutBudget: deadline,
+                        nowMonotonicMicros: self.nowMicros())
+                    removed.continuation.resume(throwing: ConnectionError.timeout("no response to \(type) (req \(id))"))
+                }
             }
             pendingLock.withLock {
                 pending[id] = PendingRequest(continuation: continuation, timeout: workItem)
@@ -221,6 +299,26 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
                 continuation.resume(throwing: error)
             }
         }
+    }
+
+    private func emit(_ observation: RequestObservation) {
+        onObservation?(observation)
+    }
+
+    /// Maps a request-path `ConnectionError` onto the investigation taxonomy.
+    public static func observation(for error: ConnectionError,
+                                   requestType: RequestObservation.Kind,
+                                   timeoutBudget: Double) -> RequestObservation {
+        let outcome: RequestObservation.Outcome
+        switch error {
+        case .timeout:
+            outcome = .timedOut(requestType: requestType, timeoutBudget: timeoutBudget)
+        case .streamClosed:
+            outcome = .streamClosed(requestType: requestType)
+        default:
+            outcome = .writeFailed(requestType: requestType)
+        }
+        return RequestObservation(kind: requestType, outcome: outcome)
     }
 
     /// Sends a fire-and-forget semantic or compatibility frame.
@@ -312,8 +410,27 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
         if let pendingRequest {
             pendingRequest.continuation.resume(returning: frame)
         } else {
+            // The requester is gone. A recent timeout tombstone classifies
+            // this as a LATE response (the helper did answer, just after the
+            // deadline); no tombstone means genuinely uncorrelated.
+            recordLateResponseIfTimedOut(frame)
             onEvent?(frame)
         }
+    }
+
+    /// Runs on `readerQueue` only, so append order is stable; the lock makes
+    /// the bounded buffer safe against cross-queue snapshots.
+    private func recordLateResponseIfTimedOut(_ frame: CxiFrame) {
+        guard let record = timeoutTombstones.consume(
+            id: frame.requestId,
+            at: nowMicros()) else { return }
+        lateLock.withLock {
+            _lateResponses.append(record)
+            if _lateResponses.count > Self.maxLateResponses {
+                _lateResponses.removeFirst(_lateResponses.count - Self.maxLateResponses)
+            }
+        }
+        onLateResponse?(record)
     }
 
     private func failAllPending(_ error: Error) {

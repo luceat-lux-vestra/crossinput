@@ -6,6 +6,7 @@ import InputCapture
 import EdgeSwitch
 import AppSettings
 import Diagnostics
+import Delivery
 
 @main
 struct Ampersand: App {
@@ -76,8 +77,21 @@ final class AppModel: ObservableObject {
         let reference = SessionReference()
         sessionController = SessionController(reference: reference)
         let sender = InputSender(session: reference)
+        // Forward InputSender semantic failures through the unified sink
+        // (lock-protected; safe from the delivery queue).
+        sender.onDeliveryObservation = { [weak sessionController] observation in
+            sessionController?.forwardDeliveryObservation(observation)
+        }
         handoffController = ControlHandoffController(sender: sender)
         targetController = TargetSelectionController(session: reference)
+
+        // Production telemetry sink (review round 3): a single lock-protected
+        // sink receives transport request observations, InputSender semantic
+        // delivery observations, and late responses. Only failure/late
+        // metadata reaches diag.log — never successes, never input payloads.
+        sessionController.setObservationSink { observation in
+            AppModel.logFailureReason(observation)
+        }
 
         sessionController.onStateChange = { [weak self] state in
             self?.sessionState = state
@@ -348,5 +362,33 @@ private enum AppConnectionError: LocalizedError {
 
     var errorDescription: String? {
         "No available Android target was discovered"
+    }
+}
+
+/// Failure/late-only diagnostics logging for production telemetry.
+extension AppModel {
+    nonisolated static func logFailureReason(_ observation: RequestObservation) {
+        switch observation.outcome {
+        case .success:
+            return // successes are noise; never logged
+        case .timedOut(let requestType, let budget):
+            Diagnostics.log("request timeout type=\(requestType.rawValue) budget=\(budget)s")
+        case .streamClosed(let requestType):
+            Diagnostics.log("request stream-closed type=\(requestType.rawValue)")
+        case .writeFailed(let requestType):
+            Diagnostics.log("request write-failed type=\(requestType.rawValue)")
+        case .unexpectedResponse(let requestType):
+            Diagnostics.log("request unexpected-response type=\(requestType.rawValue)")
+        case .malformedResponse(let requestType):
+            Diagnostics.log("request malformed-response type=\(requestType.rawValue)")
+        case .helperReportedFailure(let requestType):
+            Diagnostics.log("request helper-failure type=\(requestType.rawValue)")
+        case .lateResponse(let requestKind, let delay):
+            Diagnostics.log("late response after timeout type=\(requestKind.rawValue) delayBeyondDeadline=\(delay)s")
+        case .partialDelivery(let requestType):
+            Diagnostics.log("pointer partial-delivery type=\(requestType.rawValue) (product fail-safe)")
+        case .otherFailure(let requestType, _):
+            Diagnostics.log("request other-failure type=\(requestType.rawValue)")
+        }
     }
 }
