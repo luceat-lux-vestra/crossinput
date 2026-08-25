@@ -1,5 +1,6 @@
 import Foundation
 import Protocol
+import AndroidBridge
 import InputCapture
 import Diagnostics
 
@@ -8,7 +9,7 @@ import Diagnostics
 /// decisions are returned separately from `enqueuePointer` as
 /// `PointerAdmissionOutcome`, so a local decision can never be mistaken for
 /// a remote verdict.
-enum PointerDeliveryResult: Sendable, Equatable {
+public enum PointerDeliveryResult: Sendable, Equatable {
     // Movement results carry both the requested batch delta (what was asked
     // of the helper, after coalescing) and the accepted delta. The state
     // machine needs the requested intent to credit return-direction movement
@@ -32,7 +33,7 @@ enum PointerDeliveryResult: Sendable, Equatable {
 
 /// What `enqueuePointer` did with one captured event. This is the entire
 /// admission contract; it is orthogonal to `PointerDeliveryResult`.
-enum PointerAdmissionOutcome: Sendable, Equatable {
+public enum PointerAdmissionOutcome: Sendable, Equatable {
     /// Appended as a new pending batch. The completion passed with this
     /// enqueue is the batch's single acknowledgement: it is invoked exactly
     /// once with the batch's delivery result (or `.cancelled`).
@@ -72,7 +73,7 @@ enum PointerAdmissionOutcome: Sendable, Equatable {
 ///   Genuine failures (request throw, timeout, malformed/unexpected response,
 ///   helper-reported failure, partial movement, unretainable button) remain
 ///   fail-safe.
-final class InputSender: @unchecked Sendable {
+public final class InputSender: @unchecked Sendable {
     private let session: SessionReference
     private let pointerQueue = DispatchQueue(label: "crossinput.pointer-delivery",
                                               qos: .userInteractive)
@@ -93,6 +94,12 @@ final class InputSender: @unchecked Sendable {
     /// in-flight delivery and release exactly the state that reached Android.
     private var heldButtons: Set<UInt32> = []
     private var heldButtonsSessionGeneration: UInt64?
+
+    /// Issue #62 observability: one metadata-only `RequestObservation` per
+    /// completed admitted batch, classified with the full failure taxonomy
+    /// (timeout vs stream-closed vs write failure vs malformed vs helper
+    /// failure). Fired from `pointerQueue`; never carries input payloads.
+    public var onDeliveryObservation: (@Sendable (RequestObservation) -> Void)?
 
     /// One transport batch: possibly many merged raw capture events, but
     /// exactly one delivery acknowledgement obligation. The completion is
@@ -120,9 +127,9 @@ final class InputSender: @unchecked Sendable {
         }
     }
 
-    init(session: SessionReference,
-         maxPendingPointerItems: Int = 64,
-         pointerRequestTimeout: TimeInterval = 0.75) {
+    public init(session: SessionReference,
+                maxPendingPointerItems: Int = 64,
+                pointerRequestTimeout: TimeInterval = 0.75) {
         self.session = session
         self.maxPendingPointerItems = max(1, maxPendingPointerItems)
         self.pointerRequestTimeout = max(0.05, pointerRequestTimeout)
@@ -131,7 +138,7 @@ final class InputSender: @unchecked Sendable {
     /// True while a live transport exists for the current session. Edge events
     /// must not arm handoff without it: entering remoteActive against a dead
     /// session traps local input until the watchdog fires (issue #50).
-    var hasLiveConnection: Bool {
+    public var hasLiveConnection: Bool {
         session.snapshot().connection != nil
     }
 
@@ -156,8 +163,8 @@ final class InputSender: @unchecked Sendable {
     /// Admission is O(1): tail inspection, tail merge, capacity check,
     /// amortized-O(1) append. No backward scans, no callback bookkeeping.
     @discardableResult
-    func enqueuePointer(_ event: PointerEvent,
-                        completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil)
+    public func enqueuePointer(_ event: PointerEvent,
+                               completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil)
         -> PointerAdmissionOutcome {
         let sessionSnapshot = session.snapshot()
         var outcome: PointerAdmissionOutcome?
@@ -231,7 +238,7 @@ final class InputSender: @unchecked Sendable {
         }
     }
 
-    func enqueueKey(_ event: CapturedKeyEvent) {
+    public func enqueueKey(_ event: CapturedKeyEvent) {
         let sessionSnapshot = session.snapshot()
         keyboardQueue.async { [weak self] in
             self?.deliverKey(event, snapshot: sessionSnapshot)
@@ -241,7 +248,7 @@ final class InputSender: @unchecked Sendable {
     /// Drops queued and in-flight semantic pointer work. A result from an
     /// invalidated in-flight request is reported as cancelled, never credited
     /// to the handoff position.
-    func cancelPendingPointerEvents() {
+    public func cancelPendingPointerEvents() {
         let dropped: [PendingPointerBatch] = stateLock.withLock {
             pointerGeneration &+= 1
             let value = pendingPointers
@@ -253,7 +260,7 @@ final class InputSender: @unchecked Sendable {
 
     /// Waits until capture events queued before this call have reached the
     /// helper. Used before transport teardown to preserve key/button cleanup.
-    func waitForDrain() {
+    public func waitForDrain() {
         keyboardQueue.sync {}
         pointerQueue.sync {}
     }
@@ -261,7 +268,7 @@ final class InputSender: @unchecked Sendable {
     /// Schedules cleanup after key-up events already queued by InputCapture.
     /// Local pointer recovery and the triggering external-control event never
     /// wait for a remote request or transport write.
-    func resetCapturedInputState() {
+    public func resetCapturedInputState() {
         cancelPendingPointerEvents()
         releaseRemotelyHeldButtons()
     }
@@ -275,7 +282,7 @@ final class InputSender: @unchecked Sendable {
     /// generation's cleanup can never inject releases into a replacement
     /// session. Send failures are swallowed (best effort) — cleanup must not
     /// trap local control; the fail-safe return proceeds regardless.
-    func releaseRemotelyHeldButtons() {
+    public func releaseRemotelyHeldButtons() {
         keyboardQueue.async { [weak self] in
             guard let self else { return }
             pointerQueue.async { [weak self] in
@@ -379,7 +386,12 @@ final class InputSender: @unchecked Sendable {
             guard session.snapshot().generation == item.sessionGeneration else {
                 return .cancelled
             }
-            guard response.type == .pointerResult else { return .failed }
+            guard response.type == .pointerResult else {
+                observe(RequestObservation(
+                    kind: RequestObservation.Kind(of: type),
+                    outcome: .unexpectedResponse(requestType: RequestObservation.Kind(of: type))))
+                return .failed
+            }
             let result = try Messages.decodePointerResult(response.payload)
             switch result.status {
             case .delivered:
@@ -402,16 +414,57 @@ final class InputSender: @unchecked Sendable {
                                           deliveredDy: result.deliveredDy)
             case .partiallyDelivered:
                 guard isMovement,
-                      case let .move(requestedDx, requestedDy) = event.kind else { return .failed }
+                      case let .move(requestedDx, requestedDy) = event.kind else {
+                    observe(RequestObservation(
+                        kind: RequestObservation.Kind(of: type),
+                        outcome: .helperReportedFailure(requestType: RequestObservation.Kind(of: type))))
+                    return .failed
+                }
+                observe(RequestObservation(
+                    kind: RequestObservation.Kind(of: type),
+                    outcome: .partialDelivery(requestType: RequestObservation.Kind(of: type))))
                 return .partiallyDeliveredMovement(requestedDx: requestedDx,
                                                    requestedDy: requestedDy,
                                                    deliveredDx: result.deliveredDx,
                                                    deliveredDy: result.deliveredDy)
             case .failed:
+                observe(RequestObservation(
+                    kind: RequestObservation.Kind(of: type),
+                    outcome: .helperReportedFailure(requestType: RequestObservation.Kind(of: type))))
                 return .failed
             }
         } catch {
+            // Telemetry ownership (review round 4): RemoteSession already
+            // observes transport outcomes (timeout / streamClosed /
+            // writeFailed) exactly once. Re-emitting them here would double
+            // log the same failure in production diagnostics. InputSender
+            // owns SEMANTIC outcomes only: decode failures (malformed) and
+            // anything else above the transport layer.
+            if error is DecodeError {
+                observe(RequestObservation(
+                    kind: Self.requestKind(for: event.kind),
+                    outcome: .malformedResponse(requestType: Self.requestKind(for: event.kind))))
+            } else if error is ConnectionError {
+                // Transport outcome — owned by RemoteSession. Do not re-emit.
+            } else {
+                observe(RequestObservation(
+                    kind: Self.requestKind(for: event.kind),
+                    outcome: .otherFailure(requestType: Self.requestKind(for: event.kind),
+                                           errorDescription: String(describing: error))))
+            }
             return .failed
+        }
+    }
+
+    private func observe(_ observation: RequestObservation) {
+        onDeliveryObservation?(observation)
+    }
+
+    static func requestKind(for kind: PointerEvent.Kind) -> RequestObservation.Kind {
+        switch kind {
+        case .move: return .pointerMoveRel
+        case .button: return .pointerButton
+        case .scroll: return .pointerScroll
         }
     }
 

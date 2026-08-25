@@ -2,6 +2,7 @@ import Foundation
 import InputCapture
 import EdgeSwitch
 import Diagnostics
+import Delivery
 
 /// Thin composition boundary between capture and the control-handoff machine.
 /// It owns pointer safety and movement accounting, but has no session or ADB
