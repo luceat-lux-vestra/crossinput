@@ -89,8 +89,13 @@ FRAME_HID_REL4="43584901000600120000000c000000010000000400000000f0a000"
 # device (ANDROID_SERIAL, or the caller's exported DEVICE) so a multi-device
 # setup cannot provision the APK onto the wrong phone. Fall back to first-
 # connected discovery only when nothing is selected.
-if [ -n "${DEVICE:-}" ] && adb devices | awk 'NR>1 {print $1}' | grep -qx "$DEVICE"; then
-    : # caller-selected DEVICE is attached; use it as-is
+if [ -n "${DEVICE:-}" ]; then
+    # Caller selected a device explicitly. If it is not attached, FAIL —
+    # falling back to another phone would push the APK to the wrong target.
+    if ! adb devices | awk 'NR>1 {print $1}' | grep -qx "$DEVICE"; then
+        echo "selected DEVICE '$DEVICE' is not attached; refusing to fall back" >&2
+        exit 1
+    fi
 elif [ -n "${ANDROID_SERIAL:-}" ]; then
     DEVICE="$ANDROID_SERIAL"
 else

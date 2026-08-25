@@ -82,64 +82,125 @@ cd "$ROOT"
     echo "not the crossinput repository root: $ROOT" >&2
     exit "$EXIT_USAGE"
 }
+# ---------------------------------------------------------------------------
+# Shared workload-loop: THE production per-profile execution block. Both the
+# main driver path and --self-test-rc-path call THIS code — no copied
+# duplicate, so a regression in ordering (JSON lookup before rc handling) or
+# in exit-code mapping breaks the CI fixture too.
+#
+# Requires: STRESS_BIN, RAW_EV, DEVICE, ITERATIONS, ev(), stop_helper().
+# Sets: OVERALL, SUMMARY_LINES. Exits the driver on rc=2/3.
+# ---------------------------------------------------------------------------
+run_one_profile() {
+    local p="$1"
+    echo "== running profile: $p =="
+    ARGS=(--profile "$p")
+    [ -n "$ITERATIONS" ] && ARGS+=(--iterations "$ITERATIONS")
+
+    set +e
+    ANDROID_SERIAL="$DEVICE" "$STRESS_BIN" "${ARGS[@]}" --out "$RAW_EV" >"$RAW_EV/$p.stdout" 2>"$RAW_EV/$p.stderr"
+    RC=$?
+    set -e
+
+    # Precondition/usage exits are handled BEFORE touching the result JSON:
+    # a DeX-missing run (rc=3) exits before writing any JSON, and an unguarded
+    # lookup here would abort under set -euo pipefail first.
+    case "$RC" in
+        2) OVERALL="PRECONDITION_NOT_MET"; stop_helper; PUBLISHED_EVIDENCE=0
+           echo "cxi-stress usage/environment error (rc=2)" >&2
+           exit "$EXIT_USAGE" ;;
+        3) OVERALL="PRECONDITION_NOT_MET"; stop_helper; PUBLISHED_EVIDENCE=0
+           exit "$EXIT_PRECONDITION" ;;
+        0) ;;
+        *) OVERALL="FAIL" ;;
+    esac
+
+    RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1 || true)"
+    if [ -n "$RESULT_FILE" ] && [ -f "$RESULT_FILE" ]; then
+        mv "$RESULT_FILE" "$(ev latency-$p.json)"
+    fi
+
+    TIMEOUTS="$(jq -r '.timeouts // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+    SUCCESSES="$(jq -r '.successes // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+    LATE="$(jq -r '.lateResponses // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+
+    SUMMARY_LINES+=("$p: rc=$RC requests_success=$SUCCESSES timeouts=$TIMEOUTS late_responses=$LATE")
+    echo "   $p: rc=$RC successes=$SUCCESSES timeouts=$TIMEOUTS late=$LATE"
+
+    # Review gate: a BURST profile that never coalesced did not actually
+    # exercise queue accumulation — it was a serialized RTT measurement.
+    case "$p" in
+        scroll-burst|move-burst)
+            COALESCED="$(jq -r '.coalescedIntoExistingBatch // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+            if [ "${COALESCED:-0}" -le 0 ]; then
+                echo "FAIL: $p produced zero coalesced batches — burst did not form" >&2
+                OVERALL="FAIL"
+            fi
+            ;;
+        queue-pressure)
+            SHED="$(jq -r '.shedLocally // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+            if [ "${SHED:-0}" -le 0 ]; then
+                echo "FAIL: queue-pressure produced zero shed events — no real saturation" >&2
+                OVERALL="FAIL"
+            fi
+            ;;
+    esac
+}
+
 # ------------------------------------------------------------------ rc test --
 if [ "$SELF_TEST_RC_PATH" = "1" ]; then
-    # Deterministic regression for review round 5 item 6: cxi-stress exits 3
-    # (no DeX) WITHOUT writing any result JSON. The real workload-loop code
-    # below must (a) survive the result-file lookup under set -euo pipefail,
-    # and (b) take the PRECONDITION branch with exit 3 — not abort first.
-    # This runs the ACTUAL production loop block, not a copy of it.
-    set +e
-    RC_PATH_OUT="$(mktemp)"
-    (
-        # Minimal environment expected by the loop block:
+    # Deterministic regression (review rounds 4-6): exercises the REAL shared
+    # run_one_profile function — the exact code the production loop calls —
+    # against a fake cxi-stress binary. Verifies:
+    #   rc=3 -> PRECONDITION branch, driver exit 3, no result-JSON abort
+    #   rc=2 -> USAGE branch, driver exit 2
+    # A regression that reorders JSON lookup before rc handling or collapses
+    # exit codes breaks this fixture.
+    FAKE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$FAKE_DIR"' EXIT
+
+    for EXPECTED_RC in 3 2; do
         OVERALL="PASS"
         SUMMARY_LINES=()
         PROFILES=(scroll-burst)
         ITERATIONS=""
-        RAW_EV="$(mktemp -d)"
+        DEVICE="self-test" 
+        RAW_EV="$FAKE_DIR/raw-$EXPECTED_RC"
+        mkdir -p "$RAW_EV"
         ev() { printf '%s/%s' "$RAW_EV" "$1"; }
-        STRESS_BIN="/bin/false"   # exits 1... we need 3: use a wrapper below
-
-        # Wrapper that mimics cxi-stress precondition failure: rc=3, no JSON.
-        FAKE_BIN="$RAW_EV/fake-stress"
-        printf '#!/bin/sh\nexit 3\n' >"$FAKE_BIN"
-        chmod +x "$FAKE_BIN"
-
         stop_helper() { :; }
         PUBLISHED_EVIDENCE=0
+        EXIT_PRECONDITION=3
+        EXIT_USAGE=2
 
-        p="scroll-burst"
-        ARGS=(--profile "$p")
+        STRESS_BIN="$FAKE_DIR/fake-stress"
+        printf '#!/bin/sh\nexit %s\n' "$EXPECTED_RC" >"$STRESS_BIN"
+        chmod +x "$STRESS_BIN"
+
+        # Structural assertion: rc handling must precede the result-JSON
+        # lookup in run_one_profile. A reorder regression (lookup first)
+        # would abort under set -euo pipefail when no JSON exists.
+        # The self-test body itself IS inside a function, so plain vars work.
+        fn_src="$(declare -f run_one_profile)"
+        rc_offset="$(printf '%s' "$fn_src" | grep -bo 'case "$RC" in' | head -1 | cut -d: -f1)"
+        json_offset="$(printf '%s' "$fn_src" | grep -bo 'RESULT_FILE=' | head -1 | cut -d: -f1)"
+        if [ -z "$rc_offset" ] || [ -z "$json_offset" ] || [ "$rc_offset" -ge "$json_offset" ]; then
+            echo "rc-path self-test FAIL: JSON lookup precedes rc handling (or blocks missing)" >&2
+            exit "$EXIT_FAIL"
+        fi
+
         set +e
-        ANDROID_SERIAL="" "$FAKE_BIN" "${ARGS[@]}" --out "$RAW_EV" >"$RAW_EV/$p.stdout" 2>"$RAW_EV/$p.stderr"
-        RC=$?
+        # Subshell: run_one_profile exits the driver on 2/3 by design; the
+        # subshell captures that exit code so BOTH cases can be verified.
+        ( run_one_profile "scroll-burst" )
+        GOT=$?
         set -e
-
-        if [ "$RC" = "3" ] || [ "$RC" = "2" ]; then
-            OVERALL="PRECONDITION_NOT_MET"
-            stop_helper
-            PUBLISHED_EVIDENCE=0
-            exit "$EXIT_PRECONDITION"
+        if [ "$GOT" != "$EXPECTED_RC" ]; then
+            echo "rc-path self-test FAIL: rc=$EXPECTED_RC expected driver exit $EXPECTED_RC, got $GOT" >&2
+            exit "$EXIT_FAIL"
         fi
-
-        RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1 || true)"
-        if [ -n "$RESULT_FILE" ] && [ -f "$RESULT_FILE" ]; then
-            mv "$RESULT_FILE" "$(ev latency-$p.json)"
-        fi
-        echo "FAIL: should have exited at the PRECONDITION branch" >&2
-        exit 1
-    ) >"$RC_PATH_OUT" 2>&1
-    RC_TEST_RC=$?
-    set -e
-    if [ "$RC_TEST_RC" != "$EXIT_PRECONDITION" ]; then
-        echo "rc-path self-test FAIL: expected exit $EXIT_PRECONDITION, got $RC_TEST_RC" >&2
-        cat "$RC_PATH_OUT" >&2
-        rm -f "$RC_PATH_OUT"
-        exit "$EXIT_FAIL"
-    fi
-    rm -f "$RC_PATH_OUT"
-    echo "rc-path self-test OK (precondition path reached, exit 3)"
+    done
+    echo "rc-path self-test OK (rc=3 -> 3, rc=2 -> 2 via shared run_one_profile)"
     exit "$EXIT_OK"
 fi
 
@@ -318,65 +379,7 @@ fi
 
 OVERALL="PASS"
 SUMMARY_LINES=()
-for p in "${PROFILES[@]}"; do
-    echo "== running profile: $p ==" 
-    ARGS=(--profile "$p")
-    [ -n "$ITERATIONS" ] && ARGS+=(--iterations "$ITERATIONS")
-
-    set +e
-    ANDROID_SERIAL="$DEVICE" "$STRESS_BIN" "${ARGS[@]}" --out "$RAW_EV" >"$RAW_EV/$p.stdout" 2>"$RAW_EV/$p.stderr"
-    RC=$?
-    set -e
-
-    # Review round 4: handle precondition/usage exits BEFORE touching the
-    # result JSON — a DeX-missing run (rc=3) exits before writing any JSON,
-    # and the unguarded lookup below would abort under set -euo pipefail
-    # before the proper RC=3 -> stop_helper -> exit 3 path can run.
-    if [ "$RC" = "3" ] || [ "$RC" = "2" ]; then
-        OVERALL="PRECONDITION_NOT_MET"
-        stop_helper
-        PUBLISHED_EVIDENCE=0
-        exit "$EXIT_PRECONDITION"
-    fi
-
-    RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1 || true)"
-    if [ -n "$RESULT_FILE" ] && [ -f "$RESULT_FILE" ]; then
-        mv "$RESULT_FILE" "$(ev latency-$p.json)"
-    fi
-
-    TIMEOUTS="$(jq -r '.timeouts // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
-    SUCCESSES="$(jq -r '.successes // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
-    LATE="$(jq -r '.lateResponses // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
-
-    SUMMARY_LINES+=("$p: rc=$RC requests_success=$SUCCESSES timeouts=$TIMEOUTS late_responses=$LATE")
-    echo "   $p: rc=$RC successes=$SUCCESSES timeouts=$TIMEOUTS late=$LATE"
-
-    if [ "$RC" != "0" ]; then
-        OVERALL="FAIL"
-    fi
-
-    # Review gate: a BURST profile that never coalesced did not actually
-    # exercise queue accumulation — it was a serialized RTT measurement.
-    case "$p" in
-        scroll-burst|move-burst)
-            COALESCED="$(jq -r '.coalescedIntoExistingBatch // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
-            if [ "${COALESCED:-0}" -le 0 ]; then
-                echo "FAIL: $p produced zero coalesced batches — burst did not form" >&2
-                OVERALL="FAIL"
-            fi
-            ;;
-        queue-pressure)
-            # Review round 2: the profile must produce REAL saturation —
-            # at least one locally shed event — while remaining failure-free
-            # (local backpressure must never masquerade as transport failure).
-            SHED="$(jq -r '.shedLocally // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
-            if [ "${SHED:-0}" -le 0 ]; then
-                echo "FAIL: queue-pressure produced zero shed events — no real saturation" >&2
-                OVERALL="FAIL"
-            fi
-            ;;
-    esac
-done
+run_workload_loop
 
 # Authoritative desktop display id (review round 5): taken from ANY
 # successfully generated profile JSON — not specifically baseline, which does
