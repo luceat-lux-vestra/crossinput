@@ -85,7 +85,17 @@ FRAME_HID_REL2="43584901000600100000000c000000010000000400000000643200"
 FRAME_HID_REL3="43584901000600110000000c000000010000000400000000c85000"
 FRAME_HID_REL4="43584901000600120000000c000000010000000400000000f0a000"
 
-DEVICE="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+# Device selection ownership (review round 5): honor an explicitly selected
+# device (ANDROID_SERIAL, or the caller's exported DEVICE) so a multi-device
+# setup cannot provision the APK onto the wrong phone. Fall back to first-
+# connected discovery only when nothing is selected.
+if [ -n "${DEVICE:-}" ] && adb devices | awk 'NR>1 {print $1}' | grep -qx "$DEVICE"; then
+    : # caller-selected DEVICE is attached; use it as-is
+elif [ -n "${ANDROID_SERIAL:-}" ]; then
+    DEVICE="$ANDROID_SERIAL"
+else
+    DEVICE="$(adb devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+fi
 if [ -z "$DEVICE" ]; then
     echo "no adb device" >&2
     exit 1

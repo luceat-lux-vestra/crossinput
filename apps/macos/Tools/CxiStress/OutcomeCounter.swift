@@ -95,7 +95,7 @@ struct OutcomeCounter {
             case .success, .timedOut, .streamClosed, .writeFailed:
                 break // already accounted at the session layer
             case .partialDelivery:
-                record.partiallyDeliveredMovementCount += 1
+                record.partialDeliveryObservations += 1
             case .unexpectedResponse:
                 record.unexpectedResponse += 1
             case .malformedResponse:

@@ -56,24 +56,22 @@ public final class SessionController {
     /// observations from RemoteSession AND semantic delivery observations
     /// from InputSender, plus late-response records. Lock-protected — invoked
     /// from arbitrary queues with no main-actor hop.
-    private let observationSinkLock = NSLock()
-    nonisolated(unsafe) private var _observationSinkBox: (@Sendable (RequestObservation) -> Void)?
+    /// Lock-guarded sink storage (review round 5): the box owns its own
+    /// NSLock and is Sendable, so no `nonisolated(unsafe)` annotation is
+    /// needed on controller state. The controller is MainActor-isolated;
+    /// the box's methods are nonisolated and callable from any queue.
+    let observationSinkBox = ObservationSinkBox()
 
-    /// Composition-time registration of the unified telemetry sink
-    /// (lock-protected; replaces any previous sink). Receives transport
-    /// request observations, InputSender delivery observations, and late
-    /// responses.
-    public func setObservationSink(_ sink: (@Sendable (RequestObservation) -> Void)?) {
-        observationSinkLock.lock()
-        _observationSinkBox = sink
-        observationSinkLock.unlock()
+    /// Composition-time registration of the unified telemetry sink.
+    /// Receives transport request observations, InputSender delivery
+    /// observations, and late responses.
+    nonisolated public func setObservationSink(_ sink: (@Sendable (RequestObservation) -> Void)?) {
+        observationSinkBox.set(sink)
     }
 
-    /// Reads the current sink under the lock (used by forwarding helpers).
+    /// Reads the current sink (used by forwarding helpers on arbitrary queues).
     nonisolated func currentObservationSink() -> (@Sendable (RequestObservation) -> Void)? {
-        observationSinkLock.lock()
-        defer { observationSinkLock.unlock() }
-        return _observationSinkBox
+        observationSinkBox.current()
     }
 
     /// Dispatches one delivery-layer observation through the registered sink.
