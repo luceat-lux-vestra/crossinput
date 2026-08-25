@@ -1,11 +1,52 @@
-# Issue #62 — Physical Device Verification Work Order (PR #63)
+# Issue #62 — Physical Device Verification Work Order
 
-**Status:** IN_PROGRESS — code-reviewed candidate ready; targeted physical
-acceptance pending (per ADR-0012 verification policy)
-**Current code-reviewed candidate:** `5485008f721acfcf99fb5733b6739bce972c5d38`
-(rebased onto main `8537dbe`, includes policy PR #65)
-**Device:** Samsung SM-G977N (DeX / virtual "Desktop" target), wireless ADB
-**Date:** 2026-08-25 (historical preflight), 2026-08-25 (candidate update)
+**Status:** COMPLETE — Level-1 physical acceptance PASSED at main
+`d66a357bc5824707bcc0a3bb69d31c7fb3a939f6`; issue #62 closed 2026-08-26.
+Authoritative stress evidence remains PR #66's
+`20260825T051359Z-6a48ab7/`; the final usability check is recorded in
+`evidence/issue62-level1-usability/20260826T024938Z-d66a357/`.
+**Device:** Samsung SM-G977N (DeX wired HDMI, display id=2), wireless ADB (mDNS/TLS)
+**Dates:** 2026-08-25 (preflight + PR #66 measurement), 2026-08-26 (final Level-1 acceptance)
+
+## Final Level-1 physical acceptance (2026-08-26) — PASSED
+
+Performed against main `d66a357bc5824707bcc0a3bb69d31c7fb3a939f6` (production
+code identical to PR #66's physical-evidence commit `6a48ab7`; local suite at
+the candidate: 140 XCTest + 30 Swift Testing, 0 failures). Two bounded windows,
+SM-G977N DeX over wireless mDNS/TLS ADB, natural representative interaction —
+no artificial repetition counts. Full sanitized record:
+[`evidence/issue62-level1-usability/20260826T024938Z-d66a357/metadata.txt`](evidence/issue62-level1-usability/20260826T024938Z-d66a357/metadata.txt).
+
+Checklist result: all items pass. Handoff entry, pointer visibility/motion,
+vertical scroll direction, aggressive scroll bursts (2,200+ coalesced batches in
+one burst cluster) with no false return, pointer/clicks usable after pressure,
+no stuck-button state, no premature return on small return-direction movement,
+normal pull-back return, and successful re-entry after stress.
+
+Classification (PR #66 taxonomy): 37 remoteActive entries; 36 normal returns;
+1 `remoteUnavailable` force-return classified as a **genuine transport/session
+failure** — the wireless ADB session ended when the phone rebooted mid-window;
+UHID reports had succeeded continuously up to the drop, and the window contains
+zero request timeouts, late responses, partial/failed deliveries, shed events,
+or watchdog recoveries. Queue-pressure-induced `remoteUnavailable` count: **0**.
+Cancelled-delivery lines are single-batch lifecycle invalidations at return
+boundaries (ADR-0011 semantics), not failures. Unclassified events: 0.
+
+Human visual confirmation: entry, pointer motion, vertical scroll feel, click
+functionality after stress, absence of false returns — confirmed by the user on
+the DeX display. One observation recorded as out of scope: horizontal scroll is
+perceived slower than vertical; no causal path to #62, tracked separately if
+evidence emerges.
+
+**Verdict: PASS — issue #62 closure-ready.** `pointerRequestTimeout = 0.75 s`
+remains unchanged; nothing observed contradicts the PR #66 conclusion that
+raising it is currently unsupported.
+
+## Former 100-cycle gate
+
+Moved to the repository release-stability gate. **Not a #62 PR acceptance
+requirement.** See [ADR-0012](../adr/ADR-0012-real-use-handoff-stability-evidence.md),
+the verification-level taxonomy in `docs/testing.md`, and tracking issue #64.
 
 ## Historical automated preflight
 
@@ -49,32 +90,19 @@ Helper UHID reports delivered: `report sent id=2 len=5 written=11` (metadata onl
 | CI run #130 ([32759694491](https://github.com/luceat-lux-vestra/crossinput/actions/runs/32759694491)) | all four jobs PASS (pre-rebase equivalent content; fresh run required at final post-rebase SHA before merge) |
 | Held-button cleanup semantics | best-effort; outcomes reported accurately as attempted/succeeded/failed; a failed release is never counted as released |
 
-## Remaining targeted physical acceptance (#62 only)
+## Remaining targeted physical acceptance (#63-era — satisfied 2026-08-26)
 
-Per ADR-0012 Level 1 — no repetitive cycles required. To be performed with
-the app built from the final candidate HEAD:
+The checklist below was defined for the PR #63 candidate and has since been
+executed in full against main `d66a357` (see "Final Level-1 physical
+acceptance" above). Retained verbatim for history:
 
-- [ ] Mac -> DeX handoff entry works.
-- [ ] Pointer actually moves on the DeX screen.
-- [ ] Vertical scroll direction correct.
-- [ ] Aggressive vertical scroll burst does not cause false return to Mac.
-- [ ] Aggressive horizontal/mixed scroll burst where physically practical does
+- [x] Mac -> DeX handoff entry works.
+- [x] Pointer actually moves on the DeX screen.
+- [x] Vertical scroll direction correct.
+- [x] Aggressive vertical scroll burst does not cause false return to Mac.
+- [x] Aggressive horizontal/mixed scroll burst where physically practical does
       not cause false return.
-- [ ] Pointer remains usable immediately after bursts.
-- [ ] Left / right / middle click remain usable; no stuck-button state.
-- [ ] Small return-direction movement does not trigger early return.
-- [ ] Intentional pull back to Mac returns normally.
-
-After stress: inspect `~/Library/Logs/Ampersand/diag.log` for
-`remoteActive -> returning reason=remoteUnavailable`. Zero occurrences caused
-by healthy scroll bursts is the pass signal. These lines are expected and are
-not failures: `pointer scroll batches coalesced ...`,
-`pointer queue saturation shed ...` (shed is the intended overload
-degradation). Correlate any Mac-side `remoteUnavailable` against
-`/data/local/tmp/cxi-helper.log`.
-
-## Former 100-cycle gate
-
-Moved to the repository release-stability gate. **Not a #62 PR acceptance
-requirement.** See [ADR-0012](../adr/ADR-0012-real-use-handoff-stability-evidence.md),
-the verification-level taxonomy in `docs/testing.md`, and tracking issue #64.
+- [x] Pointer remains usable immediately after bursts.
+- [x] Left / right / middle click remain usable; no stuck-button state.
+- [x] Small return-direction movement does not trigger early return.
+- [x] Intentional pull back to Mac returns normally.
