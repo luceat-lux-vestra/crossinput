@@ -54,6 +54,7 @@ public enum Diagnostics {
     nonisolated(unsafe) private static var hasStarted: Bool = false
 
     public static func log(_ message: String) {
+        emitIdentityMarkerOnce()
         // Start the periodic flush on first use (cheap, idempotent).
         lock.lock()
         let startTimer = !hasStarted
@@ -68,6 +69,27 @@ public enum Diagnostics {
         lock.unlock()
         if shouldFlush { flush() }
     }
+
+    /// Emits the candidate-identity marker exactly once per process, before
+    /// the first logged line, so every evidence window is attributable
+    /// (ADR-0012 candidate identity requirement). Metadata only.
+    private static func emitIdentityMarkerOnce() {
+        guard !identityMarkerEmitted else { return }
+        lock.lock()
+        let alreadyEmitted = identityMarkerEmitted
+        identityMarkerEmitted = true
+        lock.unlock()
+        if alreadyEmitted { return }
+        let line = formattedLine(CandidateIdentity.diagnosticMarker)
+        lock.lock()
+        buffer.append(line)
+        lock.unlock()
+        // The marker must reach disk immediately: it attributes every later
+        // line in this window, and the process may be short-lived.
+        flush()
+    }
+
+    nonisolated(unsafe) private static var identityMarkerEmitted: Bool = false
 
     /// Snapshots the buffer and hands it to the serial writer queue.
     /// Returns immediately; the current thread never performs file I/O.
