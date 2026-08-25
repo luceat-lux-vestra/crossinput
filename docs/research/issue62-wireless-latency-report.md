@@ -78,9 +78,10 @@ Structural findings:
   timeout/stream-closed/write-failed/malformed/helper-failure reasons to
   diag.log, and a bounded grace window captures late responses after any
   timeout.
-- **0.75 s TIMEOUT CHANGE: NOT JUSTIFIED BY CURRENT DATA** (Case A). Healthy
-  p99 ≤ ~118 ms even under real bursts and saturation; budget stays ≥6× above
-  worst case. Unchanged per ADR-0011 §8.
+- **0.75 s TIMEOUT CHANGE: NOT JUSTIFIED BY CURRENT DATA** (Case A). Highest
+  observed p99 = 127.4 ms (burst-idle) with a worst-case max of 130.8 ms
+  (queue-pressure); the 750 ms budget stays ~5.9× above the highest observed
+  p99 and ~5.7× above the worst-case max. Unchanged per ADR-0011 §8.
 
 ## Recommendation
 
