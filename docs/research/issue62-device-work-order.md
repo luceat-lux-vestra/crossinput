@@ -4,7 +4,7 @@
 `d66a357bc5824707bcc0a3bb69d31c7fb3a939f6`; issue #62 closed 2026-08-26.
 Authoritative stress evidence remains PR #66's
 `20260825T051359Z-6a48ab7/`; the final usability check is recorded in
-`evidence/issue62-level1-usability/20260826T024938Z-d66a357/`.
+`evidence/issue62-level1-usability/20260825T175101Z-d66a357/`.
 **Device:** Samsung SM-G977N (DeX wired HDMI, display id=2), wireless ADB (mDNS/TLS)
 **Dates:** 2026-08-25 (preflight + PR #66 measurement), 2026-08-26 (final Level-1 acceptance)
 
@@ -15,7 +15,7 @@ code identical to PR #66's physical-evidence commit `6a48ab7`; local suite at
 the candidate: 140 XCTest + 30 Swift Testing, 0 failures). Two bounded windows,
 SM-G977N DeX over wireless mDNS/TLS ADB, natural representative interaction —
 no artificial repetition counts. Full sanitized record:
-[`evidence/issue62-level1-usability/20260826T024938Z-d66a357/metadata.txt`](evidence/issue62-level1-usability/20260826T024938Z-d66a357/metadata.txt).
+[`evidence/issue62-level1-usability/20260825T175101Z-d66a357/metadata.txt`](evidence/issue62-level1-usability/20260825T175101Z-d66a357/metadata.txt).
 
 Checklist result: all items pass. Handoff entry, pointer visibility/motion,
 vertical scroll direction, aggressive scroll bursts (2,200+ coalesced batches in
