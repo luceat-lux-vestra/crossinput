@@ -1,0 +1,15 @@
+ISSUE62_WIRELESS_STRESS
+
+revision: 6a48ab7af950cfd898df21b6c0d78dd0283e7fed
+device: SM-G977N Android 12 (API 31); raw adb serial redacted
+transport_class: wireless-mdns-tls
+scrcpy/video: OFF
+
+baseline: rc=0 requests_success=500 timeouts=0 late_responses=0
+scroll-burst: rc=0 requests_success=45 timeouts=0 late_responses=0
+move-burst: rc=0 requests_success=46 timeouts=0 late_responses=0
+mixed: rc=0 requests_success=500 timeouts=0 late_responses=0
+burst-idle: rc=0 requests_success=45 timeouts=0 late_responses=0
+queue-pressure: rc=0 requests_success=1625 timeouts=0 late_responses=0
+
+overall: PASS

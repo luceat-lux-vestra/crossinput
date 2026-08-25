@@ -1,0 +1,510 @@
+#!/usr/bin/env bash
+# One-shot headless wireless-ADB stress driver for issue #62, designed to run
+# on the home Mac over SSH against the physically connected SM-G977N + DeX.
+#
+# Exercises the REAL macOS production delivery path
+# (InputSender -> RemoteSession.requestBlocking -> AdbTransport -> helper)
+# via the cxi-stress executable; deploy-helper.sh only provisions the helper.
+#
+# Usage:
+#   scripts/verify-device-issue62.sh <revision> [--profile NAME] [--iterations N]
+#                                    [--all] [--keep-video-off]
+#
+#   <revision>        exact SHA/rev under test; must equal `git rev-parse HEAD`.
+#                     The script never checks out, merges, or rewrites history.
+#   --profile NAME    single workload: baseline|scroll-burst|move-burst|mixed|burst-idle
+#   --all             run every workload profile in sequence (default)
+#
+# Exit codes:
+#   0  automated pass - no timeout/genuine-failure observations
+#   1  product assertion failure - timeouts or genuine delivery failures observed
+#   2  usage / environment / repository-state error
+#   3  physical precondition unavailable - no ADB device / DeX display absent
+#
+# Privacy: evidence carries metadata only (latency samples, outcome taxonomy,
+# transport class). Raw adb serials are redacted by scripts/lib/evidence-privacy.sh;
+# no pointer deltas, scroll values, key codes, or HID payloads are recorded
+# (AGENTS.md rule 4).
+set -euo pipefail
+
+EXIT_OK=0
+EXIT_FAIL=1
+EXIT_USAGE=2
+EXIT_PRECONDITION=3
+
+REV=""
+PROFILE=""
+RUN_ALL=0
+SELF_TEST_RC_PATH="${SELF_TEST_RC_PATH:-0}"
+
+usage() {
+    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --profile)
+            [ -n "${2:-}" ] || { echo "--profile requires a value" >&2; exit "$EXIT_USAGE"; }
+            PROFILE="$2"; shift ;;
+        --all) RUN_ALL=1 ;;
+        --iterations)
+            [ -n "${2:-}" ] || { echo "--iterations requires a value" >&2; exit "$EXIT_USAGE"; }
+            ITERATIONS="$2"; shift ;;
+        --self-test-rc-path)
+            SELF_TEST_RC_PATH=1 ;;
+        -h|--help) usage; exit "$EXIT_OK" ;;
+        -*)
+            echo "unknown option: $1" >&2
+            exit "$EXIT_USAGE"
+            ;;
+        *)
+            if [ -n "$REV" ]; then
+                echo "unexpected extra argument: $1" >&2
+                exit "$EXIT_USAGE"
+            fi
+            REV="$1"
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$REV" ] && [ "$SELF_TEST_RC_PATH" != "1" ]; then
+    usage >&2
+    exit "$EXIT_USAGE"
+fi
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "not inside a git repository" >&2
+    exit "$EXIT_USAGE"
+}
+cd "$ROOT"
+[ -f scripts/deploy-helper.sh ] && [ -d android/helper ] || {
+    echo "not the crossinput repository root: $ROOT" >&2
+    exit "$EXIT_USAGE"
+}
+# ---------------------------------------------------------------------------
+# Shared workload-loop: THE production per-profile execution block. Both the
+# main driver path and --self-test-rc-path call THIS code — no copied
+# duplicate, so a regression in ordering (JSON lookup before rc handling) or
+# in exit-code mapping breaks the CI fixture too.
+#
+# Requires: STRESS_BIN, RAW_EV, DEVICE, ITERATIONS, ev(), stop_helper().
+# Sets: OVERALL, SUMMARY_LINES. Exits the driver on rc=2/3.
+# ---------------------------------------------------------------------------
+run_one_profile() {
+    local p="$1"
+    echo "== running profile: $p =="
+    ARGS=(--profile "$p")
+    [ -n "$ITERATIONS" ] && ARGS+=(--iterations "$ITERATIONS")
+
+    set +e
+    ANDROID_SERIAL="$DEVICE" "$STRESS_BIN" "${ARGS[@]}" --out "$RAW_EV" >"$RAW_EV/$p.stdout" 2>"$RAW_EV/$p.stderr"
+    RC=$?
+    set -e
+
+    # Precondition/usage exits are handled BEFORE touching the result JSON:
+    # a DeX-missing run (rc=3) exits before writing any JSON, and an unguarded
+    # lookup here would abort under set -euo pipefail first.
+    case "$RC" in
+        2) OVERALL="PRECONDITION_NOT_MET"; stop_helper; PUBLISHED_EVIDENCE=0
+           echo "cxi-stress usage/environment error (rc=2)" >&2
+           exit "$EXIT_USAGE" ;;
+        3) OVERALL="PRECONDITION_NOT_MET"; stop_helper; PUBLISHED_EVIDENCE=0
+           exit "$EXIT_PRECONDITION" ;;
+        0) ;;
+        *) OVERALL="FAIL" ;;
+    esac
+
+    RESULT_FILE="$(ls -t "$RAW_EV"/stress-result-*.json 2>/dev/null | head -1 || true)"
+    if [ -n "$RESULT_FILE" ] && [ -f "$RESULT_FILE" ]; then
+        mv "$RESULT_FILE" "$(ev latency-$p.json)"
+    fi
+
+    TIMEOUTS="$(jq -r '.timeouts // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+    SUCCESSES="$(jq -r '.successes // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+    LATE="$(jq -r '.lateResponses // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+
+    SUMMARY_LINES+=("$p: rc=$RC requests_success=$SUCCESSES timeouts=$TIMEOUTS late_responses=$LATE")
+    echo "   $p: rc=$RC successes=$SUCCESSES timeouts=$TIMEOUTS late=$LATE"
+
+    # Review gate: a BURST profile that never coalesced did not actually
+    # exercise queue accumulation — it was a serialized RTT measurement.
+    case "$p" in
+        scroll-burst|move-burst)
+            COALESCED="$(jq -r '.coalescedIntoExistingBatch // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+            if [ "${COALESCED:-0}" -le 0 ]; then
+                echo "FAIL: $p produced zero coalesced batches — burst did not form" >&2
+                OVERALL="FAIL"
+            fi
+            ;;
+        queue-pressure)
+            SHED="$(jq -r '.shedLocally // 0' "$(ev latency-$p.json)" 2>/dev/null || echo 0)"
+            if [ "${SHED:-0}" -le 0 ]; then
+                echo "FAIL: queue-pressure produced zero shed events — no real saturation" >&2
+                OVERALL="FAIL"
+            fi
+            ;;
+    esac
+}
+
+run_workload_loop() {
+    local p
+    for p in "${PROFILES[@]}"; do
+        run_one_profile "$p"
+    done
+}
+
+# ------------------------------------------------------------------ rc test --
+if [ "$SELF_TEST_RC_PATH" = "1" ]; then
+    # Deterministic regression (review rounds 4-6): exercises the REAL shared
+    # run_one_profile function — the exact code the production loop calls —
+    # against a fake cxi-stress binary. Verifies:
+    #   rc=3 -> PRECONDITION branch, driver exit 3, no result-JSON abort
+    #   rc=2 -> USAGE branch, driver exit 2
+    # A regression that reorders JSON lookup before rc handling or collapses
+    # exit codes breaks this fixture.
+    FAKE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$FAKE_DIR"' EXIT
+
+    for EXPECTED_RC in 3 2; do
+        OVERALL="PASS"
+        SUMMARY_LINES=()
+        PROFILES=(scroll-burst)
+        ITERATIONS=""
+        DEVICE="self-test" 
+        RAW_EV="$FAKE_DIR/raw-$EXPECTED_RC"
+        mkdir -p "$RAW_EV"
+        ev() { printf '%s/%s' "$RAW_EV" "$1"; }
+        stop_helper() { :; }
+        PUBLISHED_EVIDENCE=0
+        EXIT_PRECONDITION=3
+        EXIT_USAGE=2
+
+        STRESS_BIN="$FAKE_DIR/fake-stress"
+        printf '#!/bin/sh\nexit %s\n' "$EXPECTED_RC" >"$STRESS_BIN"
+        chmod +x "$STRESS_BIN"
+
+        # Wrapper wiring assertion: run_workload_loop must be defined and
+        # actually call run_one_profile — a missing definition or mis-wired
+        # production loop would otherwise only fail on a real device run.
+        if ! declare -F run_workload_loop >/dev/null; then
+            echo "rc-path self-test FAIL: run_workload_loop is not defined" >&2
+            exit "$EXIT_FAIL"
+        fi
+        loop_src="$(declare -f run_workload_loop)"
+        if ! grep -q 'run_one_profile' <<<"$loop_src"; then
+            echo "rc-path self-test FAIL: run_workload_loop does not call run_one_profile" >&2
+            exit "$EXIT_FAIL"
+        fi
+
+        # Structural assertion: rc handling must precede the result-JSON
+        # lookup in run_one_profile. A reorder regression (lookup first)
+        # would abort under set -euo pipefail when no JSON exists.
+        # The self-test body itself IS inside a function, so plain vars work.
+        fn_src="$(declare -f run_one_profile)"
+        rc_offset="$(printf '%s' "$fn_src" | grep -bo 'case "$RC" in' | head -1 | cut -d: -f1)"
+        json_offset="$(printf '%s' "$fn_src" | grep -bo 'RESULT_FILE=' | head -1 | cut -d: -f1)"
+        if [ -z "$rc_offset" ] || [ -z "$json_offset" ] || [ "$rc_offset" -ge "$json_offset" ]; then
+            echo "rc-path self-test FAIL: JSON lookup precedes rc handling (or blocks missing)" >&2
+            exit "$EXIT_FAIL"
+        fi
+
+        set +e
+        # Subshell: run_one_profile exits the driver on 2/3 by design; the
+        # subshell captures that exit code so BOTH cases can be verified.
+        ( run_workload_loop )
+        GOT=$?
+        set -e
+        if [ "$GOT" != "$EXPECTED_RC" ]; then
+            echo "rc-path self-test FAIL: rc=$EXPECTED_RC expected driver exit $EXPECTED_RC, got $GOT" >&2
+            exit "$EXIT_FAIL"
+        fi
+    done
+    echo "rc-path self-test OK (rc=3 -> 3, rc=2 -> 2 via shared run_one_profile)"
+    exit "$EXIT_OK"
+fi
+
+MACOS_DIR="$ROOT/apps/macos"
+
+
+for tool in git adb python3 jq swift; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "missing required tool: $tool" >&2
+        exit "$EXIT_USAGE"
+    }
+done
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/evidence-privacy.sh"
+PRIVACY_FAIL_CODE="$EXIT_USAGE"
+privacy_init_identifiers
+
+ITERATIONS="${ITERATIONS:-}"
+
+ev() { printf '%s/%s' "$RAW_EV" "$1"; }
+
+REQUESTED_SHA="$(git rev-parse --verify "$REV^{commit}" 2>/dev/null)" || {
+    echo "cannot resolve revision: $REV" >&2
+    exit "$EXIT_USAGE"
+}
+HEAD_SHA="$(git rev-parse HEAD)"
+if [ "$REQUESTED_SHA" != "$HEAD_SHA" ]; then
+    echo "refusing to verify: requested $REQUESTED_SHA but HEAD is $HEAD_SHA" >&2
+    echo "check out the exact revision first; this script does not mutate checkout state" >&2
+    exit "$EXIT_USAGE"
+fi
+SHORT_SHA="$(git rev-parse --short "$REQUESTED_SHA")"
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    if [ "${CROSSINPUT_ALLOW_DIRTY:-0}" != "1" ]; then
+        echo "working tree is dirty; commit/stash first or set CROSSINPUT_ALLOW_DIRTY=1" >&2
+        exit "$EXIT_USAGE"
+    fi
+fi
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+TMP_LOCAL="$(mktemp -d /tmp/cxi-stress.XXXXXX)"
+EVIDENCE="docs/research/evidence/issue-62-wireless-latency/${TS}-${SHORT_SHA}"
+mkdir -p "$EVIDENCE"
+RAW_EV="$TMP_LOCAL/raw-evidence"
+mkdir -p "$RAW_EV"
+PUBLISHED_EVIDENCE=0
+
+cleanup() {
+    if [ "$PUBLISHED_EVIDENCE" != "1" ]; then
+        discard_unpublished_evidence "$RAW_EV" "$EVIDENCE" "$PUBLISHED_EVIDENCE"
+    fi
+    rm -rf "$TMP_LOCAL"
+}
+trap cleanup EXIT
+
+ITERATIONS="${ITERATIONS:-}"
+
+# ------------------------------------------------------- device selection ----
+ADB_DEVICES_FILE="$(ev adb-devices.txt)"
+adb devices -l | tee "$ADB_DEVICES_FILE"
+
+SERIALS="$(awk '$2 == "device" {print $1}' "$ADB_DEVICES_FILE")"
+if [ -n "${ANDROID_SERIAL:-}" ] && grep -qx "${ANDROID_SERIAL}" <<<"$SERIALS"; then
+    DEVICE="$ANDROID_SERIAL"
+elif [ "$(grep -c . <<<"$SERIALS" || true)" -eq 1 ]; then
+    DEVICE="$(grep . <<<"$SERIALS")"
+else
+    while IFS= read -r serial; do
+        [ -z "$serial" ] && continue
+        model="$(adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
+        if [ "$model" = "SM-G977N" ] || [ "$model" = "SM_G977N" ]; then
+            DEVICE="$serial"
+            break
+        fi
+    done <<<"$SERIALS"
+fi
+if [ -z "$DEVICE" ]; then
+    echo "no usable adb device (set ANDROID_SERIAL to disambiguate)" >&2
+    exit "$EXIT_PRECONDITION"
+fi
+export DEVICE
+privacy_bind_device "$DEVICE"
+
+# Wireless transport classification from the serial FORM (work order §9).
+case "$DEVICE" in
+    *_adb-tls-connect._tcp*) TRANSPORT_CLASS="wireless-mdns-tls" ;;
+    *:*.*)                   TRANSPORT_CLASS="wireless-hostport" ;;
+    *)                       TRANSPORT_CLASS="usb-or-other" ;;
+esac
+
+MODEL="$(adb -s "$DEVICE" shell getprop ro.product.model | tr -d '\r')"
+RELEASE="$(adb -s "$DEVICE" shell getprop ro.build.version.release | tr -d '\r')"
+SDK="$(adb -s "$DEVICE" shell getprop ro.build.version.sdk | tr -d '\r')"
+
+{
+    echo "revision_verified=$REQUESTED_SHA"
+    echo "head_at_start=$HEAD_SHA"
+    echo "started_utc=$TS"
+    echo "host=$(uname -srm)"
+    echo "serial=<redacted-adb-serial>"
+    echo "transport_class=$TRANSPORT_CLASS"
+    echo "device_selector=${ANDROID_SERIAL:+env-android-serial}${ANDROID_SERIAL:-single-or-model-match}"
+    echo "model=$MODEL"
+    echo "android_release=$RELEASE"
+    echo "sdk=$SDK"
+    echo "scrcpy_video=OFF (default per work order section 10)"
+} >"$(ev metadata.txt)"
+
+if [ "$TRANSPORT_CLASS" = "usb-or-other" ]; then
+    if [ "${ALLOW_NON_WIRELESS_DIAGNOSTIC:-0}" != "1" ]; then
+        echo "FAIL-CLOSED: selected device is not a wireless ADB endpoint." >&2
+        echo "Primary #62 evidence must come from wireless ADB (work order section 2.1)." >&2
+        echo "Set ALLOW_NON_WIRELESS_DIAGNOSTIC=1 only for explicit non-gating diagnostics." >&2
+        exit "$EXIT_PRECONDITION"
+    fi
+    echo "transport_expectation=MISMATCH (explicitly allowed as non-gating diagnostic)" >>"$(ev metadata.txt)"
+else
+    echo "transport_expectation=match ($TRANSPORT_CLASS)" >>"$(ev metadata.txt)"
+fi
+
+# ------------------------------------------------------ DeX precondition -----
+DEX_DISPLAYS_FILE="$(ev dex-displays.txt)"
+adb -s "$DEVICE" exec-out dumpsys display >"$DEX_DISPLAYS_FILE" 2>/dev/null || true
+DEX_ID="$(python3 -c '
+import re, sys
+content = open(sys.argv[1]).read()
+ids = sorted({int(m) for m in re.findall(r"mDisplayId=(\d+)", content)})
+print(ids[-1] if ids else "")
+' "$DEX_DISPLAYS_FILE" 2>/dev/null || true)"
+# Diagnostic metadata ONLY (review round 5): the largest-mDisplayId heuristic
+# is known-wrong (physical evidence proved shell=16 vs real=2). It never gates:
+# the only DeX check is LIST_DISPLAYS -> isDesktop inside cxi-stress, which
+# exits 3 when no desktop display exists.
+if [ -n "$DEX_ID" ]; then
+    echo "dex_display_id_shell_guess=$DEX_ID (non-authoritative heuristic)" >>"$(ev metadata.txt)"
+else
+    echo "dex_display_id_shell_guess=none (dumpsys scrape found no mDisplayId)" >>"$(ev metadata.txt)"
+fi
+
+# --------------------------------------------------------- build artifacts ---
+echo "== building cxi-stress and helper =="
+( cd "$MACOS_DIR" && swift build -c debug >/dev/null 2>&1 ) || {
+    echo "swift build failed" >&2
+    exit "$EXIT_USAGE"
+}
+STRESS_BIN="$MACOS_DIR/.build/debug/cxi-stress"
+
+# Review round 4: deploy the APK ONLY. The production AdbTransport.launch()
+# owns the helper lifecycle — it pkills any existing helper and starts its
+# own persistent `adb shell -T app_process` channel. Running
+# `deploy-helper.sh start` here would spawn a second detached
+# tail -f | app_process helper that AdbTransport immediately kills, adding a
+# pointless launch/kill cycle (and an orphaned feeder) before measurement.
+scripts/deploy-helper.sh deploy >/dev/null 2>&1 || {
+    echo "helper APK deployment failed" >&2
+    exit "$EXIT_PRECONDITION"
+}
+
+# The production path owns helper startup/teardown; nothing to stop here.
+# (AdbTransport closes its own channel when the stress tool shuts down.)
+stop_helper() { :; }
+
+# ------------------------------------------------------------- workloads -----
+PROFILES=(baseline scroll-burst move-burst mixed burst-idle queue-pressure)
+if [ -n "$PROFILE" ]; then
+    case "$PROFILE" in
+        baseline|scroll-burst|move-burst|mixed|burst-idle|queue-pressure) PROFILES=("$PROFILE") ;;
+        *) echo "unknown profile: $PROFILE" >&2; exit "$EXIT_USAGE" ;;
+    esac
+fi
+[ "$RUN_ALL" = "1" ] && [ -n "$PROFILE" ] && {
+    echo "--all and --profile are mutually exclusive" >&2
+    exit "$EXIT_USAGE"
+}
+
+OVERALL="PASS"
+SUMMARY_LINES=()
+run_workload_loop
+
+# Authoritative desktop display id (review round 5): taken from ANY
+# successfully generated profile JSON — not specifically baseline, which does
+# not exist for single-profile runs. All profiles in one run must agree;
+# disagreement is a harness failure, not silently accepted.
+AUTH_IDS="$(jq -r '.selectedDesktopDisplayId // empty' "$RAW_EV"/latency-*.json 2>/dev/null | sort -u | tr '\n' ' ' | xargs)"
+if [ -z "${AUTH_IDS:-}" ]; then
+    echo "FAIL-CLOSED: no profile recorded a selectedDesktopDisplayId" >&2
+    OVERALL="PRECONDITION_NOT_MET"
+    stop_helper
+    PUBLISHED_EVIDENCE=0
+    exit "$EXIT_PRECONDITION"
+fi
+AUTH_COUNT="$(printf '%s\n' $AUTH_IDS | sort -u | grep -c . || true)"
+if [ "${AUTH_COUNT:-0}" -ne 1 ]; then
+    echo "FAIL: profiles disagree on selected desktop id: $AUTH_IDS" >&2
+    OVERALL="PRECONDITION_NOT_MET"
+    stop_helper
+    PUBLISHED_EVIDENCE=0
+    exit "$EXIT_PRECONDITION"
+fi
+AUTH_DEX_ID="$AUTH_IDS"
+echo "dex_display_id=$AUTH_DEX_ID (authoritative: selected by production path)" >>"$(ev metadata.txt)"
+
+python3 - "$RAW_EV" <<'PYEOF'
+import json, os, sys
+raw_ev = sys.argv[1]
+summary = {"profiles": {}}
+for name in ["baseline", "scroll-burst", "move-burst", "mixed", "burst-idle", "queue-pressure"]:
+    path = os.path.join(raw_ev, f"latency-{name}.json")
+    if not os.path.exists(path):
+        continue
+    with open(path) as f:
+        data = json.load(f)
+    samples = sorted(data.get("latencySamples", []))
+    n = len(samples)
+    def pct(p):
+        if n < 20:
+            return None
+        rank = max(0, min(n - 1, int((p / 100) * n + 0.999999) - 1))
+        return round(samples[rank], 4)
+    summary["profiles"][name] = {
+        "requests": data.get("requests", 0),
+        "successes": data.get("successes", 0),
+        "timeouts": data.get("timeouts", 0),
+        "timeout_budgets": data.get("timeoutBudgets", []),
+        "stream_closed": data.get("streamClosed", 0),
+        "write_failed": data.get("writeFailed", 0),
+        "unexpected_response": data.get("unexpectedResponse", 0),
+        "malformed_response": data.get("malformedResponse", 0),
+        "helper_reported_failure": data.get("helperReportedFailure", 0),
+        "other_failure": data.get("otherFailure", 0),
+        "late_responses": data.get("lateResponses", 0),
+        "late_delay_seconds": data.get("lateDelaySeconds", []),
+        "count": n,
+        "p50": pct(50), "p90": pct(90), "p95": pct(95), "p99": pct(99),
+        "max": round(max(samples), 4) if samples else None,
+        "over_250ms": sum(1 for s in samples if s > 0.25) if n >= 20 else None,
+        "over_500ms": sum(1 for s in samples if s > 0.5) if n >= 20 else None,
+        "over_750ms": sum(1 for s in samples if s > 0.75) if n >= 20 else None,
+        "over_1000ms": sum(1 for s in samples if s > 1.0) if n >= 20 else None,
+        "admission_accepted": data.get("acceptedAsNewBatch", 0),
+        "admission_coalesced": data.get("coalescedIntoExistingBatch", 0),
+        "admission_shed": data.get("shedLocally", 0),
+        "admission_safety_rejected": data.get("safetyRejected", 0),
+    }
+with open(os.path.join(raw_ev, "latency-summary.json"), "w") as f:
+    json.dump(summary, f, indent=2, sort_keys=True)
+PYEOF
+
+{
+    echo "ISSUE62_WIRELESS_STRESS"
+    echo
+    echo "revision: $REQUESTED_SHA"
+    echo "device: $MODEL Android $RELEASE (API $SDK); raw adb serial redacted"
+    echo "transport_class: $TRANSPORT_CLASS"
+    echo "scrcpy/video: OFF"
+    echo
+    for line in "${SUMMARY_LINES[@]}"; do
+        echo "$line"
+    done
+    echo
+    echo "overall: $OVERALL"
+} | tee "$(ev result-summary.txt)"
+
+# Publish every metadata-only artifact through the sanitizer into the
+# git-bound evidence directory (fail-closed; residual scan on each file).
+for f in metadata.txt adb-devices.txt result-summary.txt latency-summary.json; do
+    [ -f "$(ev "$f")" ] && publish_sanitized "$(ev "$f")" "$EVIDENCE/$f"
+done
+for f in "$RAW_EV"/*; do
+    case "$(basename "$f")" in
+        metadata.txt|adb-devices.txt|result-summary.txt|latency-summary.json) ;;
+        latency-*.json|dex-displays.txt|*.stdout) publish_sanitized "$f" "$EVIDENCE/$(basename "$f")" ;;
+    esac
+done
+
+# Review round 3: the flag is set ONLY after every publication succeeded.
+# A mid-loop sanitizer failure exits under set -e with PUBLISHED_EVIDENCE=0,
+# so cleanup removes the partial evidence directory wholesale.
+PUBLISHED_EVIDENCE=1
+
+
+if [ "$OVERALL" = "PASS" ]; then
+    exit "$EXIT_OK"
+else
+    exit "$EXIT_FAIL"
+fi
