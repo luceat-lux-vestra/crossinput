@@ -147,6 +147,13 @@ run_one_profile() {
     esac
 }
 
+run_workload_loop() {
+    local p
+    for p in "${PROFILES[@]}"; do
+        run_one_profile "$p"
+    done
+}
+
 # ------------------------------------------------------------------ rc test --
 if [ "$SELF_TEST_RC_PATH" = "1" ]; then
     # Deterministic regression (review rounds 4-6): exercises the REAL shared
@@ -177,6 +184,19 @@ if [ "$SELF_TEST_RC_PATH" = "1" ]; then
         printf '#!/bin/sh\nexit %s\n' "$EXPECTED_RC" >"$STRESS_BIN"
         chmod +x "$STRESS_BIN"
 
+        # Wrapper wiring assertion: run_workload_loop must be defined and
+        # actually call run_one_profile — a missing definition or mis-wired
+        # production loop would otherwise only fail on a real device run.
+        if ! declare -F run_workload_loop >/dev/null; then
+            echo "rc-path self-test FAIL: run_workload_loop is not defined" >&2
+            exit "$EXIT_FAIL"
+        fi
+        loop_src="$(declare -f run_workload_loop)"
+        if ! grep -q 'run_one_profile' <<<"$loop_src"; then
+            echo "rc-path self-test FAIL: run_workload_loop does not call run_one_profile" >&2
+            exit "$EXIT_FAIL"
+        fi
+
         # Structural assertion: rc handling must precede the result-JSON
         # lookup in run_one_profile. A reorder regression (lookup first)
         # would abort under set -euo pipefail when no JSON exists.
@@ -192,7 +212,7 @@ if [ "$SELF_TEST_RC_PATH" = "1" ]; then
         set +e
         # Subshell: run_one_profile exits the driver on 2/3 by design; the
         # subshell captures that exit code so BOTH cases can be verified.
-        ( run_one_profile "scroll-burst" )
+        ( run_workload_loop )
         GOT=$?
         set -e
         if [ "$GOT" != "$EXPECTED_RC" ]; then
