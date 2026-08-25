@@ -1,0 +1,68 @@
+# Issue #62 — ADR-0012 Level-1 physical usability verification (final)
+
+tested_candidate: d66a357bc5824707bcc0a3bb69d31c7fb3a939f6 (main)
+production_code_identical_to_pr66_physical_evidence: 6a48ab7af950cfd898df21b6c0d78dd0283e7fed
+  (git diff 6a48ab7..d66a357 -- apps/macos/Sources apps/macos/Package.swift android/ = empty)
+device: Samsung SM-G977N (beyondxks), Android 12, DeX wired HDMI 1920x1080, display id=2
+transport: wireless ADB, mDNS/TLS (_adb-tls-connect._tcp)
+macos_app: /Applications/Ampersand.app built from tested candidate; helper APK rebuilt from same tree
+local_suite_at_candidate: swift build clean; 140 XCTest + 30 Swift Testing, 0 failures
+
+bounded_verification_window:
+  window_1_open:      2026-08-25T23:47:00+09:00 (2026-08-25T14:47:00Z)
+                      diag.log line offset 49340 / byte offset 2899851 recorded at
+                      2026-08-25T23:46:59+09:00
+  session_connected:  2026-08-26T01:29:44.018+09:00 (2026-08-25T16:29:44.018Z)
+                      diag line "helper: [Main] keyboard backend mode=auto";
+                      handoff activation sequence=1 at 01:29:45.291
+  transport_drop_reboot:
+                      2026-08-26T01:41:21.839+09:00 (2026-08-25T16:41:21.839Z)
+                      diag line "remote unavailable: helper session ended"
+                      (phone rebooted by user; wireless ADB absent ~01:45–01:57,
+                      rejoined 2026-08-26T01:57:33+09:00 via mDNS/TLS)
+  window_2_open:      2026-08-26T01:58:14+09:00 (2026-08-25T16:58:14Z)
+                      diag.log line offset 52373 / byte offset 3087966
+                      (first post-offset activity 01:58:14.976 edgeEntered)
+  window_2_close:     2026-08-26T02:49:38+09:00 (2026-08-25T17:49:38Z)
+                      diag.log lines 84963–84964 reviewed; last write 02:49:49
+
+classification (combined windows 1+2, PR #66 taxonomy):
+  remoteActive_entries: 37
+  normal_returns_boundaryCrossed: 36
+  remoteUnavailable_force_returns_total: 1
+  remoteUnavailable_queue_pressure_induced: 0
+  remoteUnavailable_classification: genuine transport/session failure
+    (adb session ended at 2026-08-26T01:41:21.839+09:00 "remote unavailable:
+     helper session ended"
+     immediately before phone reboot; UHID reports succeeded continuously up to
+     the drop; zero timeout/late/partial/failed observations in window)
+  request_timeouts: 0
+  late_responses: 0
+  partial_deliveries: 0
+  failed_deliveries: 0
+  stream_closures_attributable_to_product: 0 (one adb-side session end, see above)
+  cancelled_delivery_events: 13 (+1 in window 1) — each count=1, at return boundaries,
+  scroll_batches_coalesced_counter_final: >=2200 (burst cluster
+    2026-08-26T02:45:42–02:47:49+09:00)
+  queue_saturation_shed_events: 0
+  held_button_cleanup_incidents: 0
+  stuck_button_reports: 0
+  watchdog_recoveries_during_remoteActive: 0
+  unclassified_or_insufficient_evidence_events: 0
+
+human visual confirmation (user, on DeX display):
+  handoff entry + pointer visible/moving: OK
+  vertical scroll direction + feel: OK (smooth, natural speed)
+  horizontal scroll: functional but perceived slower than vertical — recorded as a
+    separate observation, NOT attributed to #62 (no causal path; separate issue if
+    evidence emerges)
+  clicks left/right/middle after stress: OK
+  no false return during aggressive scrolling incl. bursts: confirmed by user
+  no stuck-button state: confirmed by user
+
+verdict: PASS — #62 closure-ready
+  queue-pressure-induced remoteUnavailable: 0 (PASS criterion 7)
+  healthy pressure degraded via coalescing only; never fabricated transport failure
+  pointerRequestTimeout remains 0.75 s (unchanged; nothing contradicts PR #66 conclusion)
+
+privacy: metadata only; no keystrokes, clipboard contents, or HID payloads logged.
