@@ -2,7 +2,7 @@
 
 **Status:** INVESTIGATION COMPLETE (observability + harness + measurement)
 **Tested HEAD (executable code):** `a1c1071` — physical run executed at this exact push; evidence + docs committed separately as commit B per review process note. Authoritative DeX display id (`dex_display_id=2`, selected by the production path via `isDesktop`) recorded in metadata; the shell-side dumpsys guess (16) is retained as `_shell_guess` and shown wrong.
-**Date:** 2026-08-25 (rev 3 — post-review-round-2; supersedes rev 1/2)
+**Date:** 2026-08-25 (rev 5 — post-review-round-5 cleanup; supersedes rev 1–4)
 **Related:** issue #62, PR #63, PR #66 review, ADR-0011, ADR-0012
 
 ## Rev history
@@ -12,14 +12,14 @@
 - **Rev 2:** real bursts + product fail-safe semantics + tombstone TTL fixes;
   aggregator `pct()` runtime bug and publication-order defects remained.
   Superseded.
-- **Rev 4 (this):** telemetry ownership split — RemoteSession owns transport
+- **Rev 5 (this):** telemetry ownership split — RemoteSession owns transport
   outcomes only; InputSender owns semantic outcomes only (`DecodeError` →
   malformed, explicit `partialDelivery` observation for movement partials
   that the product maps to force-return); ConnectionError is never re-emitted.
   DeX gate enforced in cxi-stress via `isDesktop` with authoritative display
   id persisted into evidence. rc=2/3 handled before JSON lookup (CI fixture).
   Helper provisioning reduced to APK deploy — AdbTransport owns lifecycle.
-- **Rev 3:** aggregator fixed and CI-gated by a fixture test;
+- **Rev 3/4:** aggregator fixed and CI-gated by a fixture test;
   result-summary/latency-summary now generated into the raw zone and published
   through the sanitizer like every other artifact; queue-pressure rewritten to
   produce REAL saturation (alternating non-mergeable kinds → shed > 0);
@@ -36,7 +36,7 @@
 | Device | Samsung SM-G977N (beyondxks), Android 12 (API 31) |
 | Transport | **Wireless ADB**, mDNS/TLS (`_adb-tls-connect._tcp`) — fail-closed precondition |
 | Host | Darwin 25.5.0 arm64, headless over SSH |
-| Display | DeX desktop display discovered at runtime (`dex_display_id=16`) |
+| DeX desktop display | **id=2**; authoritative source: production `LIST_DISPLAYS` → `isDesktop`. Shell dumpsys guess: 16 (non-authoritative, known incorrect) |
 | Competing load | scrcpy OFF |
 | Evidence | `docs/research/evidence/issue-62-wireless-latency/20260825T040705Z-a1c1071/` |
 
@@ -73,7 +73,7 @@ Structural findings:
   transport failure and no force-return signal.
 - **WIRELESS RESIDUAL TIMEOUT CAUSE: NOT REPRODUCED / INCONCLUSIVE.** Genuine
   timeouts observed 3× during manual physical validation did not reproduce
-  under unattended stress (0 across rev-2 + rev-3 runs). If one recurs in the
+  under unattended stress (0 across the rev-2/3/4 runs and the final `a1c1071` run). If one recurs in the
   field, it is now auto-classified: the production app logs
   timeout/stream-closed/write-failed/malformed/helper-failure reasons to
   diag.log, and a bounded grace window captures late responses after any
