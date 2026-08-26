@@ -66,7 +66,10 @@ CLEANUP = re.compile(
 # unexplained product failure.
 REMOTE_UNAVAILABLE_CAUSE = "remote unavailable:"
 
-ENVIRONMENTAL_RELEASE = {"externalControl", "emergencyHotkey", "captureStopped"}
+# Real EdgeSwitchStateMachine TransitionReason values that represent
+# exactly-classified environmental exits (ADR-0012 taxonomy).
+ENVIRONMENTAL_RELEASE = {"externalControlTakeover", "emergencyReturn",
+                         "deactivated"}
 
 
 class Session:
@@ -88,8 +91,6 @@ def classify_exit(reason: str) -> str:
         return "normal_return"
     if reason in ENVIRONMENTAL_RELEASE:
         return "environmental_" + reason
-    if reason == "externalControlTakeover":
-        return "environmental_externalControl"
     if reason == "watchdogTimeout":
         return "watchdog_recovery"
     if reason == "remoteUnavailable":
@@ -135,9 +136,12 @@ def analyze(lines):
     pending_return = None   # (seq, reason) after remoteActive->returning
     saw_any_reports = False
 
-    def close_session_without_recovery():
+    def close_session_without_recovery(classification=None):
         nonlocal session, pending_return
-        if session is not None and pending_return is None:
+        if classification == "environmental_deactivated":
+            # App disable during remoteActive (ADR-0012 environmental event).
+            w.transport_failures += 1
+        elif session is not None and pending_return is None:
             # entry with neither returning nor localActive: ambiguous boundary
             w.unclassified += 1
             w.open_session_at_eof = True
@@ -186,7 +190,7 @@ def analyze(lines):
                 if cls == "normal_return":
                     w.normal_returns += 1
                 elif cls.startswith("environmental_"):
-                    if cls.endswith("externalControl"):
+                    if cls.endswith(("externalControl", "externalControlTakeover")):
                         w.external_takeovers += 1
                     elif cls.endswith(("emergencyHotkey", "emergencyReturn")):
                         w.emergency_returns += 1
@@ -242,6 +246,29 @@ def analyze(lines):
                     w.completed_cycles += 1
                 session = None
                 pending_return = None
+            elif frm == "remoteActive" and to in ("disabled", "returning"):
+                # Session teardown without a normal localActive leg.
+                cls = classify_exit(reason)
+                if cls.startswith("UNCLASSIFIED"):
+                    w.unclassified += 1
+                elif cls.startswith("environmental_"):
+                    if cls.endswith(("externalControl", "externalControlTakeover")):
+                        w.external_takeovers += 1
+                    elif cls.endswith(("emergencyHotkey", "emergencyReturn")):
+                        w.emergency_returns += 1
+                    else:
+                        w.transport_failures += 1
+                elif cls == "watchdog_recovery":
+                    w.watchdog_recoveries_remote_active += 1
+                elif cls.startswith("remoteUnavailable"):
+                    w.remote_unavailable_total += 1
+                    if "unexplained" in cls and session is not None:
+                        if session.transport_cause_logged:
+                            w.transport_failures += 1
+                        else:
+                            w.remote_unavailable_unexplained += 1
+                session = None
+                pending_return = None
             else:
                 # any other transition while a session is open tears the
                 # lifecycle down without a proper localActive leg
@@ -256,10 +283,9 @@ def analyze(lines):
                 saw_any_reports = True
             continue
 
-        # Backend-neutral evidence: the helper's PointerDispatcher logs this
-        # line on every successful semantic pointer request, regardless of
-        # whether the UHID or the InputManager backend served it.
-        if "pointer backend selected backend=" in line:
+        # Backend-neutral semantic delivery confirmation from the Mac app
+        # (logged once per session on first confirmed acceptance).
+        if "handoff usable-session confirmed" in line:
             if session is not None:
                 session.usable_evidence = True
                 saw_any_reports = True
@@ -308,7 +334,12 @@ def analyze(lines):
     return w
 
 
-def verdict(w, required, lineage_of=None):
+REQUIRED_CYCLES = 100  # ADR-0012 Level-3 gate; not configurable by design
+
+
+def verdict(w, lineage_of=None):
+    """Compute the fail-closed gate against REQUIRED_CYCLES."""
+    required = REQUIRED_CYCLES
     """Compute the fail-closed gate. Returns (status, reasons)."""
     lineage_of = lineage_of or {}
     reasons = []
@@ -363,26 +394,59 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+", help="diag log files or - for stdin")
-    ap.add_argument("--required", type=int, default=100,
-                    help="required completed physical cycles (default 100)")
     ap.add_argument("--window-id", default=None, help="evidence window identifier")
     ap.add_argument("--json-out", default=None, help="write machine result JSON here")
     ap.add_argument("--lineage-manifest", default=None,
-                    help="JSON file mapping candidate SHAs to a shared "
-                         "lineage id; SHAs listed together accumulate into "
-                         "the SAME window per ADR-0012 reset rules (e.g. "
-                         "docs-only commits between RC packages). Without "
-                         "it, any distinct candidate SHA is MIXED.")
+                    help="JSON manifest of audited candidate lineages. "
+                         "Schema: {\"lineages\": [{\"lineage_id\": str, "
+                         "\"candidates\": [sha...], \"classification\": "
+                         "\"initial|no-reset\", \"reason\": str, "
+                         "\"reference\": str}]}. Committed with the evidence "
+                         "so lineage groupings are human-auditable; SHAs "
+                         "sharing a lineage_id accumulate one window.")
     args = ap.parse_args(argv)
     lineage_of = {}
     if args.lineage_manifest:
         try:
             with open(args.lineage_manifest, "r", encoding="utf-8") as mf:
-                for sha, lid in json.load(mf).items():
-                    lineage_of[sha] = str(lid)
+                doc = json.load(mf)
         except (OSError, ValueError) as exc:
             print(json.dumps({"STABILITY_GATE": "HOLD",
                               "reasons": ["INPUT_ERROR=%s" % exc]}))
+            return 2
+        # Schema validation: an unaudited or malformed manifest must fail
+        # closed rather than silently merging unrelated candidates.
+        entries = doc.get("lineages") if isinstance(doc, dict) else None
+        if not isinstance(entries, list) or not entries:
+            print(json.dumps({"STABILITY_GATE": "HOLD",
+                              "reasons": ["MANIFEST_SCHEMA=lineages[] required"]}))
+            return 2
+        seen_shas = set()
+        schema_error = None
+        for entry in entries:
+            lid = entry.get("lineage_id")
+            shas = entry.get("candidates")
+            cls = entry.get("classification")
+            if (not isinstance(lid, str) or not lid
+                    or not isinstance(shas, list) or not shas
+                    or cls not in ("initial", "no-reset")):
+                schema_error = ("MANIFEST_SCHEMA=entry missing lineage_id/"
+                                "candidates/classification")
+                break
+            if not entry.get("reason") or not entry.get("reference"):
+                schema_error = "MANIFEST_SCHEMA=entry missing reason/reference"
+                break
+            for sha in shas:
+                if sha in seen_shas:
+                    schema_error = "MANIFEST_SCHEMA=duplicate sha %s" % sha
+                    break
+                seen_shas.add(sha)
+                lineage_of[sha] = lid
+            if schema_error:
+                break
+        if schema_error:
+            print(json.dumps({"STABILITY_GATE": "HOLD",
+                              "reasons": [schema_error]}))
             return 2
 
     lines = []
@@ -399,7 +463,7 @@ def main(argv=None):
         return 2
 
     w = analyze(lines)
-    status, reasons = verdict(w, args.required, lineage_of)
+    status, reasons = verdict(w, lineage_of)
     result = {
         "window_id": args.window_id,
         "candidates": sorted("%s@%s@%s" % t for t in w.identities),
@@ -426,7 +490,7 @@ def main(argv=None):
             "transitions_seen": w.total_transitions,
         },
         "insufficient_evidence_detail": w.insufficient_evidence[:10],
-        "required_cycles": args.required,
+        "required_cycles": REQUIRED_CYCLES,
         "reasons": reasons,
         "STABILITY_GATE": status,
     }

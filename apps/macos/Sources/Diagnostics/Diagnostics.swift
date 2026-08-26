@@ -97,7 +97,7 @@ public enum Diagnostics {
 
     /// Test-only: resets the exactly-once marker so each test gets a fresh
     /// process-identity window. Never call from production code.
-    public static func resetIdentityMarkerForTesting() {
+    static func resetIdentityMarkerForTesting() {
         lock.lock()
         identityMarkerEmitted = false
         // Drain anything buffered by earlier suites so this window starts

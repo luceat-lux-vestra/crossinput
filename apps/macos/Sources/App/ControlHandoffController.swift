@@ -127,6 +127,7 @@ final class ControlHandoffController: @unchecked Sendable {
             // Confirmed acceptance proves the delivery pipeline is live; keep
             // the fail-safe watchdog from expiring during long sessions.
             capture.pokeWatchdog()
+            logUsableSessionOnce()
             // The handoff position is credited through the machine's intent
             // rule (issue #45): return-direction movement counts even when
             // the helper's display-bound clamp reported zero accepted
@@ -146,6 +147,7 @@ final class ControlHandoffController: @unchecked Sendable {
             recordCancelledDelivery()
         case .delivered:
             capture.pokeWatchdog()
+            logUsableSessionOnce()
         case .failed:
             // A helper-side failure is a control-oriented availability loss;
             // the state machine does not need to know whether ADB, UHID, or
@@ -153,6 +155,18 @@ final class ControlHandoffController: @unchecked Sendable {
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
+    }
+
+    /// Logs a single metadata-only confirmation per suppression session that
+    /// at least one semantic pointer delivery was accepted by the remote
+    /// target. This is the ADR-0012 "usable remote session" evidence for the
+    /// Level-3 analyzer: it is backend-neutral (UHID and InputManager both
+    /// flow through here) and carries no input payloads. Reset implicitly by
+    /// the capture suppression generation on each entry.
+    private func logUsableSessionOnce() {
+        guard !usableSessionLogged else { return }
+        usableSessionLogged = true
+        Diagnostics.log("handoff usable-session confirmed")
     }
 
     /// Cancelled deliveries while remoteActive mean the pipeline dropped work
@@ -173,15 +187,18 @@ final class ControlHandoffController: @unchecked Sendable {
     private static let cancelledLogWindow: TimeInterval = 5
     private var cancelledDeliveryCount = 0
     private var lastCancelledDeliveryLog: TimeInterval = 0
+    /// One-shot gate for the ADR-0012 usable-session confirmation line;
+    /// cleared on every entry to remoteActive (issue #68).
+    private var usableSessionLogged = false
 
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
+            usableSessionLogged = false
             if let generation = capture.suppress() {
                 currentSuppressionGeneration = generation
             }
         case .localActive, .returning, .disabled:
-            sender.cancelPendingPointerEvents()
             // Lifecycle invariant (issue #62 code-gate): when local suppression
             // ends for ANY reason — normal boundary return, remote failure,
             // emergency return, takeover, disable — no button previously

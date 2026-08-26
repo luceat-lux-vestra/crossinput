@@ -18,6 +18,7 @@ IDENT = ("candidate identity app_version=0.1.0 build_identifier=B1 "
          "candidate_identifier=aaaa1111")
 ts_default = "2026-08-26T01:00:01.500"
 REPORT_LINE = f"{ts_default} helper: [HidDeviceManager] report sent id=2 len=5 written=11"
+SEMANTIC_CONFIRMED_LINE = f"{ts_default} handoff usable-session confirmed"
 
 
 def entry(n, ts="2026-08-26T01:00:00"):
@@ -48,13 +49,13 @@ def clean_cycle(seq, ts="2026-08-26T01:00:00"):
     ]
 
 
-def run_case(name, lines, required=100, expect_status=None, expect_exit=None,
-             extra_checks=None):
+def run_case(name, lines, _unused_required=None, expect_status=None,
+             expect_exit=None, extra_checks=None):
     with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
         fh.write("\n".join(lines) + "\n")
         path = fh.name
     proc = subprocess.run(
-        [sys.executable, ANALYZER, path, "--required", str(required)],
+        [sys.executable, ANALYZER, path],
         capture_output=True, text=True)
     try:
         result = json.loads(proc.stdout)
@@ -127,23 +128,31 @@ def main():
     check(run_case("fail_unexplained_remote_unavailable", lines, 1, "FAIL", 1,
                    lambda r: r["counters"]["remoteUnavailable_total"] == 1))
 
-    # environmental transport failure (captureStopped = capture lifecycle end,
-    # e.g. ADB loss) stays classified and does not become a product failure
+    # App disable during remoteActive (production path: remoteActive ->
+    # disabled reason=deactivated) is an exactly-classified environmental
+    # event per ADR-0012 — not unclassified, not a product failure.
     lines = [IDENT]
     for i in range(5):
         lines += clean_cycle(i * 4)
-    lines += [entry(30), remote(31), REPORT_LINE,
-              returning(32, "captureStopped"),
-              local(33, "captureStopped", ts="2026-08-26T01:00:33")]
-    check(run_case("environmental_not_fail", lines, 5, "PASS", 0,
-                   lambda r: r["counters"]["transport_session_failures_environmental"] == 1))
+    lines += [
+        entry(30), remote(31), REPORT_LINE,
+        "2026-08-26T01:00:32 handoff transition remoteActive -> disabled "
+        "reason=deactivated sequence=32",
+    ]
+    check(run_case("environmental_app_disable_not_fail", lines, None,
+                   "INCOMPLETE", 0,
+                   lambda r: r["counters"]["transport_session_failures_environmental"] == 1
+                   and r["counters"]["unclassified_events"] == 0))
 
     # external takeover classified
     lines = [IDENT] + clean_cycle(0) + [
-        entry(10), remote(11), REPORT_LINE, returning(12, "externalControlTakeover"),
-        local(13, "externalControlTakeover", ts="2026-08-26T01:00:13")]
-    check(run_case("external_takeover_classified", lines, 100, "INCOMPLETE", 0,
-                   lambda r: r["counters"]["external_takeovers"] == 1))
+        entry(10), remote(11), REPORT_LINE,
+        "2026-08-26T01:00:12 handoff transition remoteActive -> disabled "
+        "reason=externalControlTakeover sequence=13"]
+    check(run_case("external_takeover_classified", lines, None,
+                   "INCOMPLETE", 0,
+                   lambda r: r["counters"]["external_takeovers"] == 1
+                   and r["counters"]["unclassified_events"] == 0))
 
     # HOLD: unknown reason on remote exit is an unclassified control event
     lines = [IDENT] + clean_cycle(0) + [
@@ -265,7 +274,8 @@ def main():
         "2026-08-26T01:00:12 remote unavailable: helper session ended",
         returning(12, "remoteUnavailable"),
         local(13, "remoteUnavailable")]
-    check(run_case("correlated_transport_failure_not_fail", lines, 2, "INCOMPLETE", 0,
+    check(run_case("correlated_transport_failure_not_fail", lines, None,
+                   "INCOMPLETE", 0,
                    lambda r: r["counters"]["transport_session_failures_environmental"] == 1
                    and r["counters"]["remoteUnavailable_unexplained"] == 0
                    and r["counters"]["completed_physical_cycles"] == 1))
@@ -278,15 +288,29 @@ def main():
     check(run_case("uncorrelated_remote_unavailable_fails", lines, 1, "FAIL", 1,
                    lambda r: r["counters"]["remoteUnavailable_unexplained"] == 1))
 
-    # InputManager backend session (no UHID report; pointer backend selected
-    # instead) counts as usable-session evidence
+    # Backend-neutral semantic delivery evidence: the Mac app logs this line
+    # on the first confirmed acceptance per session, regardless of whether
+    # the UHID or InputManager backend served it. (Backend *selection* alone
+    # is NOT evidence — selection happens at connect time, before sessions.)
+    lines = [IDENT,
+             entry(10), remote(11),
+             SEMANTIC_CONFIRMED_LINE,
+             returning(12, "boundaryCrossed"),
+             local(13, "boundaryCrossed")]
+    check(run_case("input_manager_semantic_delivery_credited", lines, None,
+                   "INCOMPLETE", 0,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 1))
+
+    # Backend *selection* without confirmed delivery is NOT usable-session
+    # evidence -> no credit, HOLD.
     lines = [IDENT,
              entry(10), remote(11),
              "helper log: pointer backend selected backend=input-manager mode=auto",
              returning(12, "boundaryCrossed"),
              local(13, "boundaryCrossed")]
-    check(run_case("input_manager_session_credited", lines, 2, "INCOMPLETE", 0,
-                   lambda r: r["counters"]["completed_physical_cycles"] == 1))
+    check(run_case("backend_selection_alone_not_evidence", lines, None,
+                   "HOLD", 3,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 0))
 
     # dirty candidate identifier => HOLD (not reproducible provenance)
     lines = [("candidate identity app_version=0.1.0 build_identifier=B1 "
@@ -305,7 +329,7 @@ def main():
     with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as lf:
         lf.write("\n".join(lines) + "\n")
         lpath = lf.name
-    proc = subprocess.run([sys.executable, ANALYZER, "--required", "100",
+    proc = subprocess.run([sys.executable, ANALYZER,
                            "--lineage-manifest", manifest, lpath],
                           capture_output=True, text=True)
     os.unlink(lpath)
