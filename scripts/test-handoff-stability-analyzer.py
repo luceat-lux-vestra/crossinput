@@ -16,6 +16,8 @@ ANALYZER = os.path.join(HERE, "lib", "handoff_stability.py")
 
 IDENT = ("candidate identity app_version=0.1.0 build_identifier=B1 "
          "candidate_identifier=aaaa1111")
+ts_default = "2026-08-26T01:00:01.500"
+REPORT_LINE = f"{ts_default} helper: [HidDeviceManager] report sent id=2 len=5 written=11"
 
 
 def entry(n, ts="2026-08-26T01:00:00"):
@@ -34,9 +36,16 @@ def local(n, reason, ts="2026-08-26T01:00:03"):
     return f"{ts} handoff transition returning -> localActive reason={reason} sequence={n}"
 
 
-def clean_cycle(seq):
-    return [entry(seq), remote(seq + 1), returning(seq + 2, "boundaryCrossed"),
-            local(seq + 3, "boundaryCrossed")]
+def clean_cycle(seq, ts="2026-08-26T01:00:00"):
+    """Contract-complete cycle: entry, usable-session evidence (confirmed
+    helper delivery), returning, localActive."""
+    return [
+        f"{ts} handoff transition localActive -> edgeArmed reason=edgeEntered sequence={seq}",
+        f"{ts} handoff transition edgeArmed -> remoteActive reason=edgeEntered sequence={seq + 1}",
+        f"{ts} helper: [HidDeviceManager] report sent id=2 len=5 written=11",
+        f"{ts} handoff transition remoteActive -> returning reason=boundaryCrossed sequence={seq + 2}",
+        f"{ts} handoff transition returning -> localActive reason=boundaryCrossed sequence={seq + 3}",
+    ]
 
 
 def run_case(name, lines, required=100, expect_status=None, expect_exit=None,
@@ -93,9 +102,11 @@ def main():
                    lambda r: r["counters"]["completed_physical_cycles"] == 1
                    and r["counters"]["remote_active_entries"] == 2))
 
-    # same unclosed session but with the returning leg present: INCOMPLETE
-    lines = [IDENT] + clean_cycle(0) + [entry(10), remote(11),
-                                        returning(12, "boundaryCrossed")]
+    # second session fully contract-complete (report + localActive): credited
+    lines = [IDENT] + clean_cycle(0) + [
+        entry(10), remote(11), REPORT_LINE,
+        returning(12, "boundaryCrossed"),
+        local(13, "boundaryCrossed", ts="2026-08-26T01:00:13")]
     check(run_case("credit_with_recovery", lines, 100, "INCOMPLETE", 0,
                    lambda r: r["counters"]["completed_physical_cycles"] == 2))
     lines = [IDENT]
@@ -111,7 +122,7 @@ def main():
 
     # FAIL: unexplained remoteUnavailable
     lines = [IDENT] + clean_cycle(0) + [
-        entry(10), remote(11), returning(12, "remoteUnavailable"),
+        entry(10), remote(11), REPORT_LINE, returning(12, "remoteUnavailable"),
         local(13, "remoteUnavailable")]
     check(run_case("fail_unexplained_remote_unavailable", lines, 1, "FAIL", 1,
                    lambda r: r["counters"]["remoteUnavailable_total"] == 1))
@@ -121,18 +132,22 @@ def main():
     lines = [IDENT]
     for i in range(5):
         lines += clean_cycle(i * 4)
-    lines += [entry(30), remote(31), returning(32, "captureStopped")]
+    lines += [entry(30), remote(31), REPORT_LINE,
+              returning(32, "captureStopped"),
+              local(33, "captureStopped", ts="2026-08-26T01:00:33")]
     check(run_case("environmental_not_fail", lines, 5, "PASS", 0,
                    lambda r: r["counters"]["transport_session_failures_environmental"] == 1))
 
     # external takeover classified
     lines = [IDENT] + clean_cycle(0) + [
-        entry(10), remote(11), returning(12, "externalControlTakeover")]
+        entry(10), remote(11), REPORT_LINE, returning(12, "externalControlTakeover"),
+        local(13, "externalControlTakeover", ts="2026-08-26T01:00:13")]
     check(run_case("external_takeover_classified", lines, 100, "INCOMPLETE", 0,
                    lambda r: r["counters"]["external_takeovers"] == 1))
 
-    # HOLD: UNCLASSIFIED event (unknown transition line)
+    # HOLD: unknown reason on remote exit is an unclassified control event
     lines = [IDENT] + clean_cycle(0) + [
+        entry(10), remote(11), REPORT_LINE,
         "2026-08-26T01:00:09 handoff transition remoteActive -> disabled reason=somethingWeird"]
     check(run_case("hold_unclassified", lines, 100, "HOLD", 3,
                    lambda r: r["counters"]["unclassified_events"] >= 1))
@@ -159,6 +174,67 @@ def main():
         entry(20), remote(21), returning(22, "watchdogTimeout")]
     check(run_case("watchdog_recovery_recorded", lines, 100, None, None,
                    lambda r: r["counters"]["watchdog_recoveries_during_remoteActive"] == 1))
+
+    # ---- review P0/P1/P2 regressions ----
+
+    # 100 entries that return immediately with NO usable-session evidence:
+    # zero credit, and trap status undeterminable -> HOLD (fail closed)
+    lines = [IDENT]
+    for i in range(100):
+        s = i * 4
+        lines += [
+            entry(s), remote(s + 1),
+            returning(s + 2, "boundaryCrossed"),
+            local(s + 3, "boundaryCrossed"),
+        ]
+    check(run_case("no_usable_session_no_pass", lines, 100, "HOLD", 3,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 0))
+
+    # returning leg but local recovery leg missing at EOF: no credit, HOLD
+    lines = [IDENT] + clean_cycle(0) + [
+        entry(10), remote(11), REPORT_LINE,
+        returning(12, "boundaryCrossed")]  # no local(13)
+    check(run_case("missing_local_active_holds", lines, 100, "HOLD", 3,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 1
+                   and r["counters"]["insufficient_evidence_items"] >= 1))
+
+    # 99 contract-complete cycles: INCOMPLETE (below threshold)
+    lines = [IDENT]
+    for i in range(99):
+        lines += clean_cycle(i * 4)
+    check(run_case("incomplete_99_clean_cycles", lines, 100, "INCOMPLETE", 0,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 99))
+
+    # same candidate SHA, DIFFERENT build identifiers: MIXED_BUILD_IDENTITIES
+    lines = [
+        IDENT,
+        ("candidate identity app_version=0.1.0 build_identifier=B2 "
+         "candidate_identifier=aaaa1111"),
+    ] + clean_cycle(0)
+    check(run_case("mixed_build_same_candidate_holds", lines, 1, "HOLD", 3,
+                   lambda r: len(r["candidates"]) == 2))
+
+    # invalid app_version in the identity marker: fail closed
+    lines = [("candidate identity app_version=unknown build_identifier=B1 "
+              "candidate_identifier=aaaa1111")] + clean_cycle(0)
+    check(run_case("invalid_app_version_holds", lines, 1, "HOLD", 3,
+                   lambda r: r["counters"]["insufficient_evidence_items"] >= 1))
+
+    # pointer-trap evidence: session entered, deliveries flowed, only exit is
+    # a healthy-delivery watchdogTimeout, never returned -> trap suspected
+    trap_lines = [IDENT]
+    for i in range(3):
+        trap_lines += clean_cycle(i * 4)
+    trap_lines += [
+        entry(30), remote(31), REPORT_LINE,
+        returning(32, "watchdogTimeout"),
+        local(33, "watchdogTimeout", ts="2026-08-26T01:00:33"),
+    ]
+    check(run_case("pointer_trap_evidence_fails", trap_lines, 3, "FAIL", 1,
+                   lambda r: r["counters"]["watchdog_recoveries_during_remoteActive"] == 1
+                   or r["counters"]["pointer_traps"] >= 1
+                   or len(r["reasons"]) > 0 and any(
+                       "WATCHDOG" in x for x in r["reasons"])))
 
     # malformed input fails closed (binary garbage)
     with tempfile.NamedTemporaryFile("wb", suffix=".log", delete=False) as fh:

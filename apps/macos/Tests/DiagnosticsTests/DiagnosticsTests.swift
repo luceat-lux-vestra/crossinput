@@ -71,8 +71,12 @@ final class DiagnosticsTests: XCTestCase {
         Diagnostics.log(message)
         Diagnostics.flushSync()
         let lines = readLines()
-        XCTAssertEqual(lines.count, 1)
-        XCTAssertTrue(lines[0].hasSuffix(message), "line content must survive intact: \(lines[0])")
-        XCTAssertTrue(lines[0].hasPrefix("HH:") || lines[0].contains(":"), "timestamp prefix expected")
+        // Line 1 is the one-time candidate-identity marker (ADR-0012);
+        // line 2 must be the logged message itself, intact.
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines[0].contains("candidate identity"),
+                      "identity marker expected first: \(lines[0])")
+        XCTAssertTrue(lines[1].hasSuffix(message), "line content must survive intact: \(lines[1])")
+        XCTAssertTrue(lines[1].hasPrefix("HH:") || lines[1].contains(":"), "timestamp prefix expected")
     }
 }

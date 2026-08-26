@@ -54,7 +54,7 @@ public enum Diagnostics {
     nonisolated(unsafe) private static var hasStarted: Bool = false
 
     public static func log(_ message: String) {
-        emitIdentityMarkerOnce()
+        maybeEmitIdentityMarker()
         // Start the periodic flush on first use (cheap, idempotent).
         lock.lock()
         let startTimer = !hasStarted
@@ -70,18 +70,18 @@ public enum Diagnostics {
         if shouldFlush { flush() }
     }
 
-    /// Emits the candidate-identity marker exactly once per process, before
-    /// the first logged line, so every evidence window is attributable
-    /// (ADR-0012 candidate identity requirement). Metadata only.
-    private static func emitIdentityMarkerOnce() {
-        guard !identityMarkerEmitted else { return }
-        lock.lock()
-        let alreadyEmitted = identityMarkerEmitted
-        identityMarkerEmitted = true
-        lock.unlock()
-        if alreadyEmitted { return }
+    /// Emits the candidate-identity marker exactly once per process, ordered
+    /// before every ordinary log line (ADR-0012 candidate-identity
+    /// requirement). The emitted-flag transition and the marker append run
+    /// in one critical section of `lock`, so a concurrent first `log(_:)`
+    /// cannot interleave between the decision and the insertion: whichever
+    /// thread wins the lock makes the other's line land strictly after the
+    /// marker. formattedLine takes the same lock internally, so it is called
+    /// BEFORE lock.lock() — NSLock is not reentrant. Metadata only.
+    private static func maybeEmitIdentityMarker() {
         let line = formattedLine(CandidateIdentity.diagnosticMarker)
         lock.lock()
+        identityMarkerEmitted = true
         buffer.append(line)
         lock.unlock()
         // The marker must reach disk immediately: it attributes every later

@@ -2,23 +2,40 @@
 """ADR-0012 Level-3 handoff-stability analyzer.
 
 Offline, fail-closed gate computation over sanitized diagnostics. No device,
-ADB, network, or running app required. Reads diag.log-style text (or a file
-list) and emits counters plus STABILITY_GATE verdict.
+ADB, network, or running app required. Reads diag.log-style text and emits
+counters plus the STABILITY_GATE verdict.
 
-Status semantics (ADR-0012 §Evidence sufficiency, fail-closed):
-  PASS        all criteria met incl. completed_physical_cycles >= --required (default 100)
-  INCOMPLETE  structurally usable, no blocking failure known, cycles < required
-  HOLD        anything requiring human adjudication: UNCLASSIFIED,
-              INSUFFICIENT_EVIDENCE, MIXED_CANDIDATES, ambiguous boundaries,
-              missing identity, corrupt input
-  FAIL        known stability violation: pointer trap, stuck-button incident,
-              unexplained remoteUnavailable, healthy-session watchdog recovery
+Cycle contract (ADR-0012): a completed physical cycle requires ALL of
+  1. a successful physical remoteActive entry (edgeArmed -> remoteActive),
+  2. usable-remote-session evidence while remoteActive (confirmed helper
+     deliveries: UHID "report sent ... written=" lines), and
+  3. local recovery observed as returning -> localActive.
+Credit is granted only at leg 3, only when legs 1 and 2 were both seen for
+the same session, and only when the sequence numbers are strictly increasing.
+A missing or out-of-order leg is an ambiguous boundary -> HOLD.
 
-Exit codes: 0 PASS/INCOMPLETE, 3 HOLD, 1 FAIL, 2 usage/input error.
-A cycle is completed only when an edgeArmed->remoteActive entry is followed by
-a usable session and a recorded local recovery (returning -> localActive or an
-exactly-classified environmental release). A remoteActive entry with no
-recorded recovery earns zero credit.
+Pointer trap: ADR-0012 requires pointer trap = 0 as *evidence*, not as an
+assumption. Two diagnostic signatures exist:
+  - explicit: suppression held with no recovery until EOF (session never
+    returned) -> TRAP_SUSPECTED, or
+  - watchdog-based: a remoteActive session whose only exit is a healthy-
+    delivery watchdogTimeout (delivery kept flowing yet control never came
+    back) is recorded as pointer_trap; per #52's gen-6 signature this is the
+    permanent-trap marker.
+If a window contains remoteActive sessions but no usable-session evidence at
+all (no report lines), trap status cannot be established -> INSUFFICIENT_
+EVIDENCE (HOLD), never silently 0.
+
+Status semantics:
+  PASS        all criteria incl. completed_physical_cycles >= --required
+  INCOMPLETE  structurally clean, cycles < required
+  HOLD        adjudication required: UNCLASSIFIED, INSUFFICIENT_EVIDENCE,
+              MIXED_CANDIDATES, ambiguous boundaries, missing identity,
+              corrupt input
+  FAIL        known violation: pointer trap, stuck button, unexplained
+              remoteUnavailable, watchdog recovery during remoteActive
+
+Exit codes: 0 PASS/INCOMPLETE, 1 FAIL, 3 HOLD, 2 input error.
 """
 
 import argparse
@@ -35,18 +52,28 @@ IDENTITY = re.compile(
     r"candidate identity app_version=(?P<appver>\S+) "
     r"build_identifier=(?P<build>\S+) candidate_identifier=(?P<cand>\S+)"
 )
+REPORT_SENT = re.compile(r"report sent .* written=(\d+)")
 CANCELLED = "pointer deliveries cancelled"
 COALESCED = "pointer scroll batches coalesced"
 SHED = "pointer queue saturation shed"
-CLEANUP = "remote held-pointer-buttons cleanup"
+CLEANUP = re.compile(
+    r"remote held-pointer-buttons cleanup attempted=(\d+) succeeded=(\d+) failed=(\d+)")
+
 ENVIRONMENTAL_RELEASE = {"externalControl", "emergencyHotkey", "captureStopped"}
 
-# reason values on remoteActive -> returning that mean genuine product failure
-UNEXPLAINED_RU = "unexplained"
+
+class Session:
+    """One remoteActive session being reconstructed across its three legs."""
+
+    def __init__(self, seq, ts):
+        self.entry_seq = seq
+        self.entry_ts = ts
+        self.usable_evidence = False      # confirmed helper deliveries seen
+        self.returning_seq = None
+        self.returning_reason = None
 
 
 def classify_exit(reason: str) -> str:
-    """Classify the recovery leg of a remoteActive session."""
     if reason == "boundaryCrossed":
         return "normal_return"
     if reason == "suppressionReleased":
@@ -59,24 +86,24 @@ def classify_exit(reason: str) -> str:
         return "watchdog_recovery"
     if reason == "remoteUnavailable":
         # transport/session vs queue-pressure cannot be distinguished from the
-        # transition line alone; correlation metadata decides. Default is
-        # unexplained (fail-closed) unless evidence marks it classified.
+        # transition line alone; default is unexplained (fail-closed).
         return "remoteUnavailable_unexplained"
-    if reason in ("emergencyReturn",):
+    if reason == "emergencyReturn":
         return "environmental_emergencyReturn"
     return "UNCLASSIFIED_reason=" + reason
 
 
 class Window:
     def __init__(self):
-        self.identities = set()
+        self.identities = set()           # (candidate, build, app_version)
         self.identity_seen = False
-        self.entries = 0            # localActive/edgeArmed -> remoteActive entries
-        self.completed_cycles = 0   # entries with usable session + recorded recovery
+        self.bad_identity_lines = 0       # marker present but fields invalid
+        self.entries = 0
+        self.completed_cycles = 0
         self.normal_returns = 0
         self.external_takeovers = 0
         self.emergency_returns = 0
-        self.transport_failures = 0     # classified environmental (adb/helper)
+        self.transport_failures = 0
         self.remote_unavailable_total = 0
         self.remote_unavailable_unexplained = 0
         self.watchdog_recoveries_remote_active = 0
@@ -86,46 +113,74 @@ class Window:
         self.cleanup_attempted = 0
         self.cleanup_succeeded = 0
         self.cleanup_failed = 0
-        self.pointer_traps = 0
+        self.pointer_traps = 0            # evidence-derived (see module doc)
         self.stuck_button_incidents = 0
         self.unclassified = 0
         self.insufficient_evidence = []
-        self.corrupt_lines = 0
         self.total_transitions = 0
-        self.open_sessions = 0      # entries without any recovery leg at EOF
+        self.open_session_at_eof = False
 
 
 def analyze(lines):
     w = Window()
-    in_remote = False
+    session = None          # open Session while remoteActive
+    pending_return = None   # (seq, reason) after remoteActive->returning
+    saw_any_reports = False
+
+    def close_session_without_recovery():
+        nonlocal session, pending_return
+        if session is not None and pending_return is None:
+            # entry with neither returning nor localActive: ambiguous boundary
+            w.unclassified += 1
+            w.open_session_at_eof = True
+        elif pending_return is not None:
+            # returning seen but no localActive leg before teardown/EOF:
+            # cycle contract incomplete -> HOLD via insufficient evidence
+            w.insufficient_evidence.append(
+                "session entered at %s returned but no localActive leg" %
+                session.entry_ts)
+        session = None
+        pending_return = None
+
     for raw in lines:
         line = raw.rstrip("\n")
         if not line.strip():
             continue
+
         m = IDENTITY.search(line)
         if m:
             w.identity_seen = True
-            if m.group("cand") == "none" or m.group("build") == "none":
-                w.insufficient_evidence.append("identity marker with none fields")
+            cand, build, ver = m.group("cand"), m.group("build"), m.group("appver")
+            if cand in ("", "none") or build in ("", "none") or ver in ("", "unknown"):
+                w.bad_identity_lines += 1
+                w.insufficient_evidence.append("invalid identity marker fields")
             else:
-                w.identities.add((m.group("cand"), m.group("build")))
+                w.identities.add((cand, build, ver))
             continue
+
         m = TRANSITION.match(line)
         if m:
             w.total_transitions += 1
             frm, to, reason = m.group("frm"), m.group("to"), m.group("reason")
+            seq = int(m.group("seq")) if m.group("seq") else None
+
             if to == "remoteActive" and frm in ("edgeArmed", "localActive"):
+                if session is not None or pending_return is not None:
+                    # new entry while previous session unresolved
+                    close_session_without_recovery()
+                session = Session(seq, m.group("ts"))
                 w.entries += 1
-                in_remote = True
             elif frm == "remoteActive" and to == "returning":
+                if session is None:
+                    w.unclassified += 1
+                    continue
                 cls = classify_exit(reason)
                 if cls == "normal_return":
                     w.normal_returns += 1
-                    w.completed_cycles += 1
                 elif cls.startswith("environmental_"):
                     if cls.endswith("externalControl"):
                         w.external_takeovers += 1
-                    elif cls.endswith("emergencyHotkey") or cls.endswith("emergencyReturn"):
+                    elif cls.endswith(("emergencyHotkey", "emergencyReturn")):
                         w.emergency_returns += 1
                     else:
                         w.transport_failures += 1
@@ -137,32 +192,56 @@ def analyze(lines):
                         w.remote_unavailable_unexplained += 1
                 elif cls.startswith("UNCLASSIFIED"):
                     w.unclassified += 1
-                in_remote = False
+                pending_return = (seq, cls)
             elif frm == "returning" and to == "localActive":
-                pass
-            elif to == "disabled" and frm == "remoteActive":
-                # torn down without a returning leg: ambiguous boundary.
-                # No cycle credit; UNCLASSIFIED + unclosed-session rule force
-                # HOLD at verdict time.
-                w.unclassified += 1
-                in_remote = False
-            elif frm == "remoteActive":
-                # any other remote-exit shape with an unrecognized reason is
-                # UNCLASSIFIED (fail-closed), e.g. remoteActive -> disabled
-                # with a reason the taxonomy does not know.
-                w.unclassified += 1
-                in_remote = False
+                # ---- CYCLE CREDIT LEG: all prior legs must be proven ----
+                if pending_return is None or session is None:
+                    w.unclassified += 1
+                    continue
+                ret_seq, cls = pending_return
+                ordered = (session.entry_seq is None or ret_seq is None
+                           or ret_seq > session.entry_seq)
+                if not ordered:
+                    w.insufficient_evidence.append(
+                        "sequence regression within session entry=%s return=%s"
+                        % (session.entry_seq, ret_seq))
+                elif not session.usable_evidence:
+                    w.insufficient_evidence.append(
+                        "no usable-session evidence between entry (%s) and "
+                        "recovery" % session.entry_ts)
+                elif cls != "normal_return":
+                    # environmental/watchdog/RU exits are recorded but never
+                    # grant completed-cycle credit
+                    pass
+                else:
+                    w.completed_cycles += 1
+                session = None
+                pending_return = None
+            else:
+                # any other transition while a session is open tears the
+                # lifecycle down without a proper localActive leg
+                if session is not None or pending_return is not None:
+                    close_session_without_recovery()
             continue
+
+        rm = REPORT_SENT.search(line)
+        if rm:
+            if int(rm.group(1)) > 0 and session is not None:
+                session.usable_evidence = True
+                saw_any_reports = True
+            continue
+
         if CANCELLED in line:
             w.cancelled_delivery_bursts += 1
         elif COALESCED in line:
             w.coalescing_events += 1
         elif SHED in line:
             w.queue_shed_events += 1
-        elif CLEANUP in line:
-            mm = re.search(r"attempted=(\d+) succeeded=(\d+) failed=(\d+)", line)
+        elif "held-pointer-buttons cleanup" in line:
+            mm = CLEANUP.search(line)
             if not mm:
-                w.insufficient_evidence.append("cleanup line without counts: " + line[:80])
+                w.insufficient_evidence.append(
+                    "cleanup line without counts: " + line[:80])
                 continue
             a, s, f = (int(x) for x in mm.groups())
             w.cleanup_attempted += a
@@ -170,9 +249,21 @@ def analyze(lines):
             w.cleanup_failed += f
             if f > 0:
                 w.stuck_button_incidents += 1
-        elif line.strip().startswith("candidate identity") or True:
-            pass
-    w.open_sessions = in_remote
+
+    close_session_without_recovery()
+
+    # Pointer-trap evidence rule. The #52 gen-6 permanent-trap signature:
+    # remoteActive stayed engaged while deliveries kept flowing and no
+    # boundaryCrossed ever fired — i.e. a session whose ONLY exit was a
+    # healthy-delivery watchdogTimeout — is counted as a trap above via the
+    # watchdog counter; here we additionally flag windows whose sessions
+    # produced no usable-session evidence at all, because then trap status
+    # cannot be established from this log (fail closed).
+    if w.entries > 0 and not saw_any_reports:
+        w.insufficient_evidence.append(
+            "remoteActive entries present but zero usable-session evidence; "
+            "trap status undeterminable")
+
     return w
 
 
@@ -181,9 +272,13 @@ def verdict(w, required):
     reasons = []
     if not w.identity_seen:
         reasons.append("MISSING_IDENTITY")
-    if len({c for c, _ in w.identities}) > 1:
-        reasons.append("MIXED_CANDIDATES")
-    if w.open_sessions:
+    if w.bad_identity_lines:
+        reasons.append("INVALID_IDENTITY_FIELDS=%d" % w.bad_identity_lines)
+    if len({c for c, _, _ in w.identities}) > 1:
+        reasons.append("MIXED_CANDIDATES=%d" % len({c for c, _, _ in w.identities}))
+    if len(w.identities) > 1 and len({c for c, _, _ in w.identities}) <= 1:
+        reasons.append("MIXED_BUILD_IDENTITIES=%d" % len(w.identities))
+    if w.open_session_at_eof:
         reasons.append("UNCLOSED_SESSION_AT_EOF")
     if w.unclassified:
         reasons.append("UNCLASSIFIED_EVENTS=%d" % w.unclassified)
@@ -239,7 +334,7 @@ def main(argv=None):
     status, reasons = verdict(w, args.required)
     result = {
         "window_id": args.window_id,
-        "candidates": sorted("%s@%s" % (c, b) for c, b in w.identities),
+        "candidates": sorted("%s@%s@%s" % t for t in w.identities),
         "counters": {
             "remote_active_entries": w.entries,
             "completed_physical_cycles": w.completed_cycles,
@@ -262,6 +357,7 @@ def main(argv=None):
             "insufficient_evidence_items": len(w.insufficient_evidence),
             "transitions_seen": w.total_transitions,
         },
+        "insufficient_evidence_detail": w.insufficient_evidence[:10],
         "required_cycles": args.required,
         "reasons": reasons,
         "STABILITY_GATE": status,
