@@ -231,10 +231,96 @@ def main():
         local(33, "watchdogTimeout", ts="2026-08-26T01:00:33"),
     ]
     check(run_case("pointer_trap_evidence_fails", trap_lines, 3, "FAIL", 1,
-                   lambda r: r["counters"]["watchdog_recoveries_during_remoteActive"] == 1
-                   or r["counters"]["pointer_traps"] >= 1
-                   or len(r["reasons"]) > 0 and any(
-                       "WATCHDOG" in x for x in r["reasons"])))
+                   lambda r: r["counters"]["pointer_traps"] == 1
+                   and r["counters"]["watchdog_recoveries_during_remoteActive"] == 1))
+
+    # ---- review round-2 P0/P1 regressions ----
+
+    def REPORT(seq_ts):
+        return f"{seq_ts} helper: [HidDeviceManager] report sent id=2 len=5 written=11"
+
+    # sequence regression: localActive seq < returning seq must NOT credit
+    lines = [IDENT,
+             entry(10), remote(11), REPORT("2026-08-26T01:00:01.500"),
+             returning(20, "boundaryCrossed"),
+             local(5, "boundaryCrossed")]
+    check(run_case("sequence_regression_no_credit", lines, 100, "HOLD", 3,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 0
+                   and any("sequence" in s for s in r.get("insufficient_evidence_detail", []))))
+
+    # missing sequence numbers anywhere in the cycle -> no credit, HOLD
+    lines = [IDENT,
+             "2026-08-26T01:00:00 handoff transition localActive -> edgeArmed reason=edgeEntered",
+             "2026-08-26T01:00:01 handoff transition edgeArmed -> remoteActive reason=edgeEntered",
+             REPORT("2026-08-26T01:00:01.500"),
+             returning(2, "boundaryCrossed"),
+             local(3, "boundaryCrossed")]
+    check(run_case("missing_sequences_no_credit", lines, 100, "HOLD", 3,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 0))
+
+    # environmental remoteUnavailable WITH production correlation line:
+    # classified, not FAIL, not credit
+    lines = [IDENT] + clean_cycle(0) + [
+        entry(10), remote(11), REPORT_LINE,
+        "2026-08-26T01:00:12 remote unavailable: helper session ended",
+        returning(12, "remoteUnavailable"),
+        local(13, "remoteUnavailable")]
+    check(run_case("correlated_transport_failure_not_fail", lines, 2, "INCOMPLETE", 0,
+                   lambda r: r["counters"]["transport_session_failures_environmental"] == 1
+                   and r["counters"]["remoteUnavailable_unexplained"] == 0
+                   and r["counters"]["completed_physical_cycles"] == 1))
+
+    # unexplained remoteUnavailable WITHOUT correlation line still FAILs
+    lines = [IDENT] + clean_cycle(0) + [
+        entry(10), remote(11), REPORT_LINE,
+        returning(12, "remoteUnavailable"),
+        local(13, "remoteUnavailable")]
+    check(run_case("uncorrelated_remote_unavailable_fails", lines, 1, "FAIL", 1,
+                   lambda r: r["counters"]["remoteUnavailable_unexplained"] == 1))
+
+    # InputManager backend session (no UHID report; pointer backend selected
+    # instead) counts as usable-session evidence
+    lines = [IDENT,
+             entry(10), remote(11),
+             "helper log: pointer backend selected backend=input-manager mode=auto",
+             returning(12, "boundaryCrossed"),
+             local(13, "boundaryCrossed")]
+    check(run_case("input_manager_session_credited", lines, 2, "INCOMPLETE", 0,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 1))
+
+    # dirty candidate identifier => HOLD (not reproducible provenance)
+    lines = [("candidate identity app_version=0.1.0 build_identifier=B1 "
+              "candidate_identifier=aaaa1111-dirty")] + clean_cycle(0)
+    check(run_case("dirty_candidate_holds", lines, 1, "HOLD", 3,
+                   lambda r: len(r["reasons"]) > 0 and any(
+                       "DIRTY" in x for x in r["reasons"])))
+
+    # lineage manifest: distinct SHAs sharing a lineage accumulate one window
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as mf:
+        mf.write('{"aaaa1111": "lineage-A", "bbbb2222": "lineage-A"}')
+        manifest = mf.name
+    lines = [IDENT,
+             ("candidate identity app_version=0.1.0 build_identifier=B2 "
+              "candidate_identifier=bbbb2222")] + clean_cycle(0)
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as lf:
+        lf.write("\n".join(lines) + "\n")
+        lpath = lf.name
+    proc = subprocess.run([sys.executable, ANALYZER, "--required", "100",
+                           "--lineage-manifest", manifest, lpath],
+                          capture_output=True, text=True)
+    os.unlink(lpath)
+    try:
+        result = json.loads(proc.stdout)
+        check(result["STABILITY_GATE"] == "PASS"
+              or "MIXED_CANDIDATES" not in result["reasons"])
+        if "MIXED_CANDIDATES" not in result["reasons"]:
+            print("ok   lineage_manifest_same_window")
+    except json.JSONDecodeError:
+        print("FAIL lineage_manifest: bad output")
+        failed += 1
+    else:
+        passed += 1
+    os.unlink(manifest)
 
     # malformed input fails closed (binary garbage)
     with tempfile.NamedTemporaryFile("wb", suffix=".log", delete=False) as fh:

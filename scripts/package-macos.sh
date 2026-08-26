@@ -22,7 +22,19 @@ CONFIG="${1:-release}"
 # built from. Runtime code never reads .git (AGENTS.md); the value is baked
 # into a generated Swift source compiled alongside CandidateIdentity.swift.
 CANDIDATE_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-[ -z "$(git -C "$ROOT" status --porcelain | head -c 1 || true)" ] || CANDIDATE_SHA="$CANDIDATE_SHA-dirty"
+# ADR-0012: Level-3 evidence artifacts must be reproducible. Dirty-tree
+# builds are rejected by default because their provenance cannot be
+# re-verified; set CROSSINPUT_ALLOW_DIRTY_CANDIDATE=1 only for throwaway
+# diagnostic builds (the analyzer holds such evidence at HOLD, never PASS).
+if [ -n "$(git -C "$ROOT" status --porcelain | head -c 1 || true)" ]; then
+    if [ "${CROSSINPUT_ALLOW_DIRTY_CANDIDATE:-0}" = "1" ]; then
+        CANDIDATE_SHA="$CANDIDATE_SHA-dirty"
+    else
+        echo "ERROR: working tree is dirty; a Level-3 candidate build requires a clean tree." >&2
+        echo "       Commit/stash changes, or set CROSSINPUT_ALLOW_DIRTY_CANDIDATE=1 for a non-evidence diagnostic build (-dirty suffix)." >&2
+        exit 1
+    fi
+fi
 BUILD_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 IDENTITY_FILE="$ROOT/apps/macos/Sources/Diagnostics/CandidateIdentity+Generated.swift"
 cat > "$IDENTITY_FILE" <<SWIFT

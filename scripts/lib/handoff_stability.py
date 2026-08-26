@@ -59,6 +59,13 @@ SHED = "pointer queue saturation shed"
 CLEANUP = re.compile(
     r"remote held-pointer-buttons cleanup attempted=(\d+) succeeded=(\d+) failed=(\d+)")
 
+# Production correlation line: when a remoteUnavailable force-return comes from
+# an ADB/helper session end, App.swift logs this line immediately beforehand.
+# Its presence within the session window classifies the remoteUnavailable as a
+# genuine transport/session failure (an ADR-0012 environmental event), NOT an
+# unexplained product failure.
+REMOTE_UNAVAILABLE_CAUSE = "remote unavailable:"
+
 ENVIRONMENTAL_RELEASE = {"externalControl", "emergencyHotkey", "captureStopped"}
 
 
@@ -69,6 +76,7 @@ class Session:
         self.entry_seq = seq
         self.entry_ts = ts
         self.usable_evidence = False      # confirmed helper deliveries seen
+        self.transport_cause_logged = False  # "remote unavailable:" seen
         self.returning_seq = None
         self.returning_reason = None
 
@@ -186,10 +194,20 @@ def analyze(lines):
                         w.transport_failures += 1
                 elif cls == "watchdog_recovery":
                     w.watchdog_recoveries_remote_active += 1
+                    if session.usable_evidence:
+                        # #52 gen-6 permanent-trap signature: deliveries kept
+                        # flowing yet control never came back on its own.
+                        w.pointer_traps += 1
                 elif cls.startswith("remoteUnavailable"):
                     w.remote_unavailable_total += 1
                     if "unexplained" in cls:
-                        w.remote_unavailable_unexplained += 1
+                        if session.transport_cause_logged:
+                            # Correlated with a logged ADB/helper session end:
+                            # classified environmental, per PR #66 taxonomy.
+                            cls = "environmental_transport_failure"
+                            w.transport_failures += 1
+                        else:
+                            w.remote_unavailable_unexplained += 1
                 elif cls.startswith("UNCLASSIFIED"):
                     w.unclassified += 1
                 pending_return = (seq, cls)
@@ -199,12 +217,19 @@ def analyze(lines):
                     w.unclassified += 1
                     continue
                 ret_seq, cls = pending_return
-                ordered = (session.entry_seq is None or ret_seq is None
-                           or ret_seq > session.entry_seq)
-                if not ordered:
+                # Strict ADR-0012 cycle invariant: all three legs present,
+                # all sequences known, and entry < returning < localActive.
+                # Any missing/regressed sequence is INSUFFICIENT_EVIDENCE.
+                if session.entry_seq is None or ret_seq is None or seq is None:
                     w.insufficient_evidence.append(
-                        "sequence regression within session entry=%s return=%s"
-                        % (session.entry_seq, ret_seq))
+                        "cycle legs missing sequence numbers entry=%s "
+                        "return=%s local=%s" %
+                        (session.entry_seq, ret_seq, seq))
+                elif not (session.entry_seq < ret_seq < seq):
+                    w.insufficient_evidence.append(
+                        "sequence regression within session entry=%s "
+                        "return=%s local=%s" %
+                        (session.entry_seq, ret_seq, seq))
                 elif not session.usable_evidence:
                     w.insufficient_evidence.append(
                         "no usable-session evidence between entry (%s) and "
@@ -229,6 +254,22 @@ def analyze(lines):
             if int(rm.group(1)) > 0 and session is not None:
                 session.usable_evidence = True
                 saw_any_reports = True
+            continue
+
+        # Backend-neutral evidence: the helper's PointerDispatcher logs this
+        # line on every successful semantic pointer request, regardless of
+        # whether the UHID or the InputManager backend served it.
+        if "pointer backend selected backend=" in line:
+            if session is not None:
+                session.usable_evidence = True
+                saw_any_reports = True
+            continue
+
+        if REMOTE_UNAVAILABLE_CAUSE in line and session is not None:
+            # Correlation evidence: this remoteUnavailable came from a real
+            # ADB/helper transport end (e.g. phone reboot), not from queue
+            # pressure or an unexplained product failure.
+            session.transport_cause_logged = True
             continue
 
         if CANCELLED in line:
@@ -267,17 +308,28 @@ def analyze(lines):
     return w
 
 
-def verdict(w, required):
+def verdict(w, required, lineage_of=None):
     """Compute the fail-closed gate. Returns (status, reasons)."""
+    lineage_of = lineage_of or {}
     reasons = []
     if not w.identity_seen:
         reasons.append("MISSING_IDENTITY")
     if w.bad_identity_lines:
         reasons.append("INVALID_IDENTITY_FIELDS=%d" % w.bad_identity_lines)
-    if len({c for c, _, _ in w.identities}) > 1:
-        reasons.append("MIXED_CANDIDATES=%d" % len({c for c, _, _ in w.identities}))
-    if len(w.identities) > 1 and len({c for c, _, _ in w.identities}) <= 1:
-        reasons.append("MIXED_BUILD_IDENTITIES=%d" % len(w.identities))
+    cands = {c for c, _, _ in w.identities}
+    # ADR-0012 lineage rule: credit belongs to a candidate *lineage*, not to
+    # exact SHAs — docs/CI/unrelated changes do NOT reset the window. A
+    # manifest maps each SHA to its lineage; SHAs sharing a lineage are one
+    # window. Without a manifest, any distinct SHA pair is mixed (fail closed).
+    lineages = {lineage_of.get(c, c) for c in cands}
+    if len(lineages) > 1:
+        reasons.append("MIXED_CANDIDATES=%d" % len(lineages))
+    builds = {b for _, b, _ in w.identities}
+    if len(builds) > 1 and len(lineages) <= 1:
+        reasons.append("MIXED_BUILD_IDENTITIES=%d" % len(builds))
+    # Dirty artifacts are not reproducible: never eligible for PASS evidence.
+    if any(c.endswith("-dirty") for c in cands):
+        reasons.append("DIRTY_CANDIDATE")
     if w.open_session_at_eof:
         reasons.append("UNCLOSED_SESSION_AT_EOF")
     if w.unclassified:
@@ -315,7 +367,23 @@ def main(argv=None):
                     help="required completed physical cycles (default 100)")
     ap.add_argument("--window-id", default=None, help="evidence window identifier")
     ap.add_argument("--json-out", default=None, help="write machine result JSON here")
+    ap.add_argument("--lineage-manifest", default=None,
+                    help="JSON file mapping candidate SHAs to a shared "
+                         "lineage id; SHAs listed together accumulate into "
+                         "the SAME window per ADR-0012 reset rules (e.g. "
+                         "docs-only commits between RC packages). Without "
+                         "it, any distinct candidate SHA is MIXED.")
     args = ap.parse_args(argv)
+    lineage_of = {}
+    if args.lineage_manifest:
+        try:
+            with open(args.lineage_manifest, "r", encoding="utf-8") as mf:
+                for sha, lid in json.load(mf).items():
+                    lineage_of[sha] = str(lid)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"STABILITY_GATE": "HOLD",
+                              "reasons": ["INPUT_ERROR=%s" % exc]}))
+            return 2
 
     lines = []
     try:
@@ -331,7 +399,7 @@ def main(argv=None):
         return 2
 
     w = analyze(lines)
-    status, reasons = verdict(w, args.required)
+    status, reasons = verdict(w, args.required, lineage_of)
     result = {
         "window_id": args.window_id,
         "candidates": sorted("%s@%s@%s" % t for t in w.identities),

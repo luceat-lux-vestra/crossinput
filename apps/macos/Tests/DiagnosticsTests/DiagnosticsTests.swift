@@ -12,6 +12,7 @@ final class DiagnosticsTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         logFile = tempDir.appendingPathComponent("diag.log")
         Diagnostics.logURL = logFile
+        Diagnostics.resetIdentityMarkerForTesting()
     }
 
     override func tearDownWithError() throws {
