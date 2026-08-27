@@ -422,6 +422,35 @@ def main():
         extra=lambda r: any(x.startswith("MANIFEST_SCHEMA")
                             for x in r["reasons"])))
 
+    # Malformed NESTED entries must fail closed with JSON output, never a
+    # traceback (round-5 review): non-object entry, empty object, empty
+    # candidate, non-string candidate (previously AttributeError on
+    # entry.get() / TypeError on unhashable candidate).
+    for name, doc in [
+        ("lineage_nested_int_entry", {"lineages": [1]}),
+        ("lineage_nested_empty_obj", {"lineages": [{}]}),
+        ("lineage_empty_candidate", {
+            "lineages": [{
+                "lineage_id": "lineage-A",
+                "candidates": [""],
+                "classification": "initial",
+                "reason": "x",
+                "reference": "y",
+            }]}),
+        ("lineage_nonstring_candidate", {
+            "lineages": [{
+                "lineage_id": "lineage-A",
+                "candidates": [["bad"]],
+                "classification": "initial",
+                "reason": "x",
+                "reference": "y",
+            }]}),
+    ]:
+        check(run_with_manifest(
+            name, doc, two_shas + clean_cycle(0), "HOLD", 3,
+            extra=lambda r: any(x.startswith("MANIFEST_SCHEMA")
+                                for x in r["reasons"])))
+
     # malformed input fails closed (binary garbage)
     with tempfile.NamedTemporaryFile("wb", suffix=".log", delete=False) as fh:
         fh.write(b"\xff\xfe\x00\x01garbage\xff")

@@ -433,19 +433,30 @@ def main(argv=None):
         seen_shas = set()
         schema_error = None
         for entry in entries:
+            if not isinstance(entry, dict):
+                # A malformed nested value must fail closed with JSON output,
+                # never an AttributeError traceback (round-5 review).
+                schema_error = "MANIFEST_SCHEMA=lineage entry must be object"
+                break
             lid = entry.get("lineage_id")
             shas = entry.get("candidates")
             cls = entry.get("classification")
+            reason = entry.get("reason")
+            reference = entry.get("reference")
             if (not isinstance(lid, str) or not lid
                     or not isinstance(shas, list) or not shas
                     or cls not in ("initial", "no-reset")):
                 schema_error = ("MANIFEST_SCHEMA=entry missing lineage_id/"
                                 "candidates/classification")
                 break
-            if not entry.get("reason") or not entry.get("reference"):
+            if (not isinstance(reason, str) or not reason
+                    or not isinstance(reference, str) or not reference):
                 schema_error = "MANIFEST_SCHEMA=entry missing reason/reference"
                 break
             for sha in shas:
+                if not isinstance(sha, str) or not sha:
+                    schema_error = "MANIFEST_SCHEMA=candidate must be non-empty string"
+                    break
                 if sha in seen_shas:
                     schema_error = "MANIFEST_SCHEMA=duplicate sha %s" % sha
                     break

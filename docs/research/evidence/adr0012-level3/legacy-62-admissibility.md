@@ -86,7 +86,11 @@ and any adjudicated credit carries forward across `c117c5d`.
 | Proposed rejected events | 1 entry (environmental transport failure, reboot) |
 | Window continuity | `d66a357` lineage continues through `c117c5d` (docs-only, no reset) |
 
-Until a human adjudicator accepts or rejects the proposed 36-cycle credit, the
-canonical tracker must show **accepted = 0** and this assessment linked as
-pending. If accepted, the tracker shows accepted = 36, required = 100,
-remaining = 64.
+**Status 2026-08-27 — superseded for gate credit.** PR #69 changes production
+`ControlHandoffController` code (pending-pointer lifecycle barrier, commit
+`dd9b132`), which per ADR-0012 §Evidence-window reset rules starts a NEW
+Level-3 window. This 36-cycle proposal describes the pre-#69 `d66a357`
+window and can therefore never seed the post-#69 window: the canonical
+tracker for the new window starts at **accepted = 0, required = 100,
+remaining = 100**. This assessment is retained as historical adjudication
+material only.
