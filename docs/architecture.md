@@ -197,7 +197,12 @@ Unit/build checks establish protocol compatibility and failure-path behavior.
 They do not replace on-device evidence. A release or completion claim for
 pointer routing, keyboard delivery, display selection, reconnect, or emergency
 recovery requires the real-device ADB logs and screen confirmation required by
-`AGENTS.md`. Edge-switch stability requires 100 repeat edge-switch tests.
+`AGENTS.md`. Edge-switch stability is governed by the ADR-0012
+release-stability gate: >=100 real physical completed handoff/return cycles on
+one release-candidate lineage, accumulated through natural use and analyzed by
+the fail-closed offline analyzer (`scripts/analyze-handoff-stability.sh`).
+See [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md) and the
+[verification levels](testing.md).
 
 See [product definition](product.md), [roadmap](roadmap.md),
 [ADR-0009](adr/ADR-0009-architecture-rebaseline.md), and the

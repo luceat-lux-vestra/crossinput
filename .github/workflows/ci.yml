@@ -70,3 +70,8 @@ jobs:
         run: bash scripts/test-issue62-rc-path.sh
       - name: "Evidence sanitizer regression"
         run: bash scripts/test-verify-device-evidence-sanitizer.sh
+      - name: "ADR-0012 stability analyzer fixtures"
+        # The Level-3 gate computation must not regress: every gate state
+        # (PASS / INCOMPLETE / HOLD / FAIL), cycle-credit rules, identity
+        # validation, and fail-closed behavior are pinned here.
+        run: python3 scripts/test-handoff-stability-analyzer.py

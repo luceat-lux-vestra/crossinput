@@ -46,7 +46,9 @@ raising it is currently unsupported.
 
 Moved to the repository release-stability gate. **Not a #62 PR acceptance
 requirement.** See [ADR-0012](../adr/ADR-0012-real-use-handoff-stability-evidence.md),
-the verification-level taxonomy in `docs/testing.md`, and tracking issue #64.
+the verification-level taxonomy in `docs/testing.md`, and the canonical
+Level-3 tracking issue (#68 — ADR-0012 release-stability gate; #64 was the
+completed policy change and is no longer an active tracker).
 
 ## Historical automated preflight
 
