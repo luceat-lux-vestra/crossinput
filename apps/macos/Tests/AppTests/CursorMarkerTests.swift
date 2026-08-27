@@ -159,18 +159,26 @@ final class CursorMarkerTests: XCTestCase {
     func testReconcileRendersSameDisplayAndEdgeAfterScreenGeometryRefresh() {
         let sink = RecordingSink()
         let controller = CursorMarkerController(sink: sink)
-        let displays = [display(1, .left)]
+        let initialDisplays = [display(1, .left)]
+        let refreshedDisplays = [
+            HostDisplayEdgeOption(
+                id: 1,
+                name: "Display 1",
+                width: 2560,
+                height: 1440,
+                edge: .left),
+        ]
 
         controller.update(
             controlState: .remote,
             sessionState: .ready,
             entryEdge: .left,
-            hostDisplays: displays)
+            hostDisplays: initialDisplays)
         controller.reconcile(
             controlState: .remote,
             sessionState: .ready,
             entryEdge: .left,
-            hostDisplays: displays)
+            hostDisplays: refreshedDisplays)
 
         XCTAssertEqual(controller.state, .visible(displayID: 1, edge: .left))
         XCTAssertEqual(sink.rendered, [
