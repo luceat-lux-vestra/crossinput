@@ -54,6 +54,7 @@ public enum Diagnostics {
     nonisolated(unsafe) private static var hasStarted: Bool = false
 
     public static func log(_ message: String) {
+        maybeEmitIdentityMarker()
         // Start the periodic flush on first use (cheap, idempotent).
         lock.lock()
         let startTimer = !hasStarted
@@ -67,6 +68,42 @@ public enum Diagnostics {
         shouldFlush = buffer.count >= flushThreshold
         lock.unlock()
         if shouldFlush { flush() }
+    }
+
+    /// Emits the candidate-identity marker exactly once per process, ordered
+    /// before every ordinary log line (ADR-0012 candidate-identity
+    /// requirement). The guard read, flag transition, and marker append all
+    /// run in ONE critical section of `lock`, so concurrent first `log(_:)`
+    /// calls cannot interleave: exactly one marker is written and every
+    /// ordinary line lands strictly after it. `formattedLine` also takes
+    /// `lock` (NSLock is not reentrant), so the stamp is computed BEFORE
+    /// entering the critical section. Metadata only.
+    private static func maybeEmitIdentityMarker() {
+        let line = formattedLine(CandidateIdentity.diagnosticMarker)
+        lock.lock()
+        let alreadyEmitted = identityMarkerEmitted
+        if !alreadyEmitted {
+            identityMarkerEmitted = true
+            buffer.append(line)
+        }
+        lock.unlock()
+        // The marker must reach disk immediately: it attributes every later
+        // line in this window. flush() takes the same non-reentrant lock, so
+        // it MUST run only after the critical section above has released it.
+        if !alreadyEmitted { flush() }
+    }
+
+    nonisolated(unsafe) private static var identityMarkerEmitted: Bool = false
+
+    /// Test-only: resets the exactly-once marker so each test gets a fresh
+    /// process-identity window. Never call from production code.
+    static func resetIdentityMarkerForTesting() {
+        lock.lock()
+        identityMarkerEmitted = false
+        // Drain anything buffered by earlier suites so this window starts
+        // with the marker as the literal first line.
+        buffer.removeAll(keepingCapacity: true)
+        lock.unlock()
     }
 
     /// Snapshots the buffer and hands it to the serial writer queue.
