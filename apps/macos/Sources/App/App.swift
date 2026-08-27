@@ -70,6 +70,11 @@ final class AppModel: ObservableObject {
     let sessionController: SessionController
     let handoffController: ControlHandoffController
     private let targetController: TargetSelectionController
+    private let cursorMarkerController: CursorMarkerController
+    // NotificationCenter's Objective-C token is not Sendable; it is created,
+    // used, and removed on the main actor, with only deinit requiring the
+    // explicitly unsafe nonisolated access.
+    nonisolated(unsafe) private var screenParametersObserver: NSObjectProtocol?
 
     var capture: InputCapture { handoffController.capture }
 
@@ -84,6 +89,7 @@ final class AppModel: ObservableObject {
         }
         handoffController = ControlHandoffController(sender: sender)
         targetController = TargetSelectionController(session: reference)
+        cursorMarkerController = CursorMarkerController()
 
         // Production telemetry sink (review round 3): a single lock-protected
         // sink receives transport request observations, InputSender semantic
@@ -95,6 +101,7 @@ final class AppModel: ObservableObject {
 
         sessionController.onStateChange = { [weak self] state in
             self?.sessionState = state
+            self?.refreshCursorMarker()
         }
         sessionController.onEvent = { [weak self] frame in
             self?.handleUnsolicited(frame)
@@ -109,8 +116,25 @@ final class AppModel: ObservableObject {
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
+            self?.refreshCursorMarker()
         }
         refreshHostDisplays()
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.refreshHostDisplays()
+                    self.applyEdgeConfig()
+                }
+            }
+    }
+
+    deinit {
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+        }
     }
 
     // MARK: - Session
@@ -250,6 +274,7 @@ final class AppModel: ObservableObject {
         for display in hostDisplays {
             capture.setAndroidEdge(display.edge, forDisplay: display.id)
         }
+        refreshCursorMarker()
     }
 
     func refreshHostDisplays() {
@@ -257,6 +282,7 @@ final class AppModel: ObservableObject {
         hostDisplays = HostDisplayEdgeCatalog.options(from: snapshots) { displayID in
             AppSettings.Settings.androidEdge(displayID: displayID)
         }
+        refreshCursorMarker()
     }
 
     func setAndroidEdge(_ edge: ScreenEdge?, for displayID: CGDirectDisplayID) {
@@ -266,6 +292,18 @@ final class AppModel: ObservableObject {
             hostDisplays[index].edge = edge
         }
         Diagnostics.log("remote edge for host display \(displayID) = \(edge?.rawValue ?? "none")")
+        refreshCursorMarker()
+    }
+
+    /// Projects the authoritative control/session state into the non-
+    /// interactive marker. This consumer never changes capture, routing, or
+    /// the handoff machine.
+    private func refreshCursorMarker() {
+        cursorMarkerController.update(
+            controlState: controlState,
+            sessionState: sessionState,
+            entryEdge: handoffController.switchMachine.entryEdge,
+            hostDisplays: hostDisplays)
     }
 
     private static func hostDisplaySnapshot(_ screen: NSScreen) -> HostDisplaySnapshot? {
