@@ -8,7 +8,9 @@ counters plus the STABILITY_GATE verdict.
 Cycle contract (ADR-0012): a completed physical cycle requires ALL of
   1. a successful physical remoteActive entry (edgeArmed -> remoteActive),
   2. usable-remote-session evidence while remoteActive (confirmed helper
-     deliveries: UHID "report sent ... written=" lines), and
+     deliveries: UHID "report sent ... written=" lines, or the backend-
+     neutral semantic confirmation "handoff usable-session confirmed"
+     logged once per entry by ControlHandoffController), and
   3. local recovery observed as returning -> localActive.
 Credit is granted only at leg 3, only when legs 1 and 2 were both seen for
 the same session, and only when the sequence numbers are strictly increasing.
@@ -27,15 +29,18 @@ all (no report lines), trap status cannot be established -> INSUFFICIENT_
 EVIDENCE (HOLD), never silently 0.
 
 Status semantics:
-  PASS        all criteria incl. completed_physical_cycles >= --required
-  INCOMPLETE  structurally clean, cycles < required
+  PASS        all criteria incl. completed_physical_cycles >=
+              REQUIRED_CYCLES (100, module constant, not configurable)
+  INCOMPLETE  structurally clean, cycles < REQUIRED_CYCLES
   HOLD        adjudication required: UNCLASSIFIED, INSUFFICIENT_EVIDENCE,
-              MIXED_CANDIDATES, ambiguous boundaries, missing identity,
+              MIXED_CANDIDATES, MIXED_BUILD_IDENTITIES, MISSING_IDENTITY,
+              DIRTY_CANDIDATE, MANIFEST_SCHEMA, ambiguous boundaries,
               corrupt input
   FAIL        known violation: pointer trap, stuck button, unexplained
               remoteUnavailable, watchdog recovery during remoteActive
 
-Exit codes: 0 PASS/INCOMPLETE, 1 FAIL, 3 HOLD, 2 input error.
+Exit codes: 0 PASS/INCOMPLETE, 1 FAIL, 3 HOLD (incl. MANIFEST_SCHEMA),
+2 input error (unreadable file, undecodable input, invalid JSON payload).
 """
 
 import argparse
@@ -97,8 +102,6 @@ def classify_exit(reason: str) -> str:
         # transport/session vs queue-pressure cannot be distinguished from the
         # transition line alone; default is unexplained (fail-closed).
         return "remoteUnavailable_unexplained"
-    if reason == "emergencyReturn":
-        return "environmental_emergencyReturn"
     return "UNCLASSIFIED_reason=" + reason
 
 
@@ -136,12 +139,9 @@ def analyze(lines):
     pending_return = None   # (seq, reason) after remoteActive->returning
     saw_any_reports = False
 
-    def close_session_without_recovery(classification=None):
+    def close_session_without_recovery():
         nonlocal session, pending_return
-        if classification == "environmental_deactivated":
-            # App disable during remoteActive (ADR-0012 environmental event).
-            w.transport_failures += 1
-        elif session is not None and pending_return is None:
+        if session is not None and pending_return is None:
             # entry with neither returning nor localActive: ambiguous boundary
             w.unclassified += 1
             w.open_session_at_eof = True
@@ -153,7 +153,6 @@ def analyze(lines):
                 session.entry_ts)
         session = None
         pending_return = None
-
     for raw in lines:
         line = raw.rstrip("\n")
         if not line.strip():
@@ -338,9 +337,8 @@ REQUIRED_CYCLES = 100  # ADR-0012 Level-3 gate; not configurable by design
 
 
 def verdict(w, lineage_of=None):
-    """Compute the fail-closed gate against REQUIRED_CYCLES."""
-    required = REQUIRED_CYCLES
     """Compute the fail-closed gate. Returns (status, reasons)."""
+    required = REQUIRED_CYCLES
     lineage_of = lineage_of or {}
     reasons = []
     if not w.identity_seen:
@@ -355,9 +353,17 @@ def verdict(w, lineage_of=None):
     lineages = {lineage_of.get(c, c) for c in cands}
     if len(lineages) > 1:
         reasons.append("MIXED_CANDIDATES=%d" % len(lineages))
-    builds = {b for _, b, _ in w.identities}
-    if len(builds) > 1 and len(lineages) <= 1:
-        reasons.append("MIXED_BUILD_IDENTITIES=%d" % len(builds))
+    # MIXED_BUILD_IDENTITIES is scoped PER CANDIDATE, not globally: build
+    # identifiers are per-package UTC timestamps, so A@B1 + B@B2 inside one
+    # audited lineage is normal window accumulation (SHAs sharing a lineage
+    # are one window; different builds of different SHAs are expected), while
+    # the SAME exact SHA rebuilt at two timestamps mid-window is
+    # irreproducible evidence and holds.
+    mixed_build_candidates = sorted(
+        c for c in cands
+        if len({b for cc, b, _ in w.identities if cc == c}) > 1)
+    if mixed_build_candidates:
+        reasons.append("MIXED_BUILD_IDENTITIES=%d" % len(mixed_build_candidates))
     # Dirty artifacts are not reproducible: never eligible for PASS evidence.
     if any(c.endswith("-dirty") for c in cands):
         reasons.append("DIRTY_CANDIDATE")
@@ -411,16 +417,19 @@ def main(argv=None):
             with open(args.lineage_manifest, "r", encoding="utf-8") as mf:
                 doc = json.load(mf)
         except (OSError, ValueError) as exc:
+            # Unreadable file or invalid JSON is an input error (exit 2).
             print(json.dumps({"STABILITY_GATE": "HOLD",
                               "reasons": ["INPUT_ERROR=%s" % exc]}))
             return 2
-        # Schema validation: an unaudited or malformed manifest must fail
-        # closed rather than silently merging unrelated candidates.
+        # Schema validation: syntactically valid JSON that is unaudited or
+        # malformed must fail closed as a HOLD (exit 3) rather than silently
+        # merging unrelated candidates; it is an adjudication state, not an
+        # input-decode error.
         entries = doc.get("lineages") if isinstance(doc, dict) else None
         if not isinstance(entries, list) or not entries:
             print(json.dumps({"STABILITY_GATE": "HOLD",
                               "reasons": ["MANIFEST_SCHEMA=lineages[] required"]}))
-            return 2
+            return EXIT_CODES["HOLD"]
         seen_shas = set()
         schema_error = None
         for entry in entries:
@@ -447,7 +456,7 @@ def main(argv=None):
         if schema_error:
             print(json.dumps({"STABILITY_GATE": "HOLD",
                               "reasons": [schema_error]}))
-            return 2
+            return EXIT_CODES["HOLD"]
 
     lines = []
     try:

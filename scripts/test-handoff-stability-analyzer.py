@@ -319,32 +319,108 @@ def main():
                    lambda r: len(r["reasons"]) > 0 and any(
                        "DIRTY" in x for x in r["reasons"])))
 
-    # lineage manifest: distinct SHAs sharing a lineage accumulate one window
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as mf:
-        mf.write('{"aaaa1111": "lineage-A", "bbbb2222": "lineage-A"}')
-        manifest = mf.name
-    lines = [IDENT,
-             ("candidate identity app_version=0.1.0 build_identifier=B2 "
-              "candidate_identifier=bbbb2222")] + clean_cycle(0)
-    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as lf:
-        lf.write("\n".join(lines) + "\n")
-        lpath = lf.name
-    proc = subprocess.run([sys.executable, ANALYZER,
-                           "--lineage-manifest", manifest, lpath],
-                          capture_output=True, text=True)
-    os.unlink(lpath)
-    try:
-        result = json.loads(proc.stdout)
-        check(result["STABILITY_GATE"] == "PASS"
-              or "MIXED_CANDIDATES" not in result["reasons"])
-        if "MIXED_CANDIDATES" not in result["reasons"]:
-            print("ok   lineage_manifest_same_window")
-    except json.JSONDecodeError:
-        print("FAIL lineage_manifest: bad output")
-        failed += 1
-    else:
-        passed += 1
-    os.unlink(manifest)
+    # ---- lineage manifest regressions (review round-3 P0/P1) ----
+    #
+    # build_identifier is a per-package UTC timestamp, so evidence collected
+    # across two packages of the SAME lineage always carries different builds.
+    # The mixed-build check is therefore scoped PER CANDIDATE: A@B1 + B@B2
+    # inside one audited lineage must accumulate (docs-only and CI-only
+    # commits do not reset the window per ADR-0012), while the same exact SHA
+    # rebuilt twice, or two distinct lineages, must HOLD.
+
+    def run_with_manifest(name, manifest_doc, lines, expect_status,
+                          expect_exit, extra=None):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as mf:
+            mf.write(json.dumps(manifest_doc))
+            manifest = mf.name
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as lf:
+            lf.write("\n".join(lines) + "\n")
+            lpath = lf.name
+        proc = subprocess.run([sys.executable, ANALYZER,
+                               "--lineage-manifest", manifest, lpath],
+                              capture_output=True, text=True)
+        os.unlink(lpath)
+        os.unlink(manifest)
+        try:
+            result = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            print(f"FAIL {name}: non-JSON output: {proc.stdout[:200]} {proc.stderr[:200]}")
+            return False
+        ok = (result["STABILITY_GATE"] == expect_status
+              and proc.returncode == expect_exit
+              and (extra is None or extra(result)))
+        if not ok:
+            print(f"FAIL {name}: expected {expect_status}/exit {expect_exit}, "
+                  f"got {result['STABILITY_GATE']}/exit {proc.returncode} "
+                  f"reasons={result['reasons']}")
+        else:
+            print(f"ok   {name} -> {result['STABILITY_GATE']} exit={proc.returncode}")
+        return ok
+
+    audited_lineage = {
+        "lineages": [{
+            "lineage_id": "lineage-A",
+            "candidates": ["aaaa1111", "bbbb2222"],
+            "classification": "no-reset",
+            "reason": "docs-only and CI-only commits do not reset the window",
+            "reference": "docs/testing.md (ADR-0012)",
+        }]
+    }
+    two_shas = [IDENT,
+                ("candidate identity app_version=0.1.0 build_identifier=B2 "
+                 "candidate_identifier=bbbb2222")]
+
+    # Regression the review flagged: the old fixture used the PRE-schema
+    # manifest, tripped MANIFEST_SCHEMA, and "passed" because the assertion
+    # ignored every reason except MIXED_CANDIDATES. The real case now is
+    # 2 SHAs, 2 build identifiers, an audited same-lineage manifest, and 99
+    # clean cycles: the window accumulates -> INCOMPLETE, exit 0, no MIXED_*.
+    lines = list(two_shas)
+    for i in range(99):
+        lines += clean_cycle(i * 4)
+    check(run_with_manifest(
+        "lineage_same_lineage_two_builds_incomplete", audited_lineage,
+        lines, "INCOMPLETE", 0,
+        extra=lambda r: r["counters"]["completed_physical_cycles"] == 99
+        and not any(x.startswith("MIXED_") for x in r["reasons"])))
+
+    # two distinct audited lineages in one window: MIXED_CANDIDATES HOLD
+    two_lineages = {
+        "lineages": [
+            {"lineage_id": "lineage-A", "candidates": ["aaaa1111"],
+             "classification": "initial",
+             "reason": "first audited candidate", "reference": "ADR-0012"},
+            {"lineage_id": "lineage-B", "candidates": ["bbbb2222"],
+             "classification": "initial",
+             "reason": "second audited candidate", "reference": "ADR-0012"},
+        ]
+    }
+    check(run_with_manifest(
+        "lineage_two_lineages_hold", two_lineages,
+        two_shas + clean_cycle(0), "HOLD", 3,
+        extra=lambda r: any(x.startswith("MIXED_CANDIDATES")
+                            for x in r["reasons"])))
+
+    # the same exact candidate rebuilt at two build timestamps: per-candidate
+    # MIXED_BUILD_IDENTITIES HOLD even inside one audited lineage
+    rebuilt = [IDENT,
+               ("candidate identity app_version=0.1.0 build_identifier=B2 "
+                "candidate_identifier=aaaa1111")]
+    check(run_with_manifest(
+        "lineage_same_candidate_rebuilt_holds", audited_lineage,
+        rebuilt + clean_cycle(0), "HOLD", 3,
+        extra=lambda r: any(x.startswith("MIXED_BUILD_IDENTITIES")
+                            for x in r["reasons"])))
+
+    # pre-schema manifest (plain sha->lineage dict) is valid JSON but not an
+    # audited lineage document: MANIFEST_SCHEMA HOLD at exit 3, never a
+    # silent pass that looks like lineage approval
+    check(run_with_manifest(
+        "lineage_old_schema_manifest_holds",
+        {"aaaa1111": "lineage-A", "bbbb2222": "lineage-A"},
+        two_shas + clean_cycle(0), "HOLD", 3,
+        extra=lambda r: any(x.startswith("MANIFEST_SCHEMA")
+                            for x in r["reasons"])))
 
     # malformed input fails closed (binary garbage)
     with tempfile.NamedTemporaryFile("wb", suffix=".log", delete=False) as fh:
@@ -354,15 +430,18 @@ def main():
                           capture_output=True, text=True)
     try:
         result = json.loads(proc.stdout)
-        check(result["STABILITY_GATE"] in ("HOLD",) or proc.returncode == 2)
-        if result["STABILITY_GATE"] == "HOLD":
-            print("ok   malformed_input_fails_closed -> HOLD/INPUT_ERROR")
     except json.JSONDecodeError:
         # analyzer may emit INPUT_ERROR JSON; anything else is failure
         print("FAIL malformed_input: unparsable output")
-        failed += 1
+        check(False)
     else:
-        passed += 1
+        ok = result["STABILITY_GATE"] in ("HOLD",) or proc.returncode == 2
+        check(ok)
+        if ok:
+            print("ok   malformed_input_fails_closed -> HOLD/INPUT_ERROR")
+        else:
+            print(f"FAIL malformed_input: got {result['STABILITY_GATE']}"
+                  f"/exit {proc.returncode}")
     os.unlink(bad)
 
     # privacy: payload-looking lines are simply not echoed into output

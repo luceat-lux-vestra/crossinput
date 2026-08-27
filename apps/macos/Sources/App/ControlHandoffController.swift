@@ -194,6 +194,9 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
+            // The usable-session confirmation is exactly-once per entry:
+            // cleared here so the first confirmed delivery after re-entering
+            // arms a fresh marker (issue #68).
             usableSessionLogged = false
             if let generation = capture.suppress() {
                 currentSuppressionGeneration = generation
@@ -201,11 +204,15 @@ final class ControlHandoffController: @unchecked Sendable {
         case .localActive, .returning, .disabled:
             // Lifecycle invariant (issue #62 code-gate): when local suppression
             // ends for ANY reason — normal boundary return, remote failure,
-            // emergency return, takeover, disable — no button previously
-            // accepted by the helper may stay held remotely. Best effort and
-            // session-generation-scoped; external-control takeovers arrive
-            // here via the same transition after InputCapture's synchronous
-            // onPointerStateReset.
+            // emergency return, takeover, disable — the pending-pointer
+            // barrier is armed (cancels queued and in-flight deliveries so a
+            // late completion from session A can never credit session B with a
+            // usable-session marker or stale movement) and no button
+            // previously accepted by the helper may stay held remotely. Best
+            // effort and session-generation-scoped; external-control takeovers
+            // arrive here via the same transition after InputCapture's
+            // synchronous onPointerStateReset.
+            sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
