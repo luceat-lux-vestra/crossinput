@@ -34,6 +34,7 @@ DeX is a supported target/use case, not a CrossInput core state or type.
 ```text
 Presentation
 ├─ MenuBar
+├─ Directional cursor marker   non-interactive remote-ownership cue
 ├─ Settings              per-host-display handoff edge
 └─ Diagnostics
 
@@ -76,6 +77,17 @@ their presentation-facing state. Host display enumeration and persisted edge
 choices remain presentation/configuration concerns: every current macOS
 display is shown independently from the Android remote-target list, and its
 selected edge is applied to `InputCapture`.
+
+While the control projection is `arming(edge)` or `remote` and the session is
+`ready`, the App presentation layer derives one non-interactive directional
+marker from the authoritative control state, entry edge, and configured
+host-display catalog. The marker is placed by display ID and `NSScreen.frame`;
+it never uses the current pointer display as a fallback, does not receive
+input, and is removed for local, returning, unavailable, reconnecting, and
+teardown states. A duplicated edge assignment across host displays is
+ambiguous because the existing handoff projection carries the edge but not a
+display ID, so the marker fails closed until the configuration identifies one
+host display for that direction.
 
 ### Android helper
 

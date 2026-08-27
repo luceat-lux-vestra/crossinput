@@ -31,6 +31,18 @@ Applies to every individual issue fix and PR. Required:
 A bug-fix PR never requires repetitive manual cycles (and never 100 cycles).
 The targeted checks are scoped to what the change could plausibly affect.
 
+## Directional cursor marker (Issue #70)
+
+The macOS marker is a presentation-only, click-through window. Automated
+coverage validates the pure control/session/edge projection, including the
+arming cue, inward-facing direction mapping, display-ID selection,
+duplicate-edge fail-closed behavior, screen-frame geometry, repeated-cycle
+idempotence, and teardown cleanup. A targeted Level-1 device check must
+additionally confirm the marker visually on the configured host display for
+each configured edge, then confirm its removal after normal return, emergency
+return, remote failure, and reconnect. This visual check requires the SM-G977N
+DeX setup and is not established by local tests or synthetic handoff cycles.
+
 ### Level 2 — Feature stabilization
 
 Applies once all blocker/bug issues for a feature area are closed. Required:

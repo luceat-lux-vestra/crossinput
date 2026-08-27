@@ -172,6 +172,20 @@ comments, CI config, README fixes, unrelated subsystems).
 - Applied to PR #63: acceptance reduced to targeted #62 physical checks; the
   100-cycle section moved to this release-level gate.
 
+## Issue #70 reset classification
+
+Issue #70 restores a macOS presentation cue only. The implementation consumes
+the existing `ControlState`, `EdgeSwitchStateMachine.entryEdge`, session
+projection, and configured host-display catalog; it does not change
+`InputCapture`, `InputSender`, `ControlHandoffController`, the edge-switch
+state machine, session lifecycle, helper pointer routing, or CXI handoff
+semantics. The marker window is click-through and has no pointer or event-tap
+side effects. Therefore this change is classified **NO RESET** for the active
+Level-3 evidence window that starts at
+`dd9b1327d5b858d1a23a568b876ba46c15815eef`. It does not invalidate the
+accepted 21/100 cycles; physical visual confirmation remains a separate
+Issue #70 Level-1 acceptance requirement.
+
 ## Revisit Conditions
 
 - If natural-use accumulation proves too slow to ever reach 100 cycles,
