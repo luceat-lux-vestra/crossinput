@@ -1,6 +1,7 @@
 import XCTest
 @testable import App
 @testable import Delivery
+@testable import Diagnostics
 import AndroidBridge
 import Protocol
 import EdgeSwitch
@@ -1112,6 +1113,117 @@ final class InputSenderTests: XCTestCase {
                        "cancelled stale in-flight movement must not force a return")
         XCTAssertEqual(sawLocal.value, 0,
                        "-100 <= -hysteresis must never be credited after cancellation")
+    }
+
+    /// Regression (review round-3 P0): the stale-in-flight barrier must be
+    /// armed by the STATE TRANSITION out of remoteActive, not only by direct
+    /// `cancelPendingPointerEvents()` calls. 9f62de7 removed the call from
+    /// the `.localActive`/`.returning`/`.disabled` arms while adding
+    /// `logUsableSessionOnce()` to delivered-result handling. With the
+    /// barrier gone, a delivery still in flight when session A returns, and
+    /// completing AFTER session B re-enters, is classified `.deliveredMovement`
+    /// in B: it logs a false "handoff usable-session confirmed" (Level-3
+    /// evidence attributed to the wrong window) and pushes a stale
+    /// return-direction delta through `switchMachine.pointerMoved`. After B's
+    /// first movement consumed the exemption (issue #37), that stale -100
+    /// forces B out of remoteActive entirely.
+    ///
+    /// The existing cancel tests call `cancelPendingPointerEvents()` directly,
+    /// so they pass even with the transition-path barrier deleted; this test
+    /// drives the return through the machine plus a genuine re-entry — the
+    /// exact production path, observed through the analysis evidence line.
+    func testStaleDeliveryAcrossReentryNeverCreditsUsableSession() async throws {
+        let fixture = makeFixture()
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: fixture.sender,
+                                                  switchMachine: machine)
+
+        // Observe the ADR-0012 evidence line in a private log window.
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("handoff-stale-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousLogURL = Diagnostics.logURL
+        Diagnostics.logURL = tempDir.appendingPathComponent("diag.log")
+        Diagnostics.resetIdentityMarkerForTesting()
+        defer {
+            Diagnostics.flushSync()
+            Diagnostics.logURL = previousLogURL
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        func usableSessionConfirmationCount() -> Int {
+            Diagnostics.flushSync()
+            guard let data = try? Data(contentsOf: tempDir.appendingPathComponent("diag.log")) else {
+                return 0
+            }
+            return String(decoding: data, as: UTF8.self)
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .filter { $0.contains("handoff usable-session confirmed") }
+                .count
+        }
+
+        // Session A: remoteActive; first movement delivered (exemption
+        // consumed, marker credited once); return-direction delivery parked
+        // in-flight inside the fake transport.
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: 5, dy: 0)))
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive,
+                       "A's exempted first movement must not return control")
+        XCTAssertEqual(usableSessionConfirmationCount(), 1,
+                       "A's confirmed delivery arms A's exactly-once marker")
+
+        fixture.session.rearmGate()
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: -100, dy: 0)))
+        awaitInFlight(fixture.session)
+
+        // Normal return A through the machine: apply(.localActive) MUST arm
+        // the barrier here — the code path the round-3 review found broken.
+        machine.pointerMoved(requestedDx: CGFloat(-200), requestedDy: 0,
+                             deliveredDx: CGFloat(-200), deliveredDy: 0)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive, "A returns normally")
+
+        // Session B: re-enter remoteActive; consume the exemption with a
+        // baseline movement so a stale return-delta WOULD cross the
+        // hysteresis threshold if it were credited.
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        machine.pointerMoved(requestedDx: CGFloat(5), requestedDy: 0,
+                             deliveredDx: CGFloat(5), deliveredDy: 0)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        // The late completion from session A arrives while B is remoteActive.
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive,
+                       "stale A completion must not drive B toward boundaryCrossed")
+        XCTAssertEqual(usableSessionConfirmationCount(), 1,
+                       "late A completion must not credit B with a usable-session marker")
+
+        // Positive control: a genuine B delivery still credits B exactly once.
+        controller.capture.onPointerEvent?(PointerEvent(.move(dx: 5, dy: 0)))
+        fixture.sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertEqual(usableSessionConfirmationCount(), 2,
+                       "genuine B delivery still arms B's exactly-once marker")
     }
 
     private final class ResultBox<Value>: @unchecked Sendable {
