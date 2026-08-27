@@ -180,7 +180,10 @@ projection, and configured host-display catalog; it does not change
 `InputCapture`, `InputSender`, `ControlHandoffController`, the edge-switch
 state machine, session lifecycle, helper pointer routing, or CXI handoff
 semantics. The marker window is click-through and has no pointer or event-tap
-side effects. Therefore this change is classified **NO RESET** for the active
+side effects. Screen-parameter notifications only refresh the host-display
+presentation catalog and force marker reconciliation; they do not call
+`applyEdgeConfig` or rewrite `InputCapture`'s authoritative edge map.
+Therefore this change is classified **NO RESET** for the active
 Level-3 evidence window that starts at
 `dd9b1327d5b858d1a23a568b876ba46c15815eef`. It does not invalidate the
 accepted 21/100 cycles; physical visual confirmation remains a separate

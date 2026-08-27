@@ -126,7 +126,7 @@ final class AppModel: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.refreshHostDisplays()
-                    self.applyEdgeConfig()
+                    self.refreshCursorMarker(force: true)
                 }
             }
     }
@@ -298,12 +298,20 @@ final class AppModel: ObservableObject {
     /// Projects the authoritative control/session state into the non-
     /// interactive marker. This consumer never changes capture, routing, or
     /// the handoff machine.
-    private func refreshCursorMarker() {
-        cursorMarkerController.update(
-            controlState: controlState,
-            sessionState: sessionState,
-            entryEdge: handoffController.switchMachine.entryEdge,
-            hostDisplays: hostDisplays)
+    private func refreshCursorMarker(force: Bool = false) {
+        if force {
+            cursorMarkerController.reconcile(
+                controlState: controlState,
+                sessionState: sessionState,
+                entryEdge: handoffController.switchMachine.entryEdge,
+                hostDisplays: hostDisplays)
+        } else {
+            cursorMarkerController.update(
+                controlState: controlState,
+                sessionState: sessionState,
+                entryEdge: handoffController.switchMachine.entryEdge,
+                hostDisplays: hostDisplays)
+        }
     }
 
     private static func hostDisplaySnapshot(_ screen: NSScreen) -> HostDisplaySnapshot? {

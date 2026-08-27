@@ -42,8 +42,10 @@ The marker points inward, matching the earlier cue: left edge `>`, right edge
 events, cannot become key/main, and is reconciled as one owned window. State
 updates close stale windows before showing a replacement; teardown is safe to
 repeat. Screen-parameter changes refresh the presentation catalog and window
-placement. Process termination releases the AppKit-owned marker windows with
-the application.
+placement, including a forced re-render when the display ID and edge remain
+the same. The screen-parameter observer does not call `applyEdgeConfig` or
+rewrite `InputCapture`'s authoritative edge map. Process termination releases
+the AppKit-owned marker windows with the application.
 
 ## Lifecycle coverage
 
@@ -64,7 +66,7 @@ Automated coverage is in
 `apps/macos/Tests/AppTests/CursorMarkerTests.swift`. It covers the state and
 edge mapping, configured display selection, all four edges, duplicate-edge
 fail-closed behavior, failure/reconnect/emergency removal, repeated cycles,
-geometry, and idempotent teardown.
+geometry, same-state screen-refresh reconciliation, and idempotent teardown.
 
 The current ADR-0012 Level-3 tracker remains at 21 accepted physical cycles
 of 100, with window start

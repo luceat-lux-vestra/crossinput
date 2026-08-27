@@ -134,6 +134,25 @@ final class CursorMarkerController {
         sink.render(next)
     }
 
+    /// Re-renders the current presentation projection even when its logical
+    /// value is unchanged. AppKit screen geometry can change without any
+    /// change to the authoritative handoff state, so the renderer must get a
+    /// chance to recompute its window frame.
+    func reconcile(
+        controlState: ControlState,
+        sessionState: SessionState,
+        entryEdge: ScreenEdge,
+        hostDisplays: [HostDisplayEdgeOption]
+    ) {
+        let next = CursorMarkerPresentationState.derive(
+            controlState: controlState,
+            sessionState: sessionState,
+            entryEdge: entryEdge,
+            hostDisplays: hostDisplays)
+        state = next
+        sink.render(next)
+    }
+
     func teardown() {
         guard state != .hidden else {
             sink.teardown()
