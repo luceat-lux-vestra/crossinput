@@ -65,7 +65,7 @@ jobs:
               if (/\(macos\)|\bmacos\b/.test(title) || /apps\/macos|appkit|quartz|cgevent|inputcapture|controlhandoffcontroller/.test(body)) {
                 areas.add('area/macos-app');
               }
-              if (/\(android\)|\bandroid\b/.test(title) || /android\/helper|android helper|\buhid\b|inputmanager/.test(body)) {
+              if (/\(android\)|\bandroid\b/.test(title) || /android\/helper|android helper (?:implementation|source|module|build|code|bug)|\buhid\b|inputmanager/.test(body)) {
                 areas.add('area/android-helper');
               }
               if (/\(protocol\)|\bprotocol\b/.test(title) || /protocol\/|cxi protocol|golden fixture/.test(body)) {
@@ -77,7 +77,7 @@ jobs:
               if (/\brelease\b/.test(title) || /package-macos|codesign|notari|\.dmg\b/.test(body)) {
                 areas.add('area/release');
               }
-              if (/^docs[:(]|documentation/.test(title) || /### documentation location|docs\/[^\s`]+|readme\.md/.test(body)) {
+              if (/^docs[:(]|documentation/.test(title) || /### documentation location/.test(body)) {
                 areas.add('area/docs');
               }
 
