@@ -1,43 +1,111 @@
 name: release
 
 # Builds the Ampersand-<ver>.dmg and publishes it to a GitHub Release.
-# Triggered by pushing a version tag (v*), per ADR-0008.
+# Tag pushes are the normal release path. workflow_dispatch is a recovery path
+# for an existing immutable v* tag and never publishes arbitrary branch state.
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to build or recover
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
 jobs:
   dmg:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Validate release tag input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: ${RELEASE_TAG}" >&2
+            exit 1
+          }
+
+      - name: Checkout immutable release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Verify checked-out tag identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "${head_commit}" = "${tag_commit}"
+          test -z "$(git status --porcelain)"
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Verify version, signature, and DMG integrity
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' dist/Ampersand.app/Contents/Info.plist)"
+          test "v${VERSION}" = "${RELEASE_TAG}"
+
+          DMG="dist/Ampersand-${VERSION}.dmg"
+          test -s "${DMG}"
+          codesign --verify --deep --strict dist/Ampersand.app
+          hdiutil verify "${DMG}"
+
+          CHECKSUM="dist/Ampersand-${VERSION}.sha256"
+          (cd dist && shasum -a 256 "Ampersand-${VERSION}.dmg" > "Ampersand-${VERSION}.sha256")
+          test -s "${CHECKSUM}"
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "dmg=${DMG}" >> "${GITHUB_OUTPUT}"
+          echo "checksum=${CHECKSUM}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ampersand-dmg
-          path: dist/Ampersand-*.dmg
+          name: ampersand-release-${{ steps.artifact.outputs.version }}
+          path: |
+            ${{ steps.artifact.outputs.dmg }}
+            ${{ steps.artifact.outputs.checksum }}
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Upload DMG to release
+      - name: Create or refresh GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+          DMG: ${{ steps.artifact.outputs.dmg }}
+          CHECKSUM: ${{ steps.artifact.outputs.checksum }}
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          DMG="Ampersand-${VERSION}.dmg"
-          test -f "dist/${DMG}" || { echo "missing ${DMG}" >&2; exit 1; }
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/${DMG}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Ampersand ${VERSION}" \
-            --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)." || \
-            gh release upload "${GITHUB_REF_NAME}" "dist/${DMG}" --repo "$GITHUB_REPOSITORY"
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${DMG}" "${CHECKSUM}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              "${DMG}" "${CHECKSUM}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "Ampersand ${VERSION}" \
+              --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
+          fi
