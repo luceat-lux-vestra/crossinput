@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /android/helper
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    groups:
+      gradle-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - "area:android"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - "area:ci"
