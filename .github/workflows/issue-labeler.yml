@@ -41,7 +41,10 @@ jobs:
             ];
             for (const [name, color, description] of labelDefs) {
               try {
-                await github.rest.issues.getLabel({ ...context.repo, name });
+                const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
+                if ((data.description || '') !== description) {
+                  await github.rest.issues.updateLabel({ ...context.repo, name, description });
+                }
               } catch (error) {
                 if (error.status !== 404) throw error;
                 await github.rest.issues.createLabel({ ...context.repo, name, color, description });
@@ -52,7 +55,6 @@ jobs:
               if (issue.pull_request) return;
               const title = (issue.title || '').trim().toLowerCase();
               const body = (issue.body || '').toLowerCase();
-              const text = `${title}\n${body}`;
 
               let type = 'type/task';
               if (/^(fix|bug)(\([^)]*\))?:|^\[bug\]/.test(title)) type = 'type/bug';
@@ -60,12 +62,24 @@ jobs:
               else if (/^epic(\([^)]*\))?:/.test(title)) type = 'type/epic';
 
               const areas = new Set();
-              if (/\(macos\)|\bmacos\b|apps\/macos|appkit|quartz|cgevent/i.test(text)) areas.add('area/macos-app');
-              if (/\(android\)|\bandroid\b|android\/helper|\bdex\b|\buhid\b|inputmanager|\badb\b/i.test(text)) areas.add('area/android-helper');
-              if (/\(protocol\)|\bprotocol\b|protocol\/|\bcxi\b|golden fixture/i.test(text)) areas.add('area/protocol');
-              if (/\(ci\)|^ci:|github actions|\.github\/|workflow|dependabot|branch protection|ruleset/i.test(text)) areas.add('area/ci');
-              if (/\brelease\b|\bdmg\b|package-macos|codesign|notari/i.test(text)) areas.add('area/release');
-              if (/^docs[:(]|documentation|\bdocs\/|readme|\badr[- ]?\d/i.test(text)) areas.add('area/docs');
+              if (/\(macos\)|\bmacos\b/.test(title) || /apps\/macos|appkit|quartz|cgevent|inputcapture|controlhandoffcontroller/.test(body)) {
+                areas.add('area/macos-app');
+              }
+              if (/\(android\)|\bandroid\b/.test(title) || /android\/helper|android helper|\buhid\b|inputmanager/.test(body)) {
+                areas.add('area/android-helper');
+              }
+              if (/\(protocol\)|\bprotocol\b/.test(title) || /protocol\/|cxi protocol|golden fixture/.test(body)) {
+                areas.add('area/protocol');
+              }
+              if (/\(ci\)|^ci:|github/.test(title) || /github actions|\.github\/|dependabot|branch protection|ruleset/.test(body)) {
+                areas.add('area/ci');
+              }
+              if (/\brelease\b/.test(title) || /package-macos|codesign|notari|\.dmg\b/.test(body)) {
+                areas.add('area/release');
+              }
+              if (/^docs[:(]|documentation/.test(title) || /### documentation location|docs\/[^\s`]+|readme\.md/.test(body)) {
+                areas.add('area/docs');
+              }
 
               const { data: labels } = await github.rest.issues.listLabelsOnIssue({
                 ...context.repo,
@@ -74,8 +88,7 @@ jobs:
               });
               const names = labels.map(x => x.name);
               const desired = new Set([type, ...areas]);
-              const managed = names.filter(x => x.startsWith('type/') || x.startsWith('area/'));
-              for (const name of managed) {
+              for (const name of names.filter(x => x.startsWith('type/') || x.startsWith('area/'))) {
                 if (!desired.has(name)) {
                   await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
                 }
