@@ -56,10 +56,10 @@ jobs:
               const title = (issue.title || '').trim().toLowerCase();
               const body = (issue.body || '').toLowerCase();
 
-              let type = 'type/task';
-              if (/^(fix|bug)(\([^)]*\))?:|^\[bug\]/.test(title)) type = 'type/bug';
-              else if (/^(feat|feature)(\([^)]*\))?:|^\[feature\]/.test(title)) type = 'type/feature';
-              else if (/^epic(\([^)]*\))?:/.test(title)) type = 'type/epic';
+              let explicitType = null;
+              if (/^(fix|bug)(\([^)]*\))?:|^\[bug\]/.test(title)) explicitType = 'type/bug';
+              else if (/^(feat|feature)(\([^)]*\))?:|^\[feature\]/.test(title)) explicitType = 'type/feature';
+              else if (/^epic(\([^)]*\))?:/.test(title)) explicitType = 'type/epic';
 
               const areas = new Set();
               if (/\(macos\)|\bmacos\b/.test(title) || /apps\/macos|appkit|quartz|cgevent|inputcapture|controlhandoffcontroller/.test(body)) {
@@ -87,16 +87,27 @@ jobs:
                 per_page: 100,
               });
               const names = labels.map(x => x.name);
-              const desired = new Set([type, ...areas]);
-              for (const name of names.filter(x => x.startsWith('type/') || x.startsWith('area/'))) {
-                if (!desired.has(name)) {
-                  await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
+              const existingTypes = names.filter(x => x.startsWith('type/'));
+              const toAdd = [...areas].filter(x => !names.includes(x));
+
+              // Only an explicit title prefix owns type reconciliation. Otherwise
+              // preserve a maintainer-selected type and default unlabeled Issues to task.
+              if (explicitType) {
+                for (const name of existingTypes) {
+                  if (name !== explicitType) {
+                    await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
+                  }
                 }
+                if (!names.includes(explicitType)) toAdd.push(explicitType);
+              } else if (existingTypes.length === 0) {
+                toAdd.push('type/task');
               }
-              const toAdd = [...desired].filter(x => !names.includes(x));
+
+              // Area inference is additive because Issue labels may be manually curated;
+              // unlike PR path labels there is no authoritative ownership signal for removal.
               if (!names.some(x => x.startsWith('priority/'))) toAdd.push('priority/medium');
               if (toAdd.length) {
-                await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: toAdd });
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: [...new Set(toAdd)] });
               }
             }
 
