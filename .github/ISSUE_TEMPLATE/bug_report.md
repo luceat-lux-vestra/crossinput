@@ -1,8 +1,8 @@
 ---
 name: Bug report
 about: Report an Ampersand bug
-title: "[BUG] "
-labels: bug
+title: "fix: "
+labels: type/bug
 ---
 
 ## Symptom
