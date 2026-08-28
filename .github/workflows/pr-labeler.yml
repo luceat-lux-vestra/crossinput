@@ -42,30 +42,56 @@ jobs:
             ];
             for (const [name, color, description] of managed) {
               try {
-                await github.rest.issues.getLabel({ ...context.repo, name });
+                const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
+                if ((data.description || '') !== description) {
+                  await github.rest.issues.updateLabel({ ...context.repo, name, description });
+                }
               } catch (error) {
                 if (error.status !== 404) throw error;
                 await github.rest.issues.createLabel({ ...context.repo, name, color, description });
               }
             }
 
-            const title = context.payload.pull_request.title.trim().toLowerCase();
-            let type = 'type/task';
+            const pr = context.payload.pull_request;
+            const title = pr.title.trim().toLowerCase();
+            let type = null;
             if (/^(fix|bug)(\([^)]*\))?:/.test(title)) type = 'type/bug';
             else if (/^(feat|feature)(\([^)]*\))?:/.test(title)) type = 'type/feature';
             else if (/^epic(\([^)]*\))?:/.test(title)) type = 'type/epic';
 
+            if (!type) {
+              const referenceText = `${pr.title}\n${pr.body || ''}`;
+              const matches = [...referenceText.matchAll(/#(\d+)/g)]
+                .map(match => Number(match[1]))
+                .filter(number => number !== pr.number);
+              for (const issueNumber of [...new Set(matches)].slice(0, 10)) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: issueNumber });
+                  const inherited = issue.labels
+                    .map(label => typeof label === 'string' ? label : label.name)
+                    .find(name => ['type/bug', 'type/feature', 'type/task', 'type/epic'].includes(name));
+                  if (inherited) {
+                    type = inherited;
+                    break;
+                  }
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+            }
+            type ||= 'type/task';
+
             const { data: current } = await github.rest.issues.listLabelsOnIssue({
               ...context.repo,
-              issue_number: context.issue.number,
+              issue_number: pr.number,
               per_page: 100,
             });
             for (const label of current.map(x => x.name).filter(x => x.startsWith('type/'))) {
               if (label !== type) {
-                await github.rest.issues.removeLabel({ ...context.repo, issue_number: context.issue.number, name: label });
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: pr.number, name: label });
               }
             }
-            await github.rest.issues.addLabels({ ...context.repo, issue_number: context.issue.number, labels: [type] });
+            await github.rest.issues.addLabels({ ...context.repo, issue_number: pr.number, labels: [type] });
 
       - name: Classify changed areas
         uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
