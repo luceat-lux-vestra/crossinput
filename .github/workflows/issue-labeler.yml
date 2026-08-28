@@ -1,0 +1,99 @@
+name: Issue labels
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-labeler-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Classify issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const labelDefs = [
+              ['type/bug', 'B60205', 'A defect in existing functionality'],
+              ['type/feature', '1D76DB', 'A new user-facing capability'],
+              ['type/task', '0E8A16', 'Implementation, maintenance, test, CI, or documentation task'],
+              ['type/epic', '6F42C1', 'Large multi-issue work stream'],
+              ['area/macos-app', 'FFA36C', 'macOS app implementation'],
+              ['area/android-helper', 'C5DEF5', 'Android helper implementation'],
+              ['area/protocol', '5EBEFF', 'CXI protocol and fixtures'],
+              ['area/ci', '0E8A16', 'CI/CD and automation'],
+              ['area/release', 'FBCA04', 'Packaging and release automation'],
+              ['area/docs', 'FEF2C0', 'Documentation'],
+              ['priority/medium', 'FBCA04', 'Default triage priority'],
+            ];
+            for (const [name, color, description] of labelDefs) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+              }
+            }
+
+            async function classify(issue) {
+              if (issue.pull_request) return;
+              const title = (issue.title || '').trim().toLowerCase();
+              const body = (issue.body || '').toLowerCase();
+              const text = `${title}\n${body}`;
+
+              let type = 'type/task';
+              if (/^(fix|bug)(\([^)]*\))?:|^\[bug\]/.test(title)) type = 'type/bug';
+              else if (/^(feat|feature)(\([^)]*\))?:|^\[feature\]/.test(title)) type = 'type/feature';
+              else if (/^epic(\([^)]*\))?:/.test(title)) type = 'type/epic';
+
+              const areas = new Set();
+              if (/\(macos\)|\bmacos\b|apps\/macos|appkit|quartz|cgevent/i.test(text)) areas.add('area/macos-app');
+              if (/\(android\)|\bandroid\b|android\/helper|\bdex\b|\buhid\b|inputmanager|\badb\b/i.test(text)) areas.add('area/android-helper');
+              if (/\(protocol\)|\bprotocol\b|protocol\/|\bcxi\b|golden fixture/i.test(text)) areas.add('area/protocol');
+              if (/\(ci\)|^ci:|github actions|\.github\/|workflow|dependabot|branch protection|ruleset/i.test(text)) areas.add('area/ci');
+              if (/\brelease\b|\bdmg\b|package-macos|codesign|notari/i.test(text)) areas.add('area/release');
+              if (/^docs[:(]|documentation|\bdocs\/|readme|\badr[- ]?\d/i.test(text)) areas.add('area/docs');
+
+              const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+                ...context.repo,
+                issue_number: issue.number,
+                per_page: 100,
+              });
+              const names = labels.map(x => x.name);
+              const desired = new Set([type, ...areas]);
+              const managed = names.filter(x => x.startsWith('type/') || x.startsWith('area/'));
+              for (const name of managed) {
+                if (!desired.has(name)) {
+                  await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
+                }
+              }
+              const toAdd = [...desired].filter(x => !names.includes(x));
+              if (!names.some(x => x.startsWith('priority/'))) toAdd.push('priority/medium');
+              if (toAdd.length) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: toAdd });
+              }
+            }
+
+            if (context.eventName === 'workflow_dispatch') {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                ...context.repo,
+                state: 'open',
+                per_page: 100,
+              });
+              for (const issue of issues) await classify(issue);
+            } else {
+              await classify(context.payload.issue);
+            }
