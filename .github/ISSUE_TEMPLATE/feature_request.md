@@ -1,8 +1,8 @@
 ---
 name: Feature request
 about: Propose a new Ampersand feature
-title: "[FEATURE] "
-labels: enhancement
+title: "feat: "
+labels: type/feature
 ---
 
 ## Background (why it is needed)
