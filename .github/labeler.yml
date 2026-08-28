@@ -1,0 +1,54 @@
+# Ampersand automatic PR area classification.
+# Area labels are derived only from changed paths and are synchronized on every PR update.
+
+changed-files-labels-limit: 20
+max-files-changed: 500
+
+area/macos-app:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "apps/macos/**"
+
+area/android-helper:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "android/helper/**"
+
+area/protocol:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "protocol/**"
+
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "scripts/check-*.sh"
+          - "scripts/test-*.py"
+          - "scripts/*fixture*.sh"
+
+area/release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/workflows/release.yml"
+          - "scripts/package-macos.sh"
+          - "CHANGELOG.md"
+
+area/docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "README.md"
+          - "CONTRIBUTING.md"
+          - "SECURITY.md"
+          - "THIRD_PARTY_NOTICES.md"
+          - "NOTICE"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/dependabot.yml"
+          - "android/helper/**/build.gradle*"
+          - "android/helper/**/settings.gradle*"
+          - "android/helper/gradle/**"
+          - "android/helper/gradle.properties"
