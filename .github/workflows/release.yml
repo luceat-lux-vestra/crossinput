@@ -96,16 +96,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          set +e
+          release_view_output="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" 2>&1)"
+          release_view_status=$?
+          set -e
+
+          if [[ ${release_view_status} -eq 0 ]]; then
             gh release upload "${RELEASE_TAG}" \
               "${DMG}" "${CHECKSUM}" \
               --repo "${GITHUB_REPOSITORY}" \
               --clobber
-          else
+          elif grep -qiE 'release not found|not found' <<<"${release_view_output}"; then
             gh release create "${RELEASE_TAG}" \
               "${DMG}" "${CHECKSUM}" \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --title "Ampersand ${VERSION}" \
               --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
+          else
+            printf '%s\n' "${release_view_output}" >&2
+            exit "${release_view_status}"
           fi
