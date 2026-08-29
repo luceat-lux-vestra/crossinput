@@ -22,18 +22,12 @@ private final class WatchdogObservation: @unchecked Sendable {
     }
 }
 
-private final class SilentCursorVisibility: CursorVisibilityAPI {
-    func hideCursor() -> CGError { .success }
-    func showCursor() -> CGError { .success }
-}
-
 final class SuppressionWatchdogTests: XCTestCase {
     private func makeCapture(
         timeout: TimeInterval,
         released: @escaping @Sendable (SuppressionReleaseReason, UInt64) -> Void
     ) -> InputCapture {
         let capture = InputCapture(
-            cursorVisibility: SilentCursorVisibility(),
             pointerRestoreOverride: {},
             suppressionTimeoutOverride: timeout
         )

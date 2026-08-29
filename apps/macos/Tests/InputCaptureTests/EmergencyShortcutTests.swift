@@ -23,17 +23,11 @@ private final class EmergencyShortcutObservation: @unchecked Sendable {
     }
 }
 
-private final class SilentCursorVisibility: CursorVisibilityAPI {
-    func hideCursor() -> CGError { .success }
-    func showCursor() -> CGError { .success }
-}
-
 final class EmergencyShortcutTests: XCTestCase {
     private func makeCapture(
         released: @escaping @Sendable (SuppressionReleaseReason, UInt64) -> Void
     ) -> InputCapture {
         let capture = InputCapture(
-            cursorVisibility: SilentCursorVisibility(),
             pointerRestoreOverride: {}
         )
         capture.onSuppressionReleased = released

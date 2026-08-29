@@ -19,22 +19,6 @@ Issues found during development and verification, with causes and fixes. Work in
 | Cursor invisible on the DeX screen | Samsung fades the cursor after ~3.5s idle — normal DeX behavior; move the pointer to bring it back |
 | Input delivered to the phone screen instead of DeX | This is the known category B failure observed in upstream projects (deskflow-android etc.) — see `docs/research/upstream-inventory.md`. Our Phase 0 verification was category A (delivered to the DeX display); if it regresses, start with the routing check in `docs/roadmap.md` Phase 0 |
 
-For host cursor visibility investigation, enable the opt-in metadata-only
-diagnostic before launching the app:
-
-```sh
-launchctl setenv CROSSINPUT_DIAG_CURSOR_VISIBILITY 1
-```
-
-The log records one hide/show request per local transition, the returned
-`CGError` code, the `isCursorHidden` transition, suppression generation, and
-release reason. It does not record input payloads. Clear the opt-in variable
-after characterization:
-
-```sh
-launchctl unsetenv CROSSINPUT_DIAG_CURSOR_VISIBILITY
-```
-
 ## Keyboard
 
 | Symptom | Cause/Fix |
@@ -46,11 +30,12 @@ launchctl unsetenv CROSSINPUT_DIAG_CURSOR_VISIBILITY
 ## External remote-control takeover
 
 When Android owns input, a recognized external-control event requests local
-macOS control. CrossInput releases suppression, restores cursor visibility,
-cleans up captured key/button state, skips the normal edge-return pointer warp,
-and passes the triggering event through to macOS. RustDesk is the initially
-verified provider; physical source characterization and takeover behavior must
-be confirmed on the target Mac before treating the provider as verified.
+macOS control. CrossInput releases suppression, cleans up captured key/button
+state, skips the normal edge-return pointer warp, and passes the triggering
+event through to macOS. CrossInput does not explicitly manage host cursor
+visibility. RustDesk is the initially verified provider; physical source
+characterization and takeover behavior must be confirmed on the target Mac
+before treating the provider as verified.
 
 To opt in to metadata-only event-source diagnostics, set the environment before
 launching the app:
