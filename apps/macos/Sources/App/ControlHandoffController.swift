@@ -28,7 +28,11 @@ final class ControlHandoffController: @unchecked Sendable {
             Task { @MainActor in
                 guard let self, self.transitionGate.shouldApply(transition) else { return }
                 Diagnostics.log("handoff transition \(transition.from.rawValue) -> \(transition.to.rawValue) reason=\(transition.reason.rawValue) sequence=\(transition.sequence)")
-                self.onStateChange?(self.controlState(for: transition.to))
+                let controlState = self.controlState(for: transition.to)
+                if ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1" {
+                    Diagnostics.log("cursor investigation handoff-control-state=\(Self.diagnosticName(controlState))")
+                }
+                self.onStateChange?(controlState)
                 self.apply(state: transition.to, reason: transition.reason)
             }
         }
@@ -249,6 +253,15 @@ final class ControlHandoffController: @unchecked Sendable {
         case .externalControl: return .externalControlTakeover
         case .captureStopped: return .deactivated
         case .normalReturn: return .suppressionReleased
+        }
+    }
+
+    private static func diagnosticName(_ state: ControlState) -> String {
+        switch state {
+        case .local: return "local"
+        case let .arming(edge): return "arming(\(edge.rawValue))"
+        case .remote: return "remote"
+        case .returning: return "returning"
         }
     }
 }

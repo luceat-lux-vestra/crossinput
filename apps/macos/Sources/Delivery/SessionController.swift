@@ -253,6 +253,19 @@ public final class SessionController {
 
     private func setState(_ state: SessionState) {
         self.state = state
+        if ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1" {
+            Diagnostics.log("cursor investigation session-state=\(Self.diagnosticName(state))")
+        }
         onStateChange?(state)
+    }
+
+    private static func diagnosticName(_ state: SessionState) -> String {
+        switch state {
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .ready: return "ready"
+        case .reconnecting: return "reconnecting"
+        case .failed: return "failed"
+        }
     }
 }

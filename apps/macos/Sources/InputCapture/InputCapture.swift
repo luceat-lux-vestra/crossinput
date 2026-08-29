@@ -19,6 +19,25 @@ public enum SuppressionReleaseReason: String, Sendable {
     case externalControl
 }
 
+/// Investigation-only seam for observing the pre-#87 host cursor lifecycle
+/// without changing pointer geometry or handoff semantics.
+protocol CursorVisibilityAPI {
+    func hideCursor() -> CGError
+    func showCursor() -> CGError
+}
+
+private struct CoreGraphicsCursorVisibility: CursorVisibilityAPI {
+    func hideCursor() -> CGError {
+        // The display argument is accepted for API compatibility but has no
+        // effect. Keep the pre-#87 call shape for an exact A/B candidate.
+        CGDisplayHideCursor(CGMainDisplayID())
+    }
+
+    func showCursor() -> CGError {
+        CGDisplayShowCursor(CGMainDisplayID())
+    }
+}
+
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
     public enum Kind: Sendable, Equatable {
@@ -186,6 +205,8 @@ public final class InputCapture: @unchecked Sendable {
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
+    private let cursorVisibility: any CursorVisibilityAPI
+    private let cursorVisibilityDiagnosticsEnabled: Bool
     private let pointerRestoreOverride: (() -> Void)?
 
     /// Monotonically increasing counter identifying the current suppression session.
@@ -206,6 +227,9 @@ public final class InputCapture: @unchecked Sendable {
     /// crossing point re-trap into a dead remote session (issue #50).
     /// Guarded by stateLock.
     private var requireEdgeExit = false
+    /// Investigation-only balance guard. This is intentionally restored here
+    /// so the candidate exercises the same hide/show lifecycle as pre-#87.
+    private var isCursorHidden = false
     /// Android key codes currently down on the device; on release (fail-safe,
     /// timeout, disconnect) every stuck key is sent UP so the device never
     /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
@@ -218,6 +242,7 @@ public final class InputCapture: @unchecked Sendable {
         self.init(
             externalControlClassifier: externalControlClassifier,
             sourceIdentityResolver: sourceIdentityResolver,
+            cursorVisibility: CoreGraphicsCursorVisibility(),
             pointerRestoreOverride: nil,
             suppressionTimeoutOverride: nil
         )
@@ -227,7 +252,9 @@ public final class InputCapture: @unchecked Sendable {
     init(
         externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
+        cursorVisibility: any CursorVisibilityAPI = CoreGraphicsCursorVisibility(),
         pointerRestoreOverride: (() -> Void)? = nil,
+        cursorVisibilityDiagnosticsEnabled: Bool? = nil,
         suppressionTimeoutOverride: TimeInterval? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
@@ -235,6 +262,9 @@ public final class InputCapture: @unchecked Sendable {
         self.sourceDiagnostics = ExternalControlSourceDiagnostics(
             enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
         )
+        self.cursorVisibility = cursorVisibility
+        self.cursorVisibilityDiagnosticsEnabled = cursorVisibilityDiagnosticsEnabled
+            ?? (ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1")
         self.pointerRestoreOverride = pointerRestoreOverride
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
     }
@@ -282,6 +312,7 @@ public final class InputCapture: @unchecked Sendable {
             self.installEmergencyHotKey()
             CFRunLoopRun()
         }
+        logInvestigationEnvironment()
         return true
     }
 
@@ -318,6 +349,7 @@ public final class InputCapture: @unchecked Sendable {
             guard !isSuppressing else { return nil }
             isSuppressing = true
             suppressionGeneration &+= 1
+            hideCursor()
             return suppressionGeneration
         }
         guard let generation else { return nil }
@@ -334,6 +366,9 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = false
             watchdog?.cancel()
             watchdog = nil
+            if was {
+                showCursor()
+            }
             return (was, gen)
         }
         if wasSuppressing {
@@ -575,7 +610,9 @@ public final class InputCapture: @unchecked Sendable {
 
     private func centerPointer() {
         let frame = CGDisplayBounds(CGMainDisplayID())
-        CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
+        let target = CGPoint(x: frame.midX, y: frame.midY)
+        let result = CGWarpMouseCursorPosition(target)
+        logPointerWarp(operation: "center", target: target, result: result)
     }
 
     /// Pins the macOS pointer to the configured Android edge of the current
@@ -590,7 +627,8 @@ public final class InputCapture: @unchecked Sendable {
             in: display.frame,
             at: currentPosition,
             threshold: edgeThreshold)
-        CGWarpMouseCursorPosition(hold)
+        let result = CGWarpMouseCursorPosition(hold)
+        logPointerWarp(operation: "hold", target: hold, result: result)
     }
 
     /// Physically returns the pointer to the crossing edge point the user
@@ -600,7 +638,9 @@ public final class InputCapture: @unchecked Sendable {
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
             let frame = CGDisplayBounds(CGMainDisplayID())
-            CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
+            let target = CGPoint(x: frame.midX, y: frame.midY)
+            let result = CGWarpMouseCursorPosition(target)
+            logPointerWarp(operation: "restore-center-fallback", target: target, result: result)
             // Arm the gates even on the unresolved-display path: without them
             // a subsequent event near any configured edge can instantly
             // re-arm handoff after a fail-safe return (issue #50).
@@ -615,7 +655,8 @@ public final class InputCapture: @unchecked Sendable {
             in: display.frame,
             at: currentPosition,
             threshold: edgeThreshold)
-        CGWarpMouseCursorPosition(hold)
+        let result = CGWarpMouseCursorPosition(hold)
+        logPointerWarp(operation: "restore", target: hold, result: result)
         postSyntheticMove(at: hold)
         // Don't re-trigger the edge switch from the pointer sitting on the
         // edge: park detection behind both the short cooldown and the
@@ -638,6 +679,140 @@ public final class InputCapture: @unchecked Sendable {
                                   mouseCursorPosition: point,
                                   mouseButton: .left) else { return }
         event.post(tap: .cghidEventTap)
+        if cursorVisibilityDiagnosticsEnabled {
+            Diagnostics.log("pointer synthetic-move target=\(Self.format(point)) \(cursorDiagnosticContext())")
+        }
+    }
+
+    // MARK: - Native cursor investigation diagnostics
+
+    private func hideCursor() {
+        guard !isCursorHidden else {
+            if cursorVisibilityDiagnosticsEnabled {
+                Diagnostics.log("cursor hide skipped already-hidden \(cursorDiagnosticContextLocked())")
+            }
+            return
+        }
+        let previous = isCursorHidden
+        isCursorHidden = true
+        let context = cursorDiagnosticContextLocked()
+        if cursorVisibilityDiagnosticsEnabled {
+            Diagnostics.log("cursor hide call from=\(previous) to=\(isCursorHidden) \(context)")
+        }
+        let result = cursorVisibility.hideCursor()
+        if cursorVisibilityDiagnosticsEnabled {
+            Diagnostics.log("cursor hide return result=CGError(\(result.rawValue)) from=\(previous) to=\(isCursorHidden) \(context)")
+            logCurrentSystemCursor(operation: "after-hide", context: context)
+        }
+    }
+
+    private func showCursor() {
+        guard isCursorHidden else {
+            if cursorVisibilityDiagnosticsEnabled {
+                Diagnostics.log("cursor show skipped already-visible \(cursorDiagnosticContextLocked())")
+            }
+            return
+        }
+        let previous = isCursorHidden
+        isCursorHidden = false
+        let context = cursorDiagnosticContextLocked()
+        if cursorVisibilityDiagnosticsEnabled {
+            Diagnostics.log("cursor show call from=\(previous) to=\(isCursorHidden) \(context)")
+        }
+        let result = cursorVisibility.showCursor()
+        if cursorVisibilityDiagnosticsEnabled {
+            Diagnostics.log("cursor show return result=CGError(\(result.rawValue)) from=\(previous) to=\(isCursorHidden) \(context)")
+            logCurrentSystemCursor(operation: "after-show", context: context)
+        }
+    }
+
+    private func logPointerWarp(operation: String, target: CGPoint, result: CGError) {
+        guard cursorVisibilityDiagnosticsEnabled else { return }
+        Diagnostics.log(
+            "pointer warp operation=\(operation) target=\(Self.format(target)) "
+                + "result=CGError(\(result.rawValue)) \(cursorDiagnosticContext())"
+        )
+    }
+
+    private func cursorDiagnosticContext() -> String {
+        stateLock.withLock { cursorDiagnosticContextLocked() }
+    }
+
+    /// Called while stateLock is held by suppression entry/release.
+    private func cursorDiagnosticContextLocked() -> String {
+        let hostDisplayID = currentEventDisplay.map { String($0.displayID) } ?? "none"
+        let configuredDisplayIDs = androidEdgeByDisplay.keys.sorted().map(String.init).joined(separator: ",")
+        let configuredEdge = currentEventDisplay
+            .flatMap { androidEdgeByDisplay[$0.displayID] }
+            .map(\.rawValue) ?? "none"
+        return "pointer=\(Self.format(currentPosition)) hostDisplayID=\(hostDisplayID) "
+            + "configuredDisplayIDs=[\(configuredDisplayIDs)] configuredEdge=\(configuredEdge)"
+    }
+
+    private func logInvestigationEnvironment() {
+        guard cursorVisibilityDiagnosticsEnabled else { return }
+        let displays = NSScreen.screens.compactMap { screen -> String? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            let frame = screen.frame
+            return "id=\(number.uint32Value),frame=\(Self.format(frame)),scale=\(screen.backingScaleFactor)"
+        }.joined(separator: ";")
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
+        Diagnostics.log(
+            "cursor investigation environment os=\(ProcessInfo.processInfo.operatingSystemVersionString) "
+                + "accessibility=\(AXIsProcessTrusted()) displays=\(displays) "
+                + "frontmostBundle=\(frontmost) ampersandActive=\(NSRunningApplication.current.isActive)"
+        )
+        logCurrentSystemCursor(operation: "environment", context: cursorDiagnosticContext())
+    }
+
+    private func logCurrentSystemCursor(operation: String, context: String) {
+        guard cursorVisibilityDiagnosticsEnabled else { return }
+        if Thread.isMainThread {
+            Self.logCursorIdentityOnMain(operation: operation, context: context)
+        } else {
+            DispatchQueue.main.async {
+                Self.logCursorIdentityOnMain(operation: operation, context: context)
+            }
+        }
+    }
+
+    private static func logCursorIdentityOnMain(operation: String, context: String) {
+        let appCursor = NSCursor.current
+        let systemCursor = NSCursor.currentSystem
+        let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
+        Diagnostics.log(
+            "cursor identity operation=\(operation) \(context) "
+                + "appCurrent={\(cursorSignature(appCursor))} "
+                + "systemCurrent={\(cursorSignature(systemCursor))} "
+                + "frontmostBundle=\(frontmost) ampersandActive=\(NSRunningApplication.current.isActive)"
+        )
+    }
+
+    private static func cursorSignature(_ cursor: NSCursor?) -> String {
+        guard let cursor else { return "none" }
+        let image = cursor.image
+        let bytes = image.tiffRepresentation ?? Data()
+        var hash: UInt64 = 14695981039346656037
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return "size=\(Int(image.size.width))x\(Int(image.size.height)) "
+            + "hotspot=\(Int(cursor.hotSpot.x)),\(Int(cursor.hotSpot.y)) "
+            + "tiffBytes=\(bytes.count) fnv1a=\(String(hash, radix: 16))"
+    }
+
+    private static func format(_ point: CGPoint) -> String {
+        "(\(String(format: "%.1f", Double(point.x))),\(String(format: "%.1f", Double(point.y))))"
+    }
+
+    private static func format(_ rect: CGRect) -> String {
+        "(x=\(String(format: "%.1f", Double(rect.origin.x))),"
+            + "y=\(String(format: "%.1f", Double(rect.origin.y))),"
+            + "w=\(String(format: "%.1f", Double(rect.size.width))),"
+            + "h=\(String(format: "%.1f", Double(rect.size.height))))"
     }
 
     // MARK: - Fail-safe watchdog
