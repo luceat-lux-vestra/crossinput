@@ -12,6 +12,8 @@ import Diagnostics
 /// Enable with `CROSSINPUT_DIAG_CURSOR_RECOVERY=1` on a diagnostic build.
 @MainActor
 final class CursorRecoveryDiagnostics {
+    static let shared = CursorRecoveryDiagnostics()
+
     private struct Snapshot {
         let capturedAt: CFTimeInterval
         let appActive: Bool
@@ -43,12 +45,15 @@ final class CursorRecoveryDiagnostics {
     private var latestPointerSnapshot: Snapshot?
     private var clickSequence: UInt64 = 0
 
+    private init() {}
+
     func start() {
         guard enabled, localMonitor == nil, globalMonitor == nil else { return }
 
         Diagnostics.log("cursor-recovery diagnostics enabled")
         installApplicationObservers()
         installWorkspaceObservers()
+        installMenuObservers()
         installEventMonitors()
 
         latestPointerSnapshot = captureSnapshot()
@@ -81,6 +86,24 @@ final class CursorRecoveryDiagnostics {
                 center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
                     Task { @MainActor [weak self] in
                         self?.recordNotification("workspace", name: note.name.rawValue)
+                    }
+                }
+            )
+        }
+    }
+
+    private func installMenuObservers() {
+        let center = NotificationCenter.default
+        for name in [
+            NSMenu.didBeginTrackingNotification,
+            NSMenu.didEndTrackingNotification,
+            NSMenu.willSendActionNotification,
+            NSMenu.didSendActionNotification,
+        ] {
+            notificationObservers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                    Task { @MainActor [weak self] in
+                        self?.recordNotification("menu", name: note.name.rawValue)
                     }
                 }
             )
@@ -182,7 +205,7 @@ final class CursorRecoveryDiagnostics {
         let runningApplication = NSWorkspace.shared.frontmostApplication
 
         return Snapshot(
-            capturedAt: CACurrentMediaTime(),
+            capturedAt: CFAbsoluteTimeGetCurrent(),
             appActive: NSApp.isActive,
             frontmostPID: runningApplication?.processIdentifier,
             frontmostBundleID: runningApplication?.bundleIdentifier ?? "none",
