@@ -1,11 +1,20 @@
 import XCTest
+import CoreGraphics
 @testable import App
 @testable import Delivery
 @testable import Diagnostics
 import AndroidBridge
 import Protocol
 import EdgeSwitch
-import InputCapture
+@testable import InputCapture
+
+private final class TestEventBox: @unchecked Sendable {
+    let event: CGEvent
+
+    init(_ event: CGEvent) {
+        self.event = event
+    }
+}
 
 @MainActor
 final class InputSenderTests: XCTestCase {
@@ -1267,6 +1276,177 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(machine.state, .remoteActive)
         XCTAssertEqual(usableSessionConfirmationCount(), 2,
                        "genuine B delivery still arms B's exactly-once marker")
+    }
+
+    /// A capture callback can already be running when a normal return is
+    /// applied. Its ownership generation must be the one observed when the
+    /// event entered suppression, not whichever generation happens to be
+    /// current when the callback finally emits it.
+    func testCapturedPointerBeforeReturnCannotEnterNextRemoteEpoch() async {
+        let enteredEmission = DispatchSemaphore(value: 0)
+        let continueEmission = DispatchSemaphore(value: 0)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedEventEmission: {
+                enteredEmission.signal()
+                _ = continueEmission.wait(timeout: .now() + 2)
+            }
+        )
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: sender,
+                                                   capture: capture,
+                                                   switchMachine: machine)
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        let staleEvent = TestEventBox(CGEvent(mouseEventSource: nil,
+                                              mouseType: .mouseMoved,
+                                              mouseCursorPosition: .zero,
+                                              mouseButton: .left)!)
+        staleEvent.event.setIntegerValueField(.mouseEventDeltaX, value: -100)
+        let eventFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = capture.handleForTesting(type: .mouseMoved, event: staleEvent.event)
+            eventFinished.signal()
+        }
+        XCTAssertEqual(enteredEmission.wait(timeout: .now() + 1), .success)
+
+        // End remote epoch A while its capture callback is paused.
+        machine.forceReturn(reason: .boundaryCrossed)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+
+        // Begin remote epoch B before the old callback resumes. The stale
+        // event must retain epoch A's generation and be rejected by the
+        // controller, rather than being forwarded to B.
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+        machine.pointerMoved(dx: 5, dy: 0) // consume B's first-move exemption
+
+        continueEmission.signal()
+        XCTAssertEqual(eventFinished.wait(timeout: .now() + 1), .success)
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(session.requestCount, 0,
+                       "a capture event admitted in epoch A must not reach epoch B")
+        XCTAssertEqual(machine.state, .remoteActive,
+                       "stale A movement must not mutate B ownership")
+        _ = controller
+    }
+
+    /// The same stale-capture boundary applies to keyboard events. A key-up
+    /// without a preceding key-down avoids creating a legitimate cleanup frame
+    /// during the return, so any delivered frame is necessarily stale input.
+    func testCapturedKeyboardBeforeReturnCannotEnterNextRemoteEpoch() async {
+        let enteredEmission = DispatchSemaphore(value: 0)
+        let continueEmission = DispatchSemaphore(value: 0)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedEventEmission: {
+                enteredEmission.signal()
+                _ = continueEmission.wait(timeout: .now() + 2)
+            }
+        )
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: sender,
+                                                   capture: capture,
+                                                   switchMachine: machine)
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        let staleEvent = TestEventBox(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)!)
+        let eventFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = capture.handleForTesting(type: .keyUp, event: staleEvent.event)
+            eventFinished.signal()
+        }
+        XCTAssertEqual(enteredEmission.wait(timeout: .now() + 1), .success)
+
+        machine.forceReturn(reason: .boundaryCrossed)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        continueEmission.signal()
+        XCTAssertEqual(eventFinished.wait(timeout: .now() + 1), .success)
+        sender.waitForDrain()
+
+        XCTAssertEqual(session.requestCount, 0,
+                       "a stale key event must not be sent after re-entry")
+        _ = controller
+    }
+
+    /// Normal return and repeated handoff cycles must leave newly generated
+    /// events on macOS. `handleForTesting` returns the original event only when
+    /// InputCapture is no longer suppressing it.
+    func testRepeatedReturnCyclesLeaveNewMouseAndKeyboardInputLocal() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(sender: sender,
+                                                   capture: capture,
+                                                   switchMachine: machine)
+
+        machine.activate()
+        for _ in 0..<5 {
+            machine.pointerAtEdge(.right)
+            machine.flushCallbacks()
+            await settleMainActor()
+            XCTAssertEqual(machine.state, .remoteActive)
+            XCTAssertTrue(capture.isSuppressed)
+
+            machine.forceReturn(reason: .boundaryCrossed)
+            machine.flushCallbacks()
+            await settleMainActor()
+            XCTAssertEqual(machine.state, .localActive)
+            XCTAssertFalse(capture.isSuppressed)
+
+            let mouse = CGEvent(mouseEventSource: nil,
+                                mouseType: .mouseMoved,
+                                mouseCursorPosition: .zero,
+                                mouseButton: .left)!
+            let key = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)!
+            XCTAssertNotNil(capture.handleForTesting(type: .mouseMoved, event: mouse))
+            XCTAssertNotNil(capture.handleForTesting(type: .keyUp, event: key))
+        }
+        sender.waitForDrain()
+        XCTAssertEqual(session.requestCount, 0,
+                       "new input after each completed return stays on macOS")
+        _ = controller
     }
 
     private final class ResultBox<Value>: @unchecked Sendable {

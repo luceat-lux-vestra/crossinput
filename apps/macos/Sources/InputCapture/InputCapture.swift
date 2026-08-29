@@ -197,6 +197,10 @@ public final class InputCapture: @unchecked Sendable {
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
     private let pointerRestoreOverride: (() -> Void)?
+    /// Test-only barrier used to deterministically exercise a lifecycle
+    /// boundary after an event has been admitted as suppressed but before it
+    /// is handed to the capture callback.
+    private let beforeSuppressedEventEmission: (@Sendable () -> Void)?
 
     /// Monotonically increasing counter identifying the current suppression session.
     /// Incremented on each suppress() call. Passed to onSuppressionReleased so
@@ -220,6 +224,10 @@ public final class InputCapture: @unchecked Sendable {
     /// timeout, disconnect) every stuck key is sent UP so the device never
     /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
     private var keysDown: Set<Int> = []
+    /// The suppression generation that owns `keysDown`. Held-key bookkeeping
+    /// must not let a delayed callback from an older remote epoch mutate the
+    /// next epoch's cleanup state.
+    private var keysDownGeneration: UInt64?
 
     public convenience init(
         externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
@@ -238,7 +246,8 @@ public final class InputCapture: @unchecked Sendable {
         externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
         pointerRestoreOverride: (() -> Void)? = nil,
-        suppressionTimeoutOverride: TimeInterval? = nil
+        suppressionTimeoutOverride: TimeInterval? = nil,
+        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
@@ -247,6 +256,7 @@ public final class InputCapture: @unchecked Sendable {
         )
         self.pointerRestoreOverride = pointerRestoreOverride
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
+        self.beforeSuppressedEventEmission = beforeSuppressedEventEmission
     }
 
     // MARK: - Lifecycle
@@ -328,17 +338,30 @@ public final class InputCapture: @unchecked Sendable {
             guard !isSuppressing else { return nil }
             isSuppressing = true
             suppressionGeneration &+= 1
+            keysDown.removeAll()
+            keysDownGeneration = suppressionGeneration
             return suppressionGeneration
         }
         guard let generation else { return nil }
-        startWatchdog()
+        startWatchdog(for: generation)
         Diagnostics.log("suppression started generation=\(generation)")
         return generation
     }
 
     /// Returns to listening mode immediately (fail-safe path).
     public func release(reason: SuppressionReleaseReason = .normalReturn) {
+        release(reason: reason, expectedGeneration: nil)
+    }
+
+    /// Releases only the suppression session that admitted the callback. This
+    /// prevents a stale watchdog, external-control probe, or emergency event
+    /// from releasing a newer suppression generation after re-entry.
+    private func release(reason: SuppressionReleaseReason, expectedGeneration: UInt64?) {
         let (wasSuppressing, generation) = stateLock.withLock {
+            if let expectedGeneration,
+               (!isSuppressing || suppressionGeneration != expectedGeneration) {
+                return (false, suppressionGeneration)
+            }
             let was = isSuppressing
             let gen = suppressionGeneration
             isSuppressing = false
@@ -350,7 +373,7 @@ public final class InputCapture: @unchecked Sendable {
             Diagnostics.log(
                 "suppression released generation=\(generation) reason=\(reason.rawValue)"
             )
-            flushStuckKeys()
+            flushStuckKeys(for: generation)
             if reason == .externalControl {
                 // External control owns the pointer position. Do not warp it
                 // back to the edge or center; the triggering event is returned
@@ -392,6 +415,14 @@ public final class InputCapture: @unchecked Sendable {
     // MARK: - Event handling (capture thread)
 
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Capture the ownership epoch once for this event. Reading
+        // `isSuppressing` and then reading `suppressionGeneration` later lets
+        // a callback that began in epoch A be relabelled as epoch B after a
+        // return and re-entry. The controller would then forward stale input
+        // to the new remote epoch.
+        let suppressedGeneration = stateLock.withLock {
+            isSuppressing ? suppressionGeneration : nil
+        }
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -399,10 +430,13 @@ public final class InputCapture: @unchecked Sendable {
         default:
             // Source resolution is unnecessary on the hot path while local
             // control is active, unless the opt-in characterization probe is on.
-            if suppressionIsActive || sourceDiagnostics.isEnabled {
+            if suppressedGeneration != nil || sourceDiagnostics.isEnabled {
                 let source = externalControlSource(for: event)
                 sourceDiagnostics.record(eventType: type, source: source)
-                if takeOverForExternalControlIfNeeded(source: source) {
+                if takeOverForExternalControlIfNeeded(
+                    source: source,
+                    suppressionGeneration: suppressedGeneration
+                ) {
                     // Returning the original event is essential: the first remote
                     // move/click/key event must reach macOS, not just later events.
                     return Unmanaged.passUnretained(event)
@@ -413,38 +447,41 @@ public final class InputCapture: @unchecked Sendable {
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
-            if suppressionIsActive {
+            if let suppressedGeneration {
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
-                emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)))
-                holdPointerAtEdge()
+                beforeSuppressedEventEmission?()
+                emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)), generation: suppressedGeneration)
+                holdPointerAtEdge(generation: suppressedGeneration)
                 return nil // consume: pointer held at the edge
             }
             detectEdge()
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            if suppressionIsActive {
+            if let suppressedGeneration {
                 let button = Self.buttonIndex(for: type)
                 let down: Bool
                 switch type {
                 case .leftMouseDown, .rightMouseDown, .otherMouseDown: down = true
                 default: down = false
                 }
-                emitPointerEvent(PointerEvent(.button(button: button, down: down)))
+                beforeSuppressedEventEmission?()
+                emitPointerEvent(PointerEvent(.button(button: button, down: down)), generation: suppressedGeneration)
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .scrollWheel:
-            if suppressionIsActive {
+            if let suppressedGeneration {
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
                 let horizontal = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
-                emitPointerEvent(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)))
+                beforeSuppressedEventEmission?()
+                emitPointerEvent(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)), generation: suppressedGeneration)
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .keyDown, .keyUp, .flagsChanged:
-            return handleKeyboard(event: event, type: type)
+            return handleKeyboard(event: event, type: type, suppressionGeneration: suppressedGeneration)
         default:
             return Unmanaged.passUnretained(event)
         }
@@ -470,14 +507,15 @@ public final class InputCapture: @unchecked Sendable {
     /// registered Carbon hot keys — the shortcut must not depend on events we
     /// swallow (issue #53). The Carbon registration remains a secondary path
     /// for windows where the tap itself is disabled or unsuppressed.
-    private func handleKeyboard(event: CGEvent, type: CGEventType) -> Unmanaged<CGEvent>? {
-        guard suppressionIsActive else { return Unmanaged.passUnretained(event) }
+    private func handleKeyboard(event: CGEvent, type: CGEventType,
+                                suppressionGeneration: UInt64?) -> Unmanaged<CGEvent>? {
+        guard let suppressionGeneration else { return Unmanaged.passUnretained(event) }
         let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .keyDown,
            virtualKey == Self.emergencyKeyCode,
            event.flags.intersection(Self.emergencyModifierMask) == Self.emergencyModifiers {
             Diagnostics.log("emergency shortcut detected")
-            release(reason: .emergencyHotkey)
+            release(reason: .emergencyHotkey, expectedGeneration: suppressionGeneration)
             return nil
         }
         let metaState = KeyCodeMapper.androidMetaState(ofFlags: event.flags)
@@ -491,15 +529,23 @@ public final class InputCapture: @unchecked Sendable {
             // Auto-repeat arrives as further .keyDown with the autorepeat bit set.
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             if let keyCode {
-                keysDown.insert(keyCode)
+                guard updateKeysDown(keyCode, action: 0, generation: suppressionGeneration) else {
+                    return nil
+                }
+                beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                              action: 0, repeatCount: isRepeat ? 1 : 0))
+                                              action: 0, repeatCount: isRepeat ? 1 : 0),
+                             generation: suppressionGeneration)
             }
         case .keyUp:
             if let keyCode {
-                keysDown.remove(keyCode)
+                guard updateKeysDown(keyCode, action: 1, generation: suppressionGeneration) else {
+                    return nil
+                }
+                beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                              action: 1, repeatCount: 0))
+                                              action: 1, repeatCount: 0),
+                             generation: suppressionGeneration)
             }
         default:
             break
@@ -507,8 +553,7 @@ public final class InputCapture: @unchecked Sendable {
         return nil // consume: system shortcuts must not fire on macOS
     }
 
-    private func emitPointerEvent(_ event: PointerEvent) {
-        let generation = stateLock.withLock { suppressionGeneration }
+    private func emitPointerEvent(_ event: PointerEvent, generation: UInt64) {
         if let onPointerEventWithGeneration {
             onPointerEventWithGeneration(event, generation)
         } else {
@@ -516,8 +561,7 @@ public final class InputCapture: @unchecked Sendable {
         }
     }
 
-    private func emitKeyEvent(_ event: CapturedKeyEvent) {
-        let generation = stateLock.withLock { suppressionGeneration }
+    private func emitKeyEvent(_ event: CapturedKeyEvent, generation: UInt64) {
         if let onKeyEventWithGeneration {
             onKeyEventWithGeneration(event, generation)
         } else {
@@ -527,9 +571,14 @@ public final class InputCapture: @unchecked Sendable {
 
     /// Fail-safe: if suppression ends (timeout/disconnect/emergency ⌘⇧X) while
     /// keys were still held, release them on the device so it never gets stuck.
-    private func flushStuckKeys() {
-        let held = keysDown
-        keysDown.removeAll()
+    private func flushStuckKeys(for generation: UInt64) {
+        let held: Set<Int> = stateLock.withLock {
+            guard keysDownGeneration == generation else { return [] }
+            let held = keysDown
+            keysDown.removeAll()
+            keysDownGeneration = nil
+            return held
+        }
         for keyCode in held {
             let release = CapturedKeyEvent(keyCode: keyCode, metaState: 0, action: 1, repeatCount: 0)
             if let onCleanupKeyEvent {
@@ -540,6 +589,26 @@ public final class InputCapture: @unchecked Sendable {
         }
         if !held.isEmpty {
             Diagnostics.log("flushed \(held.count) stuck key(s)")
+        }
+    }
+
+    /// Updates held-key state only when the event still belongs to the active
+    /// suppression generation. The check and mutation are one lock operation
+    /// so a return/re-entry cannot let an old callback contaminate cleanup for
+    /// the new remote epoch.
+    private func updateKeysDown(_ keyCode: Int, action: UInt8, generation: UInt64) -> Bool {
+        stateLock.withLock {
+            guard isSuppressing, suppressionGeneration == generation else { return false }
+            if keysDownGeneration != generation {
+                keysDown.removeAll()
+                keysDownGeneration = generation
+            }
+            if action == 0 {
+                keysDown.insert(keyCode)
+            } else {
+                keysDown.remove(keyCode)
+            }
+            return true
         }
     }
 
@@ -615,7 +684,11 @@ public final class InputCapture: @unchecked Sendable {
     /// display while suppressed (CGWarpMouseCursorPosition posts no events,
     /// so there is no feedback loop). Keeps the cursor visually at the edge
     /// instead of drifting with the deltas forwarded to Android.
-    private func holdPointerAtEdge() {
+    private func holdPointerAtEdge(generation: UInt64) {
+        // A return may complete while the capture callback is between
+        // forwarding and the pointer warp. Do not re-hold the pointer after
+        // local ownership has already been restored.
+        guard stateLock.withLock({ isSuppressing && suppressionGeneration == generation }) else { return }
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
         let hold = DisplayEdgeResolver.pointerPosition(
@@ -675,15 +748,23 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Fail-safe watchdog
 
-    private func startWatchdog() {
-        watchdog?.cancel()
+    private func startWatchdog(for generation: UInt64) {
         let timer = DispatchSource.makeTimerSource(queue: watchdogQueue)
         timer.schedule(deadline: .now() + suppressionTimeout, repeating: suppressionTimeout)
         timer.setEventHandler { [weak self] in
             // No pointer event for the timeout window: restore macOS control.
-            self?.release(reason: .watchdogTimeout)
+            self?.release(reason: .watchdogTimeout, expectedGeneration: generation)
         }
-        watchdog = timer
+        let shouldStart = stateLock.withLock {
+            guard isSuppressing, suppressionGeneration == generation else { return false }
+            watchdog?.cancel()
+            watchdog = timer
+            return true
+        }
+        guard shouldStart else {
+            timer.cancel()
+            return
+        }
         timer.resume()
     }
 
@@ -708,10 +789,6 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - External-control source resolution
 
-    private var suppressionIsActive: Bool {
-        stateLock.withLock { isSuppressing }
-    }
-
     private func externalControlSource(for event: CGEvent) -> ExternalControlEventSource {
         let rawProcessID = event.getIntegerValueField(.eventSourceUnixProcessID)
         guard rawProcessID > 0, rawProcessID <= Int64(Int32.max) else {
@@ -727,13 +804,21 @@ public final class InputCapture: @unchecked Sendable {
         )
     }
 
-    private func takeOverForExternalControlIfNeeded(source: ExternalControlEventSource) -> Bool {
-        guard suppressionIsActive,
+    private func takeOverForExternalControlIfNeeded(
+        source: ExternalControlEventSource,
+        suppressionGeneration: UInt64?
+    ) -> Bool {
+        guard let suppressionGeneration,
               let provider = externalControlClassifier.provider(for: source) else {
             return false
         }
+        guard stateLock.withLock({
+            isSuppressing && self.suppressionGeneration == suppressionGeneration
+        }) else {
+            return false
+        }
         Diagnostics.log("external-control takeover provider=\(provider)")
-        release(reason: .externalControl)
+        release(reason: .externalControl, expectedGeneration: suppressionGeneration)
         return true
     }
 

@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 @testable import InputCapture
 
 private final class ReleaseObservation: @unchecked Sendable {
@@ -13,6 +14,27 @@ private final class PointerStateObservation: @unchecked Sendable {
 private final class KeyCleanupObservation: @unchecked Sendable {
     var ordinary: [CapturedKeyEvent] = []
     var cleanup: [CapturedKeyEvent] = []
+}
+
+private final class GenerationObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64?
+
+    func set(_ generation: UInt64) {
+        lock.withLock { self.generation = generation }
+    }
+
+    var value: UInt64? {
+        lock.withLock { generation }
+    }
+}
+
+private final class TestEventBox: @unchecked Sendable {
+    let event: CGEvent
+
+    init(_ event: CGEvent) {
+        self.event = event
+    }
 }
 
 final class SuppressionLifecycleTests: XCTestCase {
@@ -111,5 +133,75 @@ final class SuppressionLifecycleTests: XCTestCase {
         capture.release(reason: .normalReturn)
 
         XCTAssertEqual(observation.restoreCount, 1)
+    }
+
+    /// A tap callback that began in suppression generation A must retain A's
+    /// identity even when return and a new suppression generation B complete
+    /// before the callback emits its event.
+    func testSuppressedEventRetainsGenerationAcrossReturnAndReentry() {
+        let enteredEmission = DispatchSemaphore(value: 0)
+        let continueEmission = DispatchSemaphore(value: 0)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedEventEmission: {
+                enteredEmission.signal()
+                _ = continueEmission.wait(timeout: .now() + 2)
+            }
+        )
+        let observedGeneration = GenerationObservation()
+        capture.onPointerEventWithGeneration = { _, generation in
+            observedGeneration.set(generation)
+        }
+
+        XCTAssertEqual(capture.suppress(), 1)
+        let event = TestEventBox(CGEvent(mouseEventSource: nil,
+                                         mouseType: .mouseMoved,
+                                         mouseCursorPosition: .zero,
+                                         mouseButton: .left)!)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = capture.handleForTesting(type: .mouseMoved, event: event.event)
+            finished.signal()
+        }
+
+        XCTAssertEqual(enteredEmission.wait(timeout: .now() + 1), .success)
+        capture.release()
+        XCTAssertEqual(capture.suppress(), 2)
+        continueEmission.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(observedGeneration.value, 1,
+                       "the event must not be relabelled with the re-entry generation")
+    }
+
+    func testSuppressedKeyboardEventRetainsGenerationAcrossReturnAndReentry() {
+        let enteredEmission = DispatchSemaphore(value: 0)
+        let continueEmission = DispatchSemaphore(value: 0)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedEventEmission: {
+                enteredEmission.signal()
+                _ = continueEmission.wait(timeout: .now() + 2)
+            }
+        )
+        let observedGeneration = GenerationObservation()
+        capture.onKeyEventWithGeneration = { _, generation in
+            observedGeneration.set(generation)
+        }
+
+        XCTAssertEqual(capture.suppress(), 1)
+        let event = TestEventBox(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false)!)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = capture.handleForTesting(type: .keyUp, event: event.event)
+            finished.signal()
+        }
+
+        XCTAssertEqual(enteredEmission.wait(timeout: .now() + 1), .success)
+        capture.release()
+        XCTAssertEqual(capture.suppress(), 2)
+        continueEmission.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(observedGeneration.value, 1,
+                       "the key event must not be relabelled with the re-entry generation")
     }
 }
