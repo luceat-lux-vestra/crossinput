@@ -32,10 +32,10 @@ Issues found during development and verification, with causes and fixes. Work in
 When Android owns input, a recognized external-control event requests local
 macOS control. CrossInput releases suppression, cleans up captured key/button
 state, skips the normal edge-return pointer warp, and passes the triggering
-event through to macOS. Cursor presentation remains owned by macOS. RustDesk
-is the initially verified provider; physical source characterization and
-takeover behavior must be confirmed on the target Mac before treating the
-provider as verified.
+event through to macOS. CrossInput does not explicitly manage host cursor
+visibility. RustDesk is the initially verified provider; physical source
+characterization and takeover behavior must be confirmed on the target Mac
+before treating the provider as verified.
 
 To opt in to metadata-only event-source diagnostics, set the environment before
 launching the app:
