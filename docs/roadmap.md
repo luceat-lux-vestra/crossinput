@@ -29,7 +29,8 @@ separate capability and may be bidirectional.
 - Reconnect, stale-session protection, bounded pointer/scroll delivery, and fail-safe input cleanup.
 - HELLO/capability negotiation before a candidate session is published for input delivery.
 - Display hot-plug/state reliability and remaining regression work (#17).
-- Explicit disable/disconnect UI lifecycle controls (#47).
+- Explicit disable/disconnect UI lifecycle controls (#47), with targeted
+  device acceptance still required before merge.
 - Remaining pointer-trap/release-stability evidence (#52, #68).
 - Helper packaging/deployment and distribution follow-up.
 - Verify keyboard behavior when selecting phone versus DeX while both displays are present (#92).

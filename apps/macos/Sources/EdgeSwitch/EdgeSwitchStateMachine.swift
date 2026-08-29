@@ -162,6 +162,13 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         queue.sync { entryEdgeStorage }
     }
 
+    /// Latest transition sequence, including transitions whose callbacks have
+    /// not completed yet. Lifecycle owners use this to invalidate delayed
+    /// callbacks when a control epoch is intentionally ended.
+    public var latestSequence: UInt64 {
+        queue.sync { sequenceCounter }
+    }
+
     // MARK: - Transition handler
     //
     // Registration is intended to happen before concurrent use begins
@@ -180,12 +187,15 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         }
     }
 
-    public func deactivate() {
+    @discardableResult
+    public func deactivate() -> StateTransition? {
+        var deactivation: StateTransition?
         run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
-            transition(to: .disabled, reason: .deactivated)
+            deactivation = transition(to: .disabled, reason: .deactivated)
         }
+        return deactivation
     }
 
     /// Pointer reached a screen edge while macOS is active.
@@ -347,15 +357,18 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         transition(to: .localActive, reason: reason)
     }
 
-    private func transition(to newState: HandoffState, reason: TransitionReason) {
-        guard newState != stateStorage else { return }
+    @discardableResult
+    private func transition(to newState: HandoffState, reason: TransitionReason) -> StateTransition? {
+        guard newState != stateStorage else { return nil }
         sequenceCounter &+= 1
-        pendingTransitions.append(StateTransition(
+        let transition = StateTransition(
             sequence: sequenceCounter,
             from: stateStorage,
             to: newState,
             reason: reason
-        ))
+        )
+        pendingTransitions.append(transition)
         stateStorage = newState
+        return transition
     }
 }

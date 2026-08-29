@@ -245,6 +245,21 @@ public final class InputSender: @unchecked Sendable {
         }
     }
 
+    /// Enqueues ordinary captured keyboard input behind a lifecycle predicate.
+    /// The predicate is evaluated on the keyboard queue immediately before
+    /// delivery, so a control epoch ending while this item is queued drops it
+    /// instead of forwarding it after Disable or Disconnect.
+    public func enqueueKey(
+        _ event: CapturedKeyEvent,
+        deliveryGuard: @escaping @Sendable () -> Bool
+    ) {
+        let sessionSnapshot = session.snapshot()
+        keyboardQueue.async { [weak self] in
+            guard let self, deliveryGuard() else { return }
+            self.deliverKey(event, snapshot: sessionSnapshot)
+        }
+    }
+
     /// Drops queued and in-flight semantic pointer work. A result from an
     /// invalidated in-flight request is reported as cancelled, never credited
     /// to the handoff position.
@@ -288,6 +303,17 @@ public final class InputSender: @unchecked Sendable {
             pointerQueue.async { [weak self] in
                 _ = self?.releaseHeldButtonsForCurrentSession()
             }
+        }
+    }
+
+    /// Flushes captured keyboard delivery and waits for all admitted pointer
+    /// work before synchronously releasing buttons accepted by the helper.
+    /// Lifecycle owners call this immediately before session teardown so the
+    /// cleanup remains inside the current session generation.
+    public func releaseRemotelyHeldButtonsAndWait() {
+        keyboardQueue.sync {}
+        pointerQueue.sync {
+            _ = releaseHeldButtonsForCurrentSession()
         }
     }
 

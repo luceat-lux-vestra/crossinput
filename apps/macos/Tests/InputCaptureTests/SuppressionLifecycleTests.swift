@@ -10,6 +10,11 @@ private final class PointerStateObservation: @unchecked Sendable {
     var resetCount = 0
 }
 
+private final class KeyCleanupObservation: @unchecked Sendable {
+    var ordinary: [CapturedKeyEvent] = []
+    var cleanup: [CapturedKeyEvent] = []
+}
+
 final class SuppressionLifecycleTests: XCTestCase {
     private func makeCapture(
         released: (@Sendable (SuppressionReleaseReason, UInt64) -> Void)? = nil,
@@ -55,6 +60,22 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertFalse(capture.isSuppressed)
         XCTAssertEqual(observation.releases.map(\.0), [.captureStopped])
         XCTAssertEqual(observation.releases.map(\.1), [1])
+    }
+
+    func testCleanupKeyReleaseUsesLifecycleCleanupCallback() {
+        let capture = makeCapture()
+        let observation = KeyCleanupObservation()
+        capture.onKeyEvent = { observation.ordinary.append($0) }
+        capture.onCleanupKeyEvent = { observation.cleanup.append($0) }
+
+        XCTAssertEqual(capture.suppress(), 1)
+        let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        XCTAssertNil(capture.handleForTesting(type: .keyDown, event: keyDown))
+        capture.release(reason: .captureStopped)
+
+        XCTAssertEqual(observation.ordinary.map(\.action), [0])
+        XCTAssertEqual(observation.cleanup.map(\.action), [1])
+        XCTAssertEqual(observation.cleanup.map(\.keyCode), [29])
     }
 
     func testSuppressionGenerationAdvancesAfterRelease() {
