@@ -42,7 +42,8 @@ final class CursorRecoveryDiagnostics {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var notificationObservers: [NSObjectProtocol] = []
-    private var latestPointerSnapshot: Snapshot?
+    private var menuBarSampler: Task<Void, Never>?
+    private var latestMenuBarSnapshot: Snapshot?
     private var clickSequence: UInt64 = 0
 
     private init() {}
@@ -55,8 +56,7 @@ final class CursorRecoveryDiagnostics {
         installWorkspaceObservers()
         installMenuObservers()
         installEventMonitors()
-
-        latestPointerSnapshot = captureSnapshot()
+        startMenuBarSampler()
         logSnapshot(reason: "startup")
     }
 
@@ -114,8 +114,10 @@ final class CursorRecoveryDiagnostics {
         // Local and global monitors are complementary: a global monitor sees
         // events delivered to other applications but not events delivered to
         // this app, while the local monitor observes this app's own events.
+        // Deliberately observe mouse-down only. Monitoring every mouseMoved
+        // would add work to a high-frequency path and could perturb the very
+        // stateful cursor behavior this experiment is trying to observe.
         let mask: NSEvent.EventTypeMask = [
-            .mouseMoved,
             .leftMouseDown,
             .rightMouseDown,
             .otherMouseDown,
@@ -123,39 +125,45 @@ final class CursorRecoveryDiagnostics {
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             Task { @MainActor [weak self] in
-                self?.record(event: event, source: "local")
+                self?.recordMouseDown(source: "local", button: self?.mouseButtonName(event.type) ?? "unknown")
             }
             return event
         }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             Task { @MainActor [weak self] in
-                self?.record(event: event, source: "global")
+                self?.recordMouseDown(source: "global", button: self?.mouseButtonName(event.type) ?? "unknown")
             }
         }
     }
 
-    private func record(event: NSEvent, source: String) {
-        switch event.type {
-        case .mouseMoved:
-            // Keep a rolling in-memory snapshot only. Logging every move would
-            // create noise and would violate the bounded metadata objective.
-            latestPointerSnapshot = captureSnapshot()
-
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            recordMouseDown(source: source, button: mouseButtonName(event.type))
-
-        default:
-            break
+    private func startMenuBarSampler() {
+        // Keep a recent pre-click sample only while the pointer is physically
+        // in the menu-bar strip. 100 ms is sufficient for a human click while
+        // keeping the observer bounded to 10 samples/s and completely outside
+        // the capture/event-tap path.
+        menuBarSampler = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled, let self else { return }
+                let point = NSEvent.mouseLocation
+                let screen = NSScreen.screens.first(where: { $0.frame.contains(point) })
+                if self.locationCategory(point: point, screen: screen) == "menuBarRegion" {
+                    self.latestMenuBarSnapshot = self.captureSnapshot(point: point, screen: screen)
+                } else {
+                    self.latestMenuBarSnapshot = nil
+                }
+            }
         }
     }
 
     private func recordMouseDown(source: String, button: String) {
+        let down = captureSnapshot()
+        guard down.locationCategory == "menuBarRegion" else { return }
+
         clickSequence &+= 1
         let sequence = clickSequence
-        let pre = latestPointerSnapshot
-        let down = captureSnapshot()
-        latestPointerSnapshot = down
+        let pre = latestMenuBarSnapshot
 
         let preValue: String
         if let pre {
@@ -175,9 +183,8 @@ final class CursorRecoveryDiagnostics {
         // work before public AppKit state is sampled again.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
-            guard let self else { return }
+            guard !Task.isCancelled, let self else { return }
             let post = self.captureSnapshot()
-            self.latestPointerSnapshot = post
             Diagnostics.log(
                 "cursor-recovery postClick seq=\(sequence) delay_ms=150 post=[\(post.logValue)]"
             )
@@ -186,7 +193,6 @@ final class CursorRecoveryDiagnostics {
 
     private func recordNotification(_ domain: String, name: String) {
         let snapshot = captureSnapshot()
-        latestPointerSnapshot = snapshot
         Diagnostics.log(
             "cursor-recovery notification domain=\(domain) name=\(name) "
                 + "state=[\(snapshot.logValue)]"
@@ -195,15 +201,17 @@ final class CursorRecoveryDiagnostics {
 
     private func logSnapshot(reason: String) {
         let snapshot = captureSnapshot()
-        latestPointerSnapshot = snapshot
         Diagnostics.log("cursor-recovery snapshot reason=\(reason) state=[\(snapshot.logValue)]")
     }
 
     private func captureSnapshot() -> Snapshot {
         let point = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(point) })
-        let runningApplication = NSWorkspace.shared.frontmostApplication
+        return captureSnapshot(point: point, screen: screen)
+    }
 
+    private func captureSnapshot(point: NSPoint, screen: NSScreen?) -> Snapshot {
+        let runningApplication = NSWorkspace.shared.frontmostApplication
         return Snapshot(
             capturedAt: CFAbsoluteTimeGetCurrent(),
             appActive: NSApp.isActive,
