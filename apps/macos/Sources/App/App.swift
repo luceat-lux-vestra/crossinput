@@ -14,6 +14,7 @@ struct Ampersand: App {
 
     init() {
         NSApplication.shared.setActivationPolicy(.accessory)
+        CursorRecoveryDiagnostics.shared.start()
     }
 
     var body: some Scene {
