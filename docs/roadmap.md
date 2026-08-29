@@ -1,112 +1,116 @@
 # CrossInput Roadmap
 
-> Updated: 2026-08-13. This roadmap distinguishes accepted decisions,
-> implemented behavior, and evidence status. A green local build is not an
-> on-device completion record.
+> Updated: 2026-08-29. This roadmap separates current product commitments,
+> near-term work, backlog features, and future extension points. A green local
+> build is not an on-device completion record.
 
 ## Product baseline
 
-CrossInput is a macOS-to-Android input bridge. The current path is:
+CrossInput is **DeX-first, Android-capable**.
 
 ```text
-macOS host → ADB/app_process → Android helper → selected display target
+macOS host → CXI v1 → ADB/app_process → one Android device → selected display
 ```
 
-UHID remains available for system-routed pointer use. The normal selected-target
-pointer path uses InputManager explicit-display routing because a UHID report
-cannot name an Android display.
-Samsung DeX is a supported target, not the product definition.
+Samsung DeX is the primary target/use case. The built-in phone display remains
+a supported secondary target through the existing display-selection model.
+Pointer and keyboard input are macOS → Android. Clipboard/data sharing is a
+separate capability and may be bidirectional.
 
-## Completed
+## Current / stabilization
 
-- Repository bootstrap, CI, Swift macOS app, Kotlin helper, and CXI v1.
-- CGEventTap pointer and keyboard capture with screen-edge handoff.
-- ADB wireless transport and app_process helper startup.
-- Android display discovery without a hardcoded display ID.
-- Historical UHID pointer and keyboard paths were verified on SM-G977N / Android 12;
-  the post-rebaseline semantic pointer path requires fresh evidence.
-- InputManager keyboard fallback verified on SM-G977N / Android 12; evidence is
-  recorded under `docs/research/inputmanager-keyboard-fallback-2026-08-10.md`.
-- macOS shortcut suppression, modifier cleanup, reconnect handling, stale
-  callback protection, and emergency release unit coverage.
-- v0.1.0 DMG packaging and release documentation.
+- Pointer movement, buttons, drag, vertical/horizontal scroll.
+- Keyboard delivery, modifier handling, shortcut suppression, and Korean input.
+- Screen-edge handoff and emergency return.
+- Android display discovery and selection without a hardcoded display ID.
+- DeX desktop pointer routing through system-routed UHID in AUTO mode.
+- Non-desktop pointer routing through InputManager explicit-display injection.
+- Session/control/target lifecycle separation.
+- Reconnect, stale-session protection, bounded pointer/scroll delivery, and fail-safe input cleanup.
+- HELLO/capability negotiation before a candidate session is published for input delivery.
+- Display hot-plug/state reliability and remaining regression work (#17).
+- Explicit disable/disconnect UI lifecycle controls (#47).
+- Remaining pointer-trap/release-stability evidence (#52, #68).
+- Helper packaging/deployment and distribution follow-up.
+- Verify keyboard behavior when selecting phone versus DeX while both displays are present (#92).
 
-## Current stabilization
-
-The architecture rebaseline is the current bounded work stream (issue #41):
-
-- Product definition and non-goals.
-- Session/control/target lifecycle boundary.
-- Remote target terminology and target-selection policy.
-- ADB transport versus CXI remote-session responsibility.
-- Android pointer/keyboard injection backend boundary.
-- CXI v1 leakage record and v2 design-only document.
-- Behavior-preserving regression coverage and real-device evidence.
-- HELLO capability negotiation rejects helpers that cannot return
-  `POINTER_RESULT` or guarantee explicit selected-target routing.
-- Pointer delivery uses a bounded queue that coalesces adjacent movement and
-  adjacent scroll events (ADR-0011); button transitions remain ordered
-  boundaries, and keyboard/safety events are not allowed to wait behind an
-  unbounded move backlog. Local queue saturation of coalescible kinds sheds
-  the event silently with no transport request; it is never reported as a
-  remote failure. One delivered batch yields exactly one handoff-accounting
-  operation.
-- Queued semantic input is tagged with a session generation so replacement
-  connections cannot receive stale pointer or keyboard work; late pointer
-  results cannot change handoff accounting.
-- A session is not published to input delivery until HELLO and capability
-  negotiation succeed; reconnect exhaustion fails closed and tears down the
-  candidate or live transport.
-- Initial target refresh waits for a confirmed `DISPLAY_CHANGED` response
-  before input capture is enabled.
-- External-control takeover returns locally without pointer warping, drains
-  queued key releases, and releases accepted held pointer buttons.
-- Android target selection, metric refresh, pointer injection, and shutdown
-  are serialized across helper threads.
-- The macOS menu preserves its per-host-display handoff-edge picker separately
-  from the normalized Android remote-target list.
-
-The implementation boundary was re-audited in PR #42 after rebasing onto the
-current main branch. The PR does not close #41 until the remaining
-screen-confirmed device matrix is attached. The real macOS event-tap/helper
-100-cycle record is attached, but target-screen visibility is still pending.
-
-The rebaseline does not include a protocol migration, reverse input, a new
-transport, an installed APK, or a broad repository rewrite.
+The current architecture remains the baseline. This roadmap does not authorize a repository rewrite, reverse input, a new transport implementation, or a CXI v2 migration as part of stabilization.
 
 ## Near term
 
-- Display hot-plug and display ON/OFF reliability across the full matrix in
-  issue #17.
-- Reconnect robustness after wireless debugging drop and sleep/wake.
-- Stale target selection and stale callback protection during refresh/reconnect.
-- Diagnostics that expose lifecycle metadata without input payloads.
-- Packaging/distribution follow-up: bundled ADB, Homebrew path, and notarization
-  when their ADR gates are satisfied.
-- Screen-confirmed edge-switch stability and remaining regression matrix.
-- Matching-helper packaging/deployment for the shipped Mac application; the
-  current runtime rejects an incompatible pre-existing helper instead.
+### Bidirectional text clipboard (#89)
 
-## Future
+Implement UTF-8 text clipboard synchronization between macOS and Android.
+Requirements include capability negotiation, echo-loop suppression, bounded
+payload handling, lifecycle/reconnect behavior, and metadata-only diagnostics.
+CXI v1 may be extended additively if that is the lowest-risk implementation;
+text clipboard does not require a v2 migration.
 
-- CXI v2 migration planning and compatibility strategy.
-- Alternate handoff mechanisms.
-- Alternate transports.
-- Bidirectional-input feasibility study.
-- Other host and target platforms.
+### Product/documentation consistency (#88)
 
-These items are not current commitments. Each requires an explicit scope and
-verification record before implementation.
+Complete the product-scope rebaseline so product, architecture, ADRs, protocol
+design, README, and issue backlog describe the same system.
+
+### Current stabilization backlog
+
+- Complete display hot-plug/state regression (#17).
+- Add explicit disable/disconnect UI controls (#47).
+- Complete pointer-trap escape-path verification (#52).
+- Accumulate ADR-0012 Level-3 physical stability evidence (#68).
+- Continue helper packaging/deployment and distribution work under the existing ADR gates.
+
+## Backlog
+
+- Bidirectional image clipboard synchronization (#90).
+- File clipboard / file transfer with explicit streaming/storage, cancellation, validation, and size-limit design (#91).
+- Additional clipboard MIME types only after text/image behavior is stable.
+
+These are planned backlog capabilities, not non-goals.
+
+## Future extension points
+
+### CXI v2 (#93)
+
+Keep and refine the v2 design as a future migration target. The design should
+cover normalized opaque targets, semantic pointer/keyboard events, capability
+negotiation, clipboard/data sharing, backend independence, and transport
+independence. Migration requires a separate go/no-go gate; v1 remains production
+until then.
+
+### Alternate local transports (#94)
+
+ADB/app_process remains the current/default transport. Future work may evaluate
+a second local transport such as direct LAN/TCP or another USB-local channel
+when a real product need exists. Preserve the transport seam, but do not build a
+transport plugin framework or second implementation speculatively.
+
+### Other platforms
+
+Windows/Linux hosts or broader target families may be evaluated later. They are
+not current commitments and must not drive current architecture without a
+concrete use case.
+
+## Explicit non-goals
+
+- Android → macOS pointer or keyboard input.
+- Android as a macOS pointing device.
+- Simultaneous control of multiple Android devices.
+- Cloud relay/account/server infrastructure.
+- Root or Knox bypass.
+- Broad repository rewrite solely for architectural purity.
 
 ## Accepted but not implemented
 
-Existing ADRs may contain accepted future decisions. Their status remains
-historical and is not silently rewritten by this roadmap. In particular:
+Existing ADRs remain historical records unless explicitly superseded. In particular:
 
 - ADR-0004's bundled-ADB release path remains pending.
 - ADR-0005's Homebrew tap remains pending.
 - ADR-0006's installed-app UHID experiment remains deferred.
-- ADR-0003's reverse-input path remains outside current scope.
+- ADR-0003 and ADR-0009 are superseded only in product-positioning statements by ADR-0013; their compatible historical and architecture decisions remain documented.
 
-See [architecture](architecture.md), [product definition](product.md), and the
-[ADR index](adr/).
+## Decision rule
+
+> Preserve existing proven behavior and justified seams. Add new abstraction or implementation complexity only for a current requirement or an explicitly approved extension with a concrete use case.
+
+See [product definition](product.md), [architecture](architecture.md), the
+[ADR index](adr/), and [CXI v2 design](../protocol/v2-design.md).
