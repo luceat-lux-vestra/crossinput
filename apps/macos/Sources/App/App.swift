@@ -59,13 +59,16 @@ extension AppModel {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var sessionState: SessionState = .disconnected
-    @Published var controlState: ControlState = .local
+    @Published var controlState: ControlState = .disabled
     @Published var targetState: TargetState = .unavailable
     @Published var targets: [RemoteTarget] = []
     @Published var selectedTarget: RemoteTarget?
     @Published private(set) var hostDisplays: [HostDisplayEdgeOption] = []
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
+    /// Invalidates an in-flight connect/reconnect action when the user starts
+    /// a newer action or intentionally disconnects.
+    private var connectionIntentGeneration: UInt64 = 0
 
     let sessionController: SessionController
     let handoffController: ControlHandoffController
@@ -116,15 +119,38 @@ final class AppModel: ObservableObject {
     // MARK: - Session
 
     func connectDefault() async {
-        await connect(serial: sessionController.firstConnectedSerial())
+        let discovered = sessionController.firstConnectedSerial()
+        if !discovered.isEmpty {
+            await connect(serial: discovered)
+            return
+        }
+
+        let remembered = serial.isEmpty ? lastSerial : serial
+        guard remembered.contains(":") else {
+            await connect(serial: remembered)
+            return
+        }
+
+        // Reuse the established session-layer wireless discovery/retry model
+        // when the remembered endpoint is not currently connected.
+        connectionIntentGeneration &+= 1
+        let intent = connectionIntentGeneration
+        sessionController.scheduleAutoReconnect(serial: remembered) { [weak self] serial in
+            guard let self, self.connectionIntentGeneration == intent else { return }
+            await self.connect(serial: serial)
+        }
     }
 
     func connect(serial: String) async {
+        connectionIntentGeneration &+= 1
+        let intent = connectionIntentGeneration
         self.serial = serial
         targetController.reset()
         do {
             _ = try await sessionController.connect(serial: serial)
+            guard intent == connectionIntentGeneration else { return }
             try await targetController.refresh()
+            guard intent == connectionIntentGeneration else { return }
             guard targetController.selectedTarget != nil else {
                 throw AppConnectionError.noAvailableTarget
             }
@@ -135,6 +161,7 @@ final class AppModel: ObservableObject {
                 return
             }
         } catch {
+            guard intent == connectionIntentGeneration else { return }
             Diagnostics.log("connect failed: \(error)")
             // A post-handshake failure (for example LIST_DISPLAYS or target
             // refresh rejection) must not leave a live helper behind while
@@ -145,6 +172,8 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        connectionIntentGeneration &+= 1
+        if !serial.isEmpty { lastSerial = serial }
         targetController.reset()
         // Release capture while the session reference is still valid so held
         // keys/buttons can be flushed to the helper before teardown.
@@ -192,8 +221,10 @@ final class AppModel: ObservableObject {
         handoffController.remoteUnavailable()
         Diagnostics.log("remote unavailable: \(reason)")
         lastSerial = serial
+        let intent = connectionIntentGeneration
         sessionController.scheduleAutoReconnect(serial: serial) { [weak self] serial in
-            await self?.connect(serial: serial)
+            guard let self, self.connectionIntentGeneration == intent else { return }
+            await self.connect(serial: serial)
         }
     }
 
@@ -205,6 +236,30 @@ final class AppModel: ObservableObject {
             return false
         }
         return true
+    }
+
+    func disableEdgeSwitch() {
+        handoffController.disableEdgeSwitch()
+    }
+
+    func toggleEdgeSwitch() {
+        if handoffController.isEdgeSwitchEnabled {
+            disableEdgeSwitch()
+        } else {
+            _ = enable()
+        }
+    }
+
+    /// Menu action derived from the published session/control projections. It
+    /// is absent until a ready session has a confirmed target selection.
+    var edgeSwitchActionTitle: String? {
+        guard sessionState == .ready,
+              case .selected = targetState else { return nil }
+        return controlState == .disabled ? "Enable Edge Switch" : "Disable Edge Switch"
+    }
+
+    var shouldShowDisconnect: Bool {
+        sessionState == .ready
     }
 
     func emergencyReturn() {
@@ -291,7 +346,13 @@ private struct AppMenu: View {
             if model.isDisconnected {
                 Button("Connect") { Task { await model.connectDefault() } }
                 Button("Grant Accessibility…") { model.openAccessibilitySettings() }
-                Button("Enable Edge Switch") { _ = model.enable() }
+            }
+
+            if let edgeSwitchAction = model.edgeSwitchActionTitle {
+                Button(edgeSwitchAction) { model.toggleEdgeSwitch() }
+            }
+            if model.shouldShowDisconnect {
+                Button("Disconnect") { model.disconnect() }
             }
 
             if !model.targets.isEmpty {
@@ -346,6 +407,7 @@ private struct AppMenu: View {
         case .connecting: return "Connecting…"
         case .ready:
             switch model.controlState {
+            case .disabled: return "Edge Switch disabled"
             case .local: return "Local"
             case let .arming(edge): return "Arming (\(edge.rawValue))"
             case .remote: return "Remote"

@@ -46,6 +46,32 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(collector.transitions.map(\.reason), [.activation])
     }
 
+    func testExplicitDisableCanBeRepeatedAndEnabledAgain() {
+        let machine = EdgeSwitchStateMachine()
+
+        machine.activate()
+        XCTAssertEqual(machine.state, .localActive)
+        machine.deactivate()
+        machine.deactivate()
+        XCTAssertEqual(machine.state, .disabled)
+
+        machine.activate()
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testLifecycleBoundaryInvalidatesQueuedOlderTransition() {
+        var gate = TransitionSequenceGate()
+        let staleRemote = StateTransition(sequence: 4, from: .edgeArmed,
+                                          to: .remoteActive, reason: .edgeEntered)
+        let deactivation = StateTransition(sequence: 5, from: .remoteActive,
+                                            to: .disabled, reason: .deactivated)
+
+        gate.advance(to: deactivation.sequence - 1)
+        XCTAssertFalse(gate.shouldApply(staleRemote))
+        XCTAssertTrue(gate.shouldApply(deactivation))
+        XCTAssertEqual(gate.lastAppliedSequence, deactivation.sequence)
+    }
+
     func testMovementIntoAndroidNeverReturnsOnAllEdges() {
         let movements: [(ScreenEdge, Int32, Int32)] = [
             (.left, -500, 0), (.right, 500, 0), (.top, 0, -500), (.bottom, 0, 500),

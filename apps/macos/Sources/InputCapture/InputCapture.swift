@@ -149,8 +149,18 @@ public final class InputCapture: @unchecked Sendable {
 
     /// Called on the capture thread for every pointer event while suppressed.
     public var onPointerEvent: (@Sendable (PointerEvent) -> Void)?
+    /// Generation-tagged pointer callback used by the lifecycle owner to
+    /// reject an event that was already in flight when suppression ended.
+    public var onPointerEventWithGeneration: (@Sendable (PointerEvent, UInt64) -> Void)?
     /// Called on the capture thread for every keyboard transition while suppressed.
     public var onKeyEvent: (@Sendable (CapturedKeyEvent) -> Void)?
+    /// Generation-tagged keyboard callback with the same stale-event contract
+    /// as `onPointerEventWithGeneration`.
+    public var onKeyEventWithGeneration: (@Sendable (CapturedKeyEvent, UInt64) -> Void)?
+    /// Called for synthesized key-up transitions during lifecycle cleanup.
+    /// This is separate from ordinary capture so a control-disable gate can
+    /// reject late user input while still releasing keys already held remotely.
+    public var onCleanupKeyEvent: (@Sendable (CapturedKeyEvent) -> Void)?
     /// Called synchronously during an external-control takeover so the helper
     /// can release any captured pointer buttons before the triggering event is
     /// passed through to macOS.
@@ -406,7 +416,7 @@ public final class InputCapture: @unchecked Sendable {
             if suppressionIsActive {
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
-                onPointerEvent?(PointerEvent(.move(dx: dx, dy: dy)))
+                emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)))
                 holdPointerAtEdge()
                 return nil // consume: pointer held at the edge
             }
@@ -421,7 +431,7 @@ public final class InputCapture: @unchecked Sendable {
                 case .leftMouseDown, .rightMouseDown, .otherMouseDown: down = true
                 default: down = false
                 }
-                onPointerEvent?(PointerEvent(.button(button: button, down: down)))
+                emitPointerEvent(PointerEvent(.button(button: button, down: down)))
                 return nil
             }
             return Unmanaged.passUnretained(event)
@@ -429,7 +439,7 @@ public final class InputCapture: @unchecked Sendable {
             if suppressionIsActive {
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
                 let horizontal = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
-                onPointerEvent?(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)))
+                emitPointerEvent(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)))
                 return nil
             }
             return Unmanaged.passUnretained(event)
@@ -482,19 +492,37 @@ public final class InputCapture: @unchecked Sendable {
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             if let keyCode {
                 keysDown.insert(keyCode)
-                onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                             action: 0, repeatCount: isRepeat ? 1 : 0))
+                emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
+                                              action: 0, repeatCount: isRepeat ? 1 : 0))
             }
         case .keyUp:
             if let keyCode {
                 keysDown.remove(keyCode)
-                onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                             action: 1, repeatCount: 0))
+                emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
+                                              action: 1, repeatCount: 0))
             }
         default:
             break
         }
         return nil // consume: system shortcuts must not fire on macOS
+    }
+
+    private func emitPointerEvent(_ event: PointerEvent) {
+        let generation = stateLock.withLock { suppressionGeneration }
+        if let onPointerEventWithGeneration {
+            onPointerEventWithGeneration(event, generation)
+        } else {
+            onPointerEvent?(event)
+        }
+    }
+
+    private func emitKeyEvent(_ event: CapturedKeyEvent) {
+        let generation = stateLock.withLock { suppressionGeneration }
+        if let onKeyEventWithGeneration {
+            onKeyEventWithGeneration(event, generation)
+        } else {
+            onKeyEvent?(event)
+        }
     }
 
     /// Fail-safe: if suppression ends (timeout/disconnect/emergency ⌘⇧X) while
@@ -503,7 +531,12 @@ public final class InputCapture: @unchecked Sendable {
         let held = keysDown
         keysDown.removeAll()
         for keyCode in held {
-            onKeyEvent?(CapturedKeyEvent(keyCode: keyCode, metaState: 0, action: 1, repeatCount: 0))
+            let release = CapturedKeyEvent(keyCode: keyCode, metaState: 0, action: 1, repeatCount: 0)
+            if let onCleanupKeyEvent {
+                onCleanupKeyEvent(release)
+            } else {
+                onKeyEvent?(release)
+            }
         }
         if !held.isEmpty {
             Diagnostics.log("flushed \(held.count) stuck key(s)")

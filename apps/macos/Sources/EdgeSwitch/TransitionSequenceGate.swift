@@ -23,4 +23,13 @@ public struct TransitionSequenceGate: Sendable {
         lastAppliedSequence = transition.sequence
         return true
     }
+
+    /// Invalidates callbacks already queued before a lifecycle boundary. A
+    /// later transition gets a higher sequence and remains eligible, while a
+    /// delayed callback from the previous control epoch cannot re-apply old
+    /// state after Disable or Disconnect.
+    public mutating func advance(to sequence: UInt64) {
+        guard sequence > lastAppliedSequence else { return }
+        lastAppliedSequence = sequence
+    }
 }

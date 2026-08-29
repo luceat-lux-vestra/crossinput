@@ -47,6 +47,15 @@ Text synchronization must prevent echo loops and must not log clipboard contents
 
 The bridge returns control to macOS on normal boundary return, emergency release, capture shutdown, timeout, helper failure, and unexpected disconnect. Remote failure must never permanently trap the local pointer or keyboard.
 
+When a session is ready, **Disable Edge Switch** stops remote-control
+acquisition and returns ownership to macOS without stopping the Android helper,
+transport, or selected display target. **Enable Edge Switch** can resume the
+existing session. **Disconnect** is different: it intentionally releases local
+control, cleans up held input, and tears down the current Android session. A
+later explicit Connect/reconnect uses the existing endpoint discovery,
+handshake, display refresh, and target-selection flow; the current product
+policy enables Edge Switch after a successful reconnect.
+
 ## Explicit non-goals
 
 The following are not part of the current product direction unless a new product decision explicitly supersedes this document:

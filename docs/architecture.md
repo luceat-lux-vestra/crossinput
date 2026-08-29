@@ -147,12 +147,22 @@ The three lifecycles are related but not interchangeable:
 | Lifecycle | States | Owns |
 |---|---|---|
 | Session | `disconnected`, `connecting`, `ready`, `reconnecting`, `failed` | ADB/helper process, CXI handshake, request correlation, disconnect/reconnect |
-| Control | `local`, `arming(edge)`, `remote`, `returning` | pointer ownership, edge handoff, emergency release, key/button cleanup |
+| Control | `disabled`, `local`, `arming(edge)`, `remote`, `returning` | edge-switch acquisition, pointer ownership, edge handoff, emergency release, key/button cleanup |
 | Target | `unavailable`, `available`, `selecting(targetId)`, `selected(targetId)` | discovery snapshot, confirmed selection validity, display disappearance/reappearance |
 
 Session failure must release local input without waiting for a target refresh. A
-target disappearing invalidates selection without implying that the ADB session
+A target disappearing invalidates selection without implying that the ADB session
 is dead. A control return does not disconnect the remote session.
+
+The `disabled` control state is an intentional user choice, not a disconnected
+session state. Disabling Edge Switch releases local ownership and held remote
+input while leaving the Session and Target lifecycles ready. Disconnect is an
+application-level orchestration boundary: it disables Control first, then asks
+SessionController to close the helper/session and invalidate its callbacks.
+The menu derives its Enable/Disable and Disconnect actions from these
+application projections rather than maintaining a second UI state. A later
+explicit Connect runs the established reconnect/target-refresh path and
+enables edge switching after a valid target is confirmed.
 
 The existing `EdgeSwitchStateMachine` remains the serialized safety mechanism
 for edge hysteresis, watchdogs, stale-transition rejection, and emergency

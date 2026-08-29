@@ -401,6 +401,49 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(sawLocal.value, 1)
     }
 
+    func testDisableEdgeSwitchReturnsControlAndKeepsSessionAlive() async {
+        let fixture = makeFixture()
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: fixture.sender,
+                                                   switchMachine: machine)
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(controller.capture.isSuppressed)
+
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: true)))
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        XCTAssertTrue(fixture.session.sentPointerButtonEvents.isEmpty)
+
+        controller.disableEdgeSwitch()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .disabled)
+        XCTAssertFalse(controller.isEdgeSwitchEnabled)
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.1, false)
+        XCTAssertTrue(fixture.session.isConnected,
+                      "Disable must retain the active Android session")
+
+        // The disabled gate rejects both new edge acquisition and captured
+        // pointer delivery, while a repeated Disable remains a no-op.
+        controller.capture.onScreenEdge?(.right)
+        controller.capture.onPointerEvent?(PointerEvent(.button(button: 0, down: true)))
+        controller.disableEdgeSwitch()
+        fixture.sender.waitForDrain()
+        XCTAssertEqual(machine.state, .disabled)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.1, false)
+    }
+
     // MARK: Deterministic scroll coalescing matrix (ADR-0011)
 
     /// Each case parks the worker on a gated button boundary so the two

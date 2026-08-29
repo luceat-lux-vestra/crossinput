@@ -99,6 +99,41 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(unavailableReason, "helper session ended")
     }
 
+    func testIntentionalDisconnectClearsSessionWithoutRequestingRecovery() async throws {
+        let session = FakeSession(serial: "device")
+        let factory = SessionFactoryBox([session])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+        var unavailableReason: String?
+        controller.onUnavailable = { unavailableReason = $0 }
+
+        _ = try await controller.connect(serial: "device")
+        controller.disconnect()
+        session.triggerDisconnect()
+        await Task.yield()
+
+        XCTAssertEqual(controller.state, .disconnected)
+        XCTAssertNil(controller.reference.current())
+        XCTAssertEqual(session.shutdownCount, 1)
+        XCTAssertNil(unavailableReason,
+                     "intentional disconnect must not enter automatic recovery")
+    }
+
+    func testExplicitConnectAfterDisconnectRecreatesSession() async throws {
+        let first = FakeSession(serial: "first")
+        let second = FakeSession(serial: "second")
+        let factory = SessionFactoryBox([first, second])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+
+        _ = try await controller.connect(serial: "first")
+        controller.disconnect()
+        _ = try await controller.connect(serial: "second")
+
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertTrue(controller.reference.current() === second)
+        XCTAssertEqual(first.shutdownCount, 1)
+        XCTAssertTrue(second.isConnected)
+    }
+
     func testReplacedSessionEventIsIgnoredWhileCurrentSessionEventIsAccepted() async throws {
         let first = FakeSession(serial: "first")
         let second = FakeSession(serial: "second")
