@@ -19,25 +19,6 @@ public enum SuppressionReleaseReason: String, Sendable {
     case externalControl
 }
 
-/// The CoreGraphics cursor API is injectable so cursor hide/show lifecycle
-/// behavior can be tested without changing the host pointer in a test.
-protocol CursorVisibilityAPI {
-    func hideCursor() -> CGError
-    func showCursor() -> CGError
-}
-
-private struct CoreGraphicsCursorVisibility: CursorVisibilityAPI {
-    func hideCursor() -> CGError {
-        // The display argument is accepted for API compatibility but has no
-        // effect. Keep one stable argument and balance calls by count.
-        CGDisplayHideCursor(CGMainDisplayID())
-    }
-
-    func showCursor() -> CGError {
-        CGDisplayShowCursor(CGMainDisplayID())
-    }
-}
-
 /// A single pointer event captured from the system, ready to become a CXI message.
 public struct PointerEvent: Sendable {
     public enum Kind: Sendable, Equatable {
@@ -205,9 +186,7 @@ public final class InputCapture: @unchecked Sendable {
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
-    private let cursorVisibility: any CursorVisibilityAPI
     private let pointerRestoreOverride: (() -> Void)?
-    private let cursorVisibilityDiagnosticsEnabled: Bool
 
     /// Monotonically increasing counter identifying the current suppression session.
     /// Incremented on each suppress() call. Passed to onSuppressionReleased so
@@ -227,8 +206,6 @@ public final class InputCapture: @unchecked Sendable {
     /// crossing point re-trap into a dead remote session (issue #50).
     /// Guarded by stateLock.
     private var requireEdgeExit = false
-    /// Tracks whether cursor is currently hidden to prevent unbalanced hide/show.
-    private var isCursorHidden = false
     /// Android key codes currently down on the device; on release (fail-safe,
     /// timeout, disconnect) every stuck key is sent UP so the device never
     /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
@@ -241,17 +218,16 @@ public final class InputCapture: @unchecked Sendable {
         self.init(
             externalControlClassifier: externalControlClassifier,
             sourceIdentityResolver: sourceIdentityResolver,
-            cursorVisibility: CoreGraphicsCursorVisibility()
+            pointerRestoreOverride: nil,
+            suppressionTimeoutOverride: nil
         )
     }
 
-    /// Test-only injection point for cursor call-count and lifecycle tests.
+    /// Test-only injection point for pointer-restore and watchdog lifecycle tests.
     init(
         externalControlClassifier: ExternalControlEventClassifier = ExternalControlEventClassifier(),
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
-        cursorVisibility: any CursorVisibilityAPI,
         pointerRestoreOverride: (() -> Void)? = nil,
-        cursorVisibilityDiagnosticsEnabled: Bool? = nil,
         suppressionTimeoutOverride: TimeInterval? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
@@ -259,10 +235,7 @@ public final class InputCapture: @unchecked Sendable {
         self.sourceDiagnostics = ExternalControlSourceDiagnostics(
             enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
         )
-        self.cursorVisibility = cursorVisibility
         self.pointerRestoreOverride = pointerRestoreOverride
-        self.cursorVisibilityDiagnosticsEnabled = cursorVisibilityDiagnosticsEnabled
-            ?? (ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_CURSOR_VISIBILITY"] == "1")
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
     }
 
@@ -345,7 +318,6 @@ public final class InputCapture: @unchecked Sendable {
             guard !isSuppressing else { return nil }
             isSuppressing = true
             suppressionGeneration &+= 1
-            hideCursor()
             return suppressionGeneration
         }
         guard let generation else { return nil }
@@ -362,9 +334,6 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = false
             watchdog?.cancel()
             watchdog = nil
-            if was {
-                showCursor()
-            }
             return (was, gen)
         }
         if wasSuppressing {
@@ -406,16 +375,6 @@ public final class InputCapture: @unchecked Sendable {
                 androidEdgeByDisplay[displayID] = edge
             } else {
                 androidEdgeByDisplay.removeValue(forKey: displayID)
-            }
-        }
-    }
-
-    /// Test-only display mutation seam for proving cursor balancing does not
-    /// depend on the event display that happens to be current at release.
-    internal func setCurrentEventDisplayForTesting(_ displayID: CGDirectDisplayID?) {
-        stateLock.withLock {
-            currentEventDisplay = displayID.map {
-                DisplayEdgeConfiguration(displayID: $0, frame: .zero, configuredEdge: nil)
             }
         }
     }
@@ -679,44 +638,6 @@ public final class InputCapture: @unchecked Sendable {
                                   mouseCursorPosition: point,
                                   mouseButton: .left) else { return }
         event.post(tap: .cghidEventTap)
-    }
-
-    private func hideCursor() {
-        guard !isCursorHidden else { return }
-        let previous = isCursorHidden
-        isCursorHidden = true
-        let result = cursorVisibility.hideCursor()
-        logCursorVisibility(
-            operation: "hide",
-            result: result,
-            from: previous,
-            to: isCursorHidden
-        )
-    }
-
-    private func showCursor() {
-        guard isCursorHidden else { return }
-        let previous = isCursorHidden
-        isCursorHidden = false
-        let result = cursorVisibility.showCursor()
-        logCursorVisibility(
-            operation: "show",
-            result: result,
-            from: previous,
-            to: isCursorHidden
-        )
-    }
-
-    private func logCursorVisibility(
-        operation: String,
-        result: CGError,
-        from: Bool,
-        to: Bool
-    ) {
-        guard cursorVisibilityDiagnosticsEnabled else { return }
-        Diagnostics.log("cursor \(operation) requested")
-        Diagnostics.log("cursor \(operation) result=CGError(\(result.rawValue))")
-        Diagnostics.log("isCursorHidden transition \(from)->\(to)")
     }
 
     // MARK: - Fail-safe watchdog
