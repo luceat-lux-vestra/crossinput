@@ -33,5 +33,15 @@ final class AppModelMenuTests: XCTestCase {
         model.targetState = .unavailable
 
         XCTAssertNil(model.edgeSwitchActionTitle)
+        XCTAssertFalse(model.shouldShowDisconnect)
+    }
+
+    func testReadySessionKeepsDisconnectAvailableWithoutTargetSelection() {
+        let model = AppModel()
+        model.sessionState = .ready
+        model.targetState = .available
+
+        XCTAssertNil(model.edgeSwitchActionTitle)
+        XCTAssertTrue(model.shouldShowDisconnect)
     }
 }

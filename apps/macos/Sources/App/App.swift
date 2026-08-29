@@ -258,6 +258,10 @@ final class AppModel: ObservableObject {
         return controlState == .disabled ? "Enable Edge Switch" : "Disable Edge Switch"
     }
 
+    var shouldShowDisconnect: Bool {
+        sessionState == .ready
+    }
+
     func emergencyReturn() {
         handoffController.emergencyReturn()
     }
@@ -346,6 +350,8 @@ private struct AppMenu: View {
 
             if let edgeSwitchAction = model.edgeSwitchActionTitle {
                 Button(edgeSwitchAction) { model.toggleEdgeSwitch() }
+            }
+            if model.shouldShowDisconnect {
                 Button("Disconnect") { model.disconnect() }
             }
 
