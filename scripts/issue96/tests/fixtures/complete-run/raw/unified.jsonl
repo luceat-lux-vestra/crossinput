@@ -1,0 +1,2 @@
+{"category":"cursor","event_type":"log","message":"cursor tracking state queried","process":"WindowServer","subsystem":"com.apple.windowserver","timestamp_utc":"2026-08-30T10:05:01.000000Z"}
+{"category":"registration","event_type":"log","message":"service registration refreshed","process":"SystemUIServer","subsystem":"com.apple.systemuiserver","timestamp_utc":"2026-08-30T10:05:07.000000Z"}

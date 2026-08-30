@@ -1,0 +1,3 @@
+state = running
+program = /System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer
+menu_registration = stable

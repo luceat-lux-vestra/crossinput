@@ -1,0 +1,9 @@
+{
+  "macos_product_version": "26.6.2",
+  "run_id": "run-001",
+  "schema": 1,
+  "source_sha": "2fb0f88003192c973c2ab74bda71609c9b4ad203",
+  "started_at_utc": "2026-08-30T10:00:00.000000Z",
+  "started_epoch_ns": 1788084000000000000,
+  "state": "stopped"
+}

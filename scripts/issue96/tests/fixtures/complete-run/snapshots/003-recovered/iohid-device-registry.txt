@@ -1,0 +1,8 @@
+device physical-mouse
+"Transport" = "USB"
+"VendorID" = 1118
+"ProductID" = 2048
+"LocationID" = 0x12340000
+"PrimaryUsagePage" = 1
+"PrimaryUsage" = 2
+"Built-in" = No

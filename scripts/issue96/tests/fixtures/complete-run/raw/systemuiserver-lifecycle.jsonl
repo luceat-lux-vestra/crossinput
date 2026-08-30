@@ -1,0 +1,3 @@
+{"event":"present","epoch_ns":1788084000000000000,"monotonic_ns":0,"pid":111,"schema":1,"timestamp_utc":"2026-08-30T10:00:00.000000Z"}
+{"event":"exited","epoch_ns":1788084305000000000,"monotonic_ns":305000000000,"pid":111,"schema":1,"timestamp_utc":"2026-08-30T10:05:05.000000Z"}
+{"command":"/System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer","event":"launched","epoch_ns":1788084306000000000,"monotonic_ns":306000000000,"parent_pid":1,"pid":222,"schema":1,"timestamp_utc":"2026-08-30T10:05:06.000000Z"}
