@@ -14,6 +14,7 @@ private enum ProbeError: Error, CustomStringConvertible {
     case noMatchingDevice
     case ambiguousMatch(Int)
     case builtInDevice
+    case unsafeTransport(String)
     case seizeFailed(IOReturn)
 
     var description: String {
@@ -28,6 +29,8 @@ private enum ProbeError: Error, CustomStringConvertible {
             return "refusing ambiguous selection: \(count) devices matched"
         case .builtInDevice:
             return "refusing to seize a device reported as built-in"
+        case let .unsafeTransport(transport):
+            return "refusing transport not explicitly allowed for H0: \(transport)"
         case let .seizeFailed(result):
             return String(format: "IOHIDDeviceOpen(seize) failed: 0x%08x", UInt32(bitPattern: result))
         }
@@ -87,6 +90,13 @@ private func identity(_ device: IOHIDDevice) -> String {
     return "vendor=\(vendor.map(String.init) ?? "unknown") product=\(product.map(String.init) ?? "unknown") location=\(location.map(String.init) ?? "unknown") transport=\(transport) builtIn=\(builtIn.map(String.init) ?? "unknown") name=\(name)"
 }
 
+private func parseInteger(_ text: String) -> Int? {
+    if text.hasPrefix("0x") || text.hasPrefix("0X") {
+        return Int(text.dropFirst(2), radix: 16)
+    }
+    return Int(text, radix: 10)
+}
+
 private func parseSelector(_ arguments: [String]) throws -> Selector? {
     if arguments == ["--list"] { return nil }
     guard arguments.count == 6 else { throw ProbeError.usage }
@@ -96,7 +106,8 @@ private func parseSelector(_ arguments: [String]) throws -> Selector? {
         let key = arguments[index]
         guard index + 1 < arguments.count,
               ["--vendor", "--product", "--location"].contains(key),
-              let value = Int(arguments[index + 1], radix: arguments[index + 1].hasPrefix("0x") ? 16 : 10) else {
+              values[key] == nil,
+              let value = parseInteger(arguments[index + 1]) else {
             throw ProbeError.usage
         }
         values[key] = value
@@ -148,6 +159,11 @@ private func run() throws {
     // Fail closed. Candidate H must never take the built-in trackpad away from macOS.
     guard boolRegistryProperty(device, key: "Built-In" as CFString) != true else {
         throw ProbeError.builtInDevice
+    }
+    let transport = stringProperty(device, key: kIOHIDTransportKey as CFString) ?? "unknown"
+    let allowedTransports = Set(["USB", "Bluetooth", "Bluetooth Low Energy"])
+    guard allowedTransports.contains(transport) else {
+        throw ProbeError.unsafeTransport(transport)
     }
 
     print("selected \(identity(device))")
