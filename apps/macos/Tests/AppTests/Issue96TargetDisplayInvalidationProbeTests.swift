@@ -27,6 +27,79 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertNil(Issue96ProbeCommand.parse(""))
     }
 
+    func testEndpointExecutionInvokesOneValidHandlerExactlyOnce() async {
+        let invocations = InvocationCounter()
+        let response = await Issue96ProbeEndpointExecution.execute(line: "redraw\n") { line in
+            await invocations.record(line)
+            return "OK sequence=1 kind=redraw api_success=true\n"
+        }
+
+        XCTAssertEqual(response, "OK sequence=1 kind=redraw api_success=true\n")
+        let count = await invocations.count
+        let lines = await invocations.lines
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(lines, ["redraw\n"])
+    }
+
+    func testEndpointExecutionRejectsUnsupportedOrEmptyInputBeforeHandler() async {
+        let invocations = InvocationCounter()
+
+        for line in ["", "\n", "unsupported", "redraw extra"] {
+            let response = await Issue96ProbeEndpointExecution.execute(line: line) { value in
+                await invocations.record(value)
+                return "UNEXPECTED\n"
+            }
+
+            XCTAssertEqual(response, "ERROR reason=unsupported-command\n")
+        }
+
+        let count = await invocations.count
+        let lines = await invocations.lines
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(lines.isEmpty)
+    }
+
+    func testEndpointExecutionWaitsForDefinitiveResultWithoutExecutionTimeout() async {
+        let invocations = InvocationCounter()
+        let response = await Issue96ProbeEndpointExecution.execute(line: "tracking-area") { line in
+            await invocations.record(line)
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            return "OK sequence=2 kind=tracking-area api_success=true\n"
+        }
+
+        XCTAssertFalse(response.contains("command-timeout"))
+        XCTAssertEqual(response, "OK sequence=2 kind=tracking-area api_success=true\n")
+        let count = await invocations.count
+        XCTAssertEqual(count, 1)
+    }
+
+    func testEndpointInputBoundsRemainExplicitAndIndependentFromExecution() {
+        XCTAssertEqual(Issue96ProbeControlEndpoint.maximumInputBytes, 512)
+        XCTAssertEqual(Issue96ProbeControlEndpoint.inputReadTimeoutSeconds, 2)
+    }
+
+    func testEndpointStopRemovesOwnedSocketAndIsIdempotent() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("i96-\(UUID().uuidString).sock").path
+        let endpoint = Issue96ProbeControlEndpoint(path: path)
+        defer {
+            endpoint.stop()
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        do {
+            try endpoint.start { _ in "OK\n" }
+        } catch {
+            XCTFail("endpoint start failed: \(error)")
+            return
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+
+        endpoint.stop()
+        endpoint.stop()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+    }
+
     func testTargetSelectionRequiresExactlyOneConfiguredEdgeDisplay() {
         let none = Issue96TargetDisplaySelection.resolve(from: [display(11), display(42)])
         XCTAssertEqual(none, .noneConfigured)
@@ -121,5 +194,15 @@ private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations {
     func activationPositiveControl() -> Issue96ProbeOperationResult {
         calls.append(.activationControl)
         return .applied(api: "recording.activation-control")
+    }
+}
+
+private actor InvocationCounter {
+    private(set) var count = 0
+    private(set) var lines: [String] = []
+
+    func record(_ line: String) {
+        count += 1
+        lines.append(line)
     }
 }

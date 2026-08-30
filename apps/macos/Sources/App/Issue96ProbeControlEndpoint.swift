@@ -1,10 +1,26 @@
 import Darwin
 import Foundation
 
+/// Validates a line before handing it to the harness. Invalid input is
+/// rejected before any AppKit handler can run.
+enum Issue96ProbeEndpointExecution {
+    static func execute(
+        line: String,
+        handler: @escaping @Sendable (String) async -> String) async -> String {
+        guard Issue96ProbeCommand.parse(line) != nil else {
+            return "ERROR reason=unsupported-command\n"
+        }
+        return await handler(line)
+    }
+}
+
 /// Small, local-only, one-command-per-connection Unix-domain socket endpoint
 /// for the opt-in Issue #96 probe. It is deliberately not part of the
 /// production session/control protocol.
 final class Issue96ProbeControlEndpoint: @unchecked Sendable {
+    static let maximumInputBytes = 512
+    static let inputReadTimeoutSeconds = 2
+
     private let path: String
     private let stateLock = NSLock()
     private let connectionSlots = DispatchSemaphore(value: 4)
@@ -139,7 +155,7 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
             close(client)
         }
 
-        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        var timeout = timeval(tv_sec: Self.inputReadTimeoutSeconds, tv_usec: 0)
         withUnsafePointer(to: &timeout) { pointer in
             _ = setsockopt(
                 client,
@@ -151,8 +167,10 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
 
         var bytes: [UInt8] = []
         bytes.reserveCapacity(64)
-        while bytes.count < 512 {
-            var chunk = [UInt8](repeating: 0, count: min(128, 512 - bytes.count))
+        while bytes.count < Self.maximumInputBytes {
+            var chunk = [UInt8](
+                repeating: 0,
+                count: min(128, Self.maximumInputBytes - bytes.count))
             let count = chunk.withUnsafeMutableBytes { buffer in
                 read(client, buffer.baseAddress, buffer.count)
             }
@@ -167,10 +185,15 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
 
         let response = BlockingAsyncResult()
         Task.detached {
-            let value = await handler(line)
+            let value = await Issue96ProbeEndpointExecution.execute(line: line, handler: handler)
             response.set(value)
         }
-        let value = response.wait(timeout: 2) ?? "ERROR reason=command-timeout\n"
+        // Do not impose an execution timeout here. A timeout response would
+        // detach the operator-visible result from a task that could still
+        // execute the AppKit primitive later. The socket input read above is
+        // independently bounded; once a valid command is accepted, this
+        // worker waits for the definitive handler result.
+        let value = response.wait()
         write(value, to: client)
     }
 
@@ -201,12 +224,10 @@ private final class BlockingAsyncResult: @unchecked Sendable {
         semaphore.signal()
     }
 
-    func wait(timeout: Int) -> String? {
-        guard semaphore.wait(timeout: .now() + .seconds(timeout)) == .success else {
-            return nil
-        }
+    func wait() -> String {
+        semaphore.wait()
         lock.lock()
         defer { lock.unlock() }
-        return value
+        return value ?? "ERROR reason=execution-result-unavailable\n"
     }
 }
