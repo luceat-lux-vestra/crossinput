@@ -1,0 +1,13 @@
+{
+  "bundle_identifier": "com.crossinput.Ampersand",
+  "bundle_path": "/Applications/Ampersand.app",
+  "bundle_short_version": "0.1.0",
+  "bundle_version": "1",
+  "crossinput_build_identifier": "unknown",
+  "crossinput_source_sha": "unknown",
+  "executable_path": "/Applications/Ampersand.app/Contents/MacOS/Ampersand",
+  "pid": 400,
+  "process_name": "Ampersand",
+  "resolved": true,
+  "schema": 1
+}

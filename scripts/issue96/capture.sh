@@ -58,9 +58,10 @@ valid_run_path() {
 start_capture() {
     require_command python3
     [ -x /usr/bin/log ] || die "required command unavailable: /usr/bin/log"
+    require_command git
     require_command pgrep
     require_command ps
-    require_command swift
+    require_command swiftc
     require_command ioreg
     require_command launchctl
     require_command sw_vers
@@ -82,33 +83,71 @@ start_capture() {
     valid_run_id "$run_id" || die "invalid run id: $run_id"
     local run_dir="$RUNS_DIR/$run_id"
     [ ! -e "$run_dir" ] || die "run already exists: $run_dir"
-    mkdir -p "$run_dir/raw" "$run_dir/snapshots"
+    mkdir -p "$run_dir/raw" "$run_dir/snapshots" "$run_dir/bin"
 
-    python3 - "$run_dir/run.json" "$run_id" "$REPO_ROOT" <<'PY'
+    local compile_log="$run_dir/raw/helper-compile.log"
+    : >"$compile_log"
+    if ! swiftc -o "$run_dir/bin/state_snapshot" "$SCRIPT_DIR/state_snapshot.swift" >>"$compile_log" 2>&1; then
+        die "state_snapshot helper compilation failed; see $compile_log"
+    fi
+    if ! swiftc -o "$run_dir/bin/workspace_observer" "$SCRIPT_DIR/workspace_observer.swift" >>"$compile_log" 2>&1; then
+        die "workspace_observer helper compilation failed; see $compile_log"
+    fi
+    if ! swiftc -o "$run_dir/bin/crossinput_identity" "$SCRIPT_DIR/crossinput_identity.swift" >>"$compile_log" 2>&1; then
+        die "crossinput_identity helper compilation failed; see $compile_log"
+    fi
+
+    if ! "$run_dir/bin/crossinput_identity" >"$run_dir/crossinput-build-identity.json" 2>"$run_dir/raw/crossinput-identity.stderr"; then
+        die "no unambiguous running Ampersand/CrossInput application identity was found; see $run_dir/raw/crossinput-identity.stderr"
+    fi
+
+    python3 - "$run_dir/run.json" "$run_id" "$REPO_ROOT" "$run_dir/crossinput-build-identity.json" "$run_dir/bin" "${ISSUE96_INCLUDE_HIDUTIL:-0}" <<'PY'
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
 
-path, run_id, repo = sys.argv[1:]
+path, run_id, repo, identity_path, helper_dir, include_hidutil = sys.argv[1:]
 now = time.time_ns()
 stamp = dt.datetime.fromtimestamp(now / 1_000_000_000, dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 try:
-    source_sha = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+    harness_source_sha = subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+    harness_dirty = bool(subprocess.check_output(["git", "-C", repo, "status", "--porcelain"], text=True).strip())
 except (OSError, subprocess.CalledProcessError):
-    source_sha = "unknown"
+    harness_source_sha = "unknown"
+    harness_dirty = True
 try:
     macos = subprocess.check_output(["sw_vers", "-productVersion"], text=True).strip()
 except (OSError, subprocess.CalledProcessError):
     macos = "unknown"
+try:
+    with open(identity_path, encoding="utf-8") as fh:
+        crossinput_identity = json.load(fh)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"invalid CrossInput build identity metadata: {exc}")
+if not isinstance(crossinput_identity, dict) or crossinput_identity.get("resolved") is not True:
+    raise SystemExit("CrossInput build identity is unresolved")
+helpers = {}
+for name in ("state_snapshot", "workspace_observer"):
+    helper = os.path.join(helper_dir, name)
+    with open(helper, "rb") as fh:
+        helpers[name] = {
+            "path": os.path.relpath(helper, os.path.dirname(path)),
+            "sha256": hashlib.sha256(fh.read()).hexdigest(),
+        }
 data = {
-    "schema": 1,
+    "schema": 2,
     "run_id": run_id,
     "started_at_utc": stamp,
     "started_epoch_ns": now,
-    "source_sha": source_sha,
+    "harness_source_sha": harness_source_sha,
+    "harness_worktree_clean": not harness_dirty,
+    "crossinput_build_identity": crossinput_identity,
+    "evidence_mode": {"include_hidutil": include_hidutil == "1"},
+    "helpers": helpers,
     "macos_product_version": macos,
     "state": "starting",
 }
@@ -121,7 +160,7 @@ PY
     local lifecycle_pid=$!
     python3 "$SCRIPT_DIR/unified_capture.py" "$run_dir" >"$run_dir/raw/unified-capture.stdout" 2>"$run_dir/raw/unified-capture.stderr" &
     local unified_pid=$!
-    swift "$SCRIPT_DIR/workspace_observer.swift" >"$run_dir/raw/workspace-events.jsonl" 2>"$run_dir/raw/workspace-observer.stderr" &
+    "$run_dir/bin/workspace_observer" >"$run_dir/raw/workspace-events.jsonl" 2>"$run_dir/raw/workspace-observer.stderr" &
     local workspace_pid=$!
 
     sleep 0.4
@@ -161,7 +200,7 @@ validated_command_for_pid() {
     local pid="$1" command_line
     command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
     case "$command_line" in
-        *"lifecycle_monitor.py"*|*"unified_capture.py"*|*"workspace_observer.swift"*) return 0 ;;
+        *"lifecycle_monitor.py"*|*"unified_capture.py"*|*"workspace_observer"*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -180,10 +219,19 @@ stop_capture() {
         fi
     done
     : >"$run_dir/raw/capture-stop.log"
-    printf 'stop_requested_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')" >>"$run_dir/raw/capture-stop.log"
+    local stop_requested_utc
+    stop_requested_utc="$(date -u '+%Y-%m-%dT%H:%M:%S.%NZ')"
+    printf 'stop_requested_utc=%s\n' "$stop_requested_utc" >>"$run_dir/raw/capture-stop.log"
+    local initial_missing=0 term_failures=0
     for pid in "$LIFECYCLE_PID" "$UNIFIED_PID" "$WORKSPACE_PID"; do
         if is_pid_alive "$pid"; then
-            kill "$pid" 2>>"$run_dir/raw/capture-stop.log" || true
+            if kill "$pid" 2>>"$run_dir/raw/capture-stop.log"; then
+                :
+            else
+                term_failures=$((term_failures + 1))
+            fi
+        else
+            initial_missing=1
         fi
     done
 
@@ -196,7 +244,9 @@ stop_capture() {
         [ "$alive" -eq 0 ] && break
         sleep 0.2
     done
+    local forced_kill=0
     if [ "$alive" -ne 0 ]; then
+        forced_kill=1
         echo "term_timeout=true" >>"$run_dir/raw/capture-stop.log"
         for pid in "$LIFECYCLE_PID" "$UNIFIED_PID" "$WORKSPACE_PID"; do
             if is_pid_alive "$pid" && validated_command_for_pid "$pid"; then
@@ -204,15 +254,30 @@ stop_capture() {
             fi
         done
     fi
-    python3 - "$run_dir/run.json" <<'PY'
+    local remaining_pids=""
+    for pid in "$LIFECYCLE_PID" "$UNIFIED_PID" "$WORKSPACE_PID"; do
+        if is_pid_alive "$pid"; then
+            remaining_pids="${remaining_pids}${remaining_pids:+,}$pid"
+        fi
+    done
+    python3 - "$run_dir/run.json" "$stop_requested_utc" "$initial_missing" "$term_failures" "$forced_kill" "$remaining_pids" <<'PY'
 import datetime as dt
 import json
 import sys
-path = sys.argv[1]
+path, requested_at, initial_missing, term_failures, forced_kill, remaining_pids = sys.argv[1:]
 with open(path, encoding="utf-8") as fh:
     data = json.load(fh)
-data["state"] = "stopped"
+clean = (initial_missing == "0" and term_failures == "0" and forced_kill == "0" and not remaining_pids)
+data["state"] = "stopped" if not remaining_pids else "cleanup_incomplete"
 data["stopped_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+data["shutdown"] = {
+    "requested": True,
+    "requested_at_utc": requested_at,
+    "clean": clean,
+    "forced_kill": forced_kill == "1",
+    "term_timeout_seconds": 5,
+    "remaining_pids": [int(value) for value in remaining_pids.split(",") if value],
+}
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, indent=2, sort_keys=True)
     fh.write("\n")

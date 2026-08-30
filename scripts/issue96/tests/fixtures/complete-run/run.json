@@ -1,9 +1,45 @@
 {
+  "crossinput_build_identity": {
+    "bundle_identifier": "com.crossinput.Ampersand",
+    "bundle_path": "/Applications/Ampersand.app",
+    "bundle_short_version": "0.1.0",
+    "bundle_version": "1",
+    "crossinput_build_identifier": "unknown",
+    "crossinput_source_sha": "unknown",
+    "executable_path": "/Applications/Ampersand.app/Contents/MacOS/Ampersand",
+    "pid": 400,
+    "process_name": "Ampersand",
+    "resolved": true,
+    "schema": 1
+  },
+  "evidence_mode": {
+    "include_hidutil": false
+  },
+  "harness_source_sha": "2fb0f88003192c973c2ab74bda71609c9b4ad203",
+  "harness_worktree_clean": true,
+  "helpers": {
+    "state_snapshot": {
+      "path": "bin/state_snapshot",
+      "sha256": "fixture-state-helper"
+    },
+    "workspace_observer": {
+      "path": "bin/workspace_observer",
+      "sha256": "fixture-workspace-helper"
+    }
+  },
   "macos_product_version": "26.6.2",
   "run_id": "run-001",
-  "schema": 1,
-  "source_sha": "2fb0f88003192c973c2ab74bda71609c9b4ad203",
+  "schema": 2,
   "started_at_utc": "2026-08-30T10:00:00.000000Z",
   "started_epoch_ns": 1788084000000000000,
-  "state": "stopped"
+  "state": "stopped",
+  "shutdown": {
+    "clean": true,
+    "forced_kill": false,
+    "requested": true,
+    "requested_at_utc": "2026-08-30T10:06:00.000000Z",
+    "remaining_pids": [],
+    "term_timeout_seconds": 5
+  },
+  "stopped_at_utc": "2026-08-30T10:06:00.100000Z"
 }

@@ -44,6 +44,11 @@ class Issue96AnalyzerTests(unittest.TestCase):
         shutil.copytree(FIXTURE, destination)
         return destination
 
+    def rename_fixture_run(self, run: Path, run_id: str) -> None:
+        for path in run.rglob("*"):
+            if path.is_file():
+                path.write_text(path.read_text(encoding="utf-8").replace("run-001", run_id), encoding="utf-8")
+
     def test_timestamp_parsing_accepts_iso_and_compact_forms(self) -> None:
         self.assertAlmostEqual(
             analyze.parse_timestamp("2026-08-30T10:05:00.123456Z"),
@@ -109,6 +114,8 @@ class Issue96AnalyzerTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["restart"]["old_pid"], 111)
         self.assertEqual(result["restart"]["new_pid"], 222)
+        self.assertEqual(result["restart"]["broken_marker_pids"], [111])
+        self.assertEqual(result["restart"]["recovered_marker_pids"], [222])
         report = analyze.render_run_report(result)
         self.assertIn("does not prove that `SystemUIServer` owns", report)
         self.assertIn("rendered native cursor remains human-observed", report)
@@ -152,7 +159,8 @@ class Issue96AnalyzerTests(unittest.TestCase):
             lifecycle.write_text(lifecycle.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
             result = analyze.analyze_run(copied)
             self.assertEqual(result["status"], "INCOMPLETE")
-            self.assertIn("no SystemUIServer exit/new-PID", result["reasons"][0])
+            self.assertTrue(any("no marker-bound SystemUIServer exit/new-PID" in reason
+                                for reason in result["reasons"]))
 
     def test_repeated_run_intersection_promotes_only_recurring_delta(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -180,12 +188,236 @@ class Issue96AnalyzerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             copied = self.copy_fixture(Path(temporary), "run-002")
             data = json.loads((copied / "run.json").read_text(encoding="utf-8"))
-            data["source_sha"] = "different-source"
+            data["harness_source_sha"] = "different-source"
             (copied / "run.json").write_text(json.dumps(data), encoding="utf-8")
             second = analyze.analyze_run(copied)
         first = analyze.analyze_run(FIXTURE)
         with self.assertRaises(analyze.EvidenceError):
             analyze.compare_runs([first, second])
+
+    def assert_incomplete(self, run: Path, reason: str) -> dict[str, object]:
+        result = analyze.analyze_run(run)
+        self.assertEqual(result["status"], "INCOMPLETE")
+        self.assertTrue(any(reason in item for item in result["reasons"]), result["reasons"])
+        return result
+
+    def load_json(self, path: Path) -> object:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def write_json(self, path: Path, value: object) -> None:
+        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def test_restart_binding_rejects_unrelated_restart_before_broken(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            lifecycle = [
+                {"event": "present", "pid": 111, "timestamp_utc": "2026-08-30T10:00:00Z"},
+                {"event": "exited", "pid": 111, "timestamp_utc": "2026-08-30T10:04:55Z"},
+                {"event": "launched", "pid": 222, "timestamp_utc": "2026-08-30T10:04:56Z"},
+            ]
+            (copied / "raw/systemuiserver-lifecycle.jsonl").write_text(
+                "\n".join(json.dumps(item) for item in lifecycle) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "no marker-bound SystemUIServer exit/new-PID")
+
+    def test_restart_binding_rejects_old_pid_not_in_broken_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            lifecycle = copied / "raw/systemuiserver-lifecycle.jsonl"
+            records = [json.loads(line) for line in lifecycle.read_text(encoding="utf-8").splitlines()]
+            records[1]["pid"] = 999
+            lifecycle.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "exit PID does not match the BROKEN marker PID")
+
+    def test_restart_binding_rejects_new_pid_not_in_recovered_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            lifecycle = copied / "raw/systemuiserver-lifecycle.jsonl"
+            records = [json.loads(line) for line in lifecycle.read_text(encoding="utf-8").splitlines()]
+            records[2]["pid"] = 333
+            lifecycle.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "launch PID does not match the RECOVERED marker PID")
+
+    def test_restart_binding_rejects_same_only_marker_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            markers = copied / "markers.jsonl"
+            records = [json.loads(line) for line in markers.read_text(encoding="utf-8").splitlines()]
+            records[2]["systemuiserver_pids"] = [111]
+            markers.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "same only SystemUIServer PID")
+
+    def test_restart_binding_rejects_missing_marker_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            markers = copied / "markers.jsonl"
+            records = [json.loads(line) for line in markers.read_text(encoding="utf-8").splitlines()]
+            records[1]["systemuiserver_pids"] = []
+            markers.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "BROKEN marker has no usable SystemUIServer PID")
+
+    def test_restart_binding_rejects_multiple_ambiguous_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            markers = copied / "markers.jsonl"
+            marker_records = [json.loads(line) for line in markers.read_text(encoding="utf-8").splitlines()]
+            marker_records[1]["systemuiserver_pids"] = [111, 444]
+            marker_records[2]["systemuiserver_pids"] = [222, 555]
+            markers.write_text("\n".join(json.dumps(item) for item in marker_records) + "\n", encoding="utf-8")
+            lifecycle = copied / "raw/systemuiserver-lifecycle.jsonl"
+            records = [json.loads(line) for line in lifecycle.read_text(encoding="utf-8").splitlines()]
+            records.extend([
+                {"event": "exited", "pid": 444, "timestamp_utc": "2026-08-30T10:05:07Z"},
+                {"event": "launched", "pid": 555, "timestamp_utc": "2026-08-30T10:05:08Z"},
+            ])
+            lifecycle.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
+            self.assert_incomplete(copied, "multiple marker-bound SystemUIServer restart candidates")
+
+    def test_shutdown_contract_clean_stopped_run_is_allowed(self) -> None:
+        self.assertEqual(analyze.analyze_run(FIXTURE)["status"], "COMPLETE")
+
+    def test_shutdown_contract_rejects_running_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            data = self.load_json(copied / "run.json")
+            assert isinstance(data, dict)
+            data["state"] = "running"
+            self.write_json(copied / "run.json", data)
+            self.assert_incomplete(copied, "capture state is not stopped")
+
+    def test_shutdown_contract_rejects_missing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            data = self.load_json(copied / "run.json")
+            assert isinstance(data, dict)
+            del data["shutdown"]
+            self.write_json(copied / "run.json", data)
+            self.assert_incomplete(copied, "clean shutdown metadata is missing")
+
+    def test_shutdown_contract_rejects_forced_kill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            data = self.load_json(copied / "run.json")
+            assert isinstance(data, dict)
+            data["shutdown"]["forced_kill"] = True
+            data["shutdown"]["clean"] = False
+            self.write_json(copied / "run.json", data)
+            self.assert_incomplete(copied, "capture shutdown used forced cleanup")
+
+    def test_shutdown_contract_rejects_malformed_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            data = self.load_json(copied / "run.json")
+            assert isinstance(data, dict)
+            data["shutdown"] = "malformed"
+            self.write_json(copied / "run.json", data)
+            self.assert_incomplete(copied, "clean shutdown metadata is missing")
+
+    def test_evidence_contract_accepts_explicit_not_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            evidence = copied / "snapshots/002-broken/iohid-event-system-client.txt"
+            evidence.write_text('{"evidence":"not_available","reason":"not_exposed"}\n', encoding="utf-8")
+            meta_path = copied / "snapshots/002-broken/snapshot.meta.json"
+            meta = self.load_json(meta_path)
+            assert isinstance(meta, dict)
+            for command in meta["commands"]:
+                if command["name"] == "iohid_event_system_client":
+                    command["evidence"] = "not_available"
+            self.write_json(meta_path, meta)
+            self.assertEqual(analyze.analyze_run(copied)["status"], "COMPLETE")
+
+    def test_evidence_contract_rejects_zero_byte_required_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            (copied / "snapshots/002-broken/iohid-event-system.txt").write_text("", encoding="utf-8")
+            with self.assertRaises(analyze.EvidenceError):
+                analyze.analyze_run(copied)
+
+    def test_evidence_contract_rejects_malformed_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            evidence = copied / "snapshots/002-broken/iohid-event-system.txt"
+            evidence.write_text('{"evidence":"not_available"}\n', encoding="utf-8")
+            with self.assertRaises(analyze.EvidenceError):
+                analyze.analyze_run(copied)
+
+    def test_identity_contract_same_harness_and_app_identity_allows_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            self.rename_fixture_run(second, "run-002")
+            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertIn("STATUS: COMPLETE", report)
+
+    def test_identity_contract_different_app_build_blocks_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["crossinput_build_identity"]["bundle_version"] = "2"
+            self.write_json(second / "run.json", data)
+            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertIn("STATUS: INCOMPLETE", report)
+            self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_identity_contract_unknown_app_blocks_high_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["crossinput_build_identity"]["resolved"] = False
+            self.write_json(second / "run.json", data)
+            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertIn("STATUS: INCOMPLETE", report)
+            self.assertIn("compatible resolved CrossInput build identities", report)
+            self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_identity_contract_missing_app_metadata_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            data = self.load_json(copied / "run.json")
+            assert isinstance(data, dict)
+            del data["crossinput_build_identity"]
+            self.write_json(copied / "run.json", data)
+            self.assert_incomplete(copied, "CrossInput build identity is missing or unresolved")
+
+    def test_identity_contract_rejects_missing_identity_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            (copied / "crossinput-build-identity.json").unlink()
+            self.assert_incomplete(copied, "crossinput-build-identity.json is missing")
+
+    def test_comparison_rejects_different_evidence_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["evidence_mode"]["include_hidutil"] = True
+            self.write_json(second / "run.json", data)
+            for meta_path in second.glob("snapshots/*/snapshot.meta.json"):
+                meta = self.load_json(meta_path)
+                assert isinstance(meta, dict)
+                meta["evidence_mode"]["include_hidutil"] = True
+                self.write_json(meta_path, meta)
+            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertIn("STATUS: INCOMPLETE", report)
+            self.assertIn("matching evidence modes", report)
 
 
 if __name__ == "__main__":

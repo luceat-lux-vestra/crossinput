@@ -1,6 +1,6 @@
 # Issue #96 — SystemUIServer recovery investigation
 
-Status: READY_FOR_PHYSICAL_TEST
+Status: READY_FOR_REVIEW
 
 This document describes an investigation-only harness. It does not change
 CrossInput production behavior, install a cursor or input workaround, or
@@ -53,12 +53,21 @@ The bounded harness lives under `scripts/issue96/`:
 | `unified_capture.py` | Run a restricted `log stream` predicate and scrub selected records | No raw reports or input payloads written |
 | `workspace_observer.swift` | Observe selected public `NSWorkspace` notifications | No event monitor or focus change |
 | `state_snapshot.swift` | Read public CoreGraphics display, NSWorkspace, and accessibility state | No cursor API call |
+| `crossinput_identity.swift` | Resolve the running Ampersand bundle/process identity once at capture start | One-shot metadata lookup only |
 | `analyze.py` | Normalize, group, rank, and compare evidence | Offline transformation only |
 
-Each run contains `run.json`, `markers.jsonl`, `raw/`, and labeled snapshot
-directories. The default evidence root is outside the repository:
+Each run contains `run.json`, `crossinput-build-identity.json`,
+`markers.jsonl`, `raw/`, a run-scoped `bin/`, and labeled snapshot directories.
+The default evidence root is outside the repository:
 `~/Library/Logs/CrossInput/issue96`. Set `ISSUE96_RUNS_DIR` consistently for
 all commands if another local evidence root is preferred.
+
+`capture.sh start` compiles the three Swift helpers into that run's `bin/`
+directory before any HEALTHY marker can be recorded. It records helper hashes
+and the harness checkout SHA in `run.json`; the compiled helpers are never
+installed globally. They remain alongside the preserved run evidence for
+manual archival/cleanup after analysis, and no helper process is left after
+`capture.sh stop`.
 
 The selected unified log is retained as `raw/unified.jsonl`, but it is not a
 byte-for-byte dump of the system log. Only allowlisted metadata fields and a
@@ -112,10 +121,19 @@ manual command when needed:
   --output "$HOME/Library/Logs/CrossInput/issue96/issue96-comparison.md"
 ```
 
+`capture.sh start` fails unless exactly one running Ampersand application can
+be resolved through public `NSWorkspace` metadata. It records bundle ID,
+short version, bundle version, executable/bundle paths, process ID, and any
+embedded candidate/build identity that can be read without changing the app.
+An unavailable embedded source SHA is recorded as `unknown`; it is never
+replaced with the harness SHA.
+
 `capture.sh stop` validates the stored command lines before sending TERM and
 uses a five-second bounded cleanup. A validated capture process is KILLed only
-after that timeout, and the stop log records the forced cleanup. A stale active
-run marker is not silently overwritten.
+after that timeout, and the stop log plus `run.json.shutdown` record the forced
+cleanup. A run is complete only when `state` is `stopped`, shutdown was
+requested and clean, and `forced_kill` is false. A stale active-run marker is
+not silently overwritten.
 
 ## 5. Captured evidence sources
 
@@ -140,15 +158,37 @@ semantic report. Empty or malformed selected logs make analysis
 
 `lifecycle_monitor.py` records the initial SystemUIServer PID, each observed
 exit, and each new PID at 0.5-second intervals. It records only timestamp,
-PID timing anchor, parent PID, and executable command. PIDs are not treated as
-root-cause evidence; they delimit the restart interval.
+PID timing anchor, parent PID, and executable command. The analyzer accepts
+only one transition satisfying all of these bindings:
+
+```text
+BROKEN marker PID == observed old-PID exit
+BROKEN timestamp <= exit <= RECOVERED timestamp
+exit < new-PID launch <= RECOVERED timestamp
+RECOVERED marker PID == observed new-PID launch
+old PID != new PID
+```
+
+Unrelated pre-BROKEN restarts, marker PID mismatches, missing marker PIDs,
+same-only marker PIDs, and multiple candidate pairs are `INCOMPLETE`. PIDs are
+not treated as root-cause evidence; they delimit and authenticate the restart
+interval.
 
 ### IORegistry/HID
 
-`snapshot.sh` captures:
+`snapshot.sh` captures. Every command writes a manifest entry with `status`
+and an evidence state of `present` or `not_available`. A successful command
+that produces zero bytes is a failed contract, not a valid empty observation.
+For a public source that exposes no matching object, the command writes an
+explicit JSON sentinel such as `{"evidence":"not_available","reason":"..."}`.
+Malformed sentinels, empty required files, missing files, and manifest/file
+disagreement fail analysis closed.
+
+The sources are:
 
 - an opt-in `hidutil list` (never `hidutil dump`); by default its file records
-  `not_requested=true` to avoid creating an extra event-system client;
+  an explicit `not_available` sentinel to avoid creating an extra event-system
+  client;
 - allowlisted `ioreg` properties from `IOHIDDevice`, `IOHIDEventSystem`, and
   `IOHIDEventSystemClient`, and `IOHIDEventService`.
 
@@ -241,8 +281,11 @@ Snapshots are explicitly human-triggered and bounded.
 
 ## 8. Physical execution procedure
 
-1. Check out this exact investigation branch on the target Mac and verify the
-   `source_sha` in `run.json` after `capture.sh start`.
+1. Check out this exact investigation branch on the target Mac. Start the
+   actual Ampersand/CrossInput build that will be tested before capture; start
+   fails closed if its running bundle identity cannot be resolved. Verify
+   `harness_source_sha` and `crossinput_build_identity` in `run.json` after
+   `capture.sh start`.
 2. Confirm the normal CrossInput + Samsung DeX setup and that the directional
    cursor is visually HEALTHY.
 3. Start capture, mark HEALTHY, and take the healthy snapshot.
@@ -256,7 +299,8 @@ Snapshots are explicitly human-triggered and bounded.
    native directional cursor is visually HEALTHY, then mark RECOVERED and take
    the recovered snapshot.
 8. Stop capture and run the analyzer. Preserve the entire run directory,
-   including raw selected logs and error sidecars.
+   including raw selected logs, error sidecars, shutdown metadata, build
+   identity, and helper hashes.
 9. Repeat with `run-002` and `run-003` when the physical setup permits. Do not
    combine different application builds or unknown starting states in one
    run.
@@ -269,8 +313,11 @@ pixels or screen recordings through this harness.
 
 `analyze.py` fails closed on missing/malformed run metadata, duplicate or
 misordered markers, missing labeled snapshots, failed required snapshot
-commands, malformed JSONL, empty selected unified logs, missing required
-snapshot files, or an unobserved SystemUIServer exit/new-PID launch pair.
+commands, empty or malformed evidence, malformed JSONL, empty selected unified
+logs, missing required snapshot files, an unclean/unrecorded capture stop, an
+unresolved CrossInput identity, or an unobserved marker-bound SystemUIServer
+exit/new-PID launch pair. It does not treat the harness checkout SHA as the
+CrossInput build identity.
 
 For each snapshot it:
 
@@ -290,6 +337,13 @@ restart and `LOW` for a relevant message outside that interval. PID/process
 launch noise is `NOISE`. A multi-run exact normalized intersection is the only
 finding promoted to `HIGH`; even then it is a recurring candidate boundary,
 not ownership or root-cause proof.
+
+The comparison command computes only when every run is `COMPLETE`, all harness
+worktrees are known clean, the evidence modes match (including the opt-in
+`hidutil` flag), and the resolved CrossInput identities match on bundle ID,
+version/build, paths, and any known source/build identity. Unknown or
+different app identities cannot receive a `HIGH` recurring finding. A
+different harness SHA is rejected.
 
 The comparison command computes:
 
@@ -343,7 +397,9 @@ evidence and direct human observation:
 
 ```text
 Run: run-___
-Branch/source SHA: ___
+Branch: ___
+Harness source SHA: ___
+CrossInput build identity: ___
 Host macOS/build: ___
 Device/setup: ___
 
@@ -353,8 +409,20 @@ Human cursor observation:
 - RECOVERED after explicit SystemUIServer restart: ___
 
 Lifecycle anchor:
+- BROKEN marker PID: ___
 - old SystemUIServer PID / exit time: ___
+- RECOVERED marker PID: ___
 - new SystemUIServer PID / launch time: ___
+- restart binding: VALID / INCOMPLETE
+
+Capture shutdown:
+- state: stopped / ___
+- clean: true / false
+- forced_kill: false / true
+
+Evidence contract:
+- required sources: present / not_available / INCOMPLETE
+- evidence mode (`hidutil`): ___
 
 Semantic deltas:
 - HEALTHY -> BROKEN: ___

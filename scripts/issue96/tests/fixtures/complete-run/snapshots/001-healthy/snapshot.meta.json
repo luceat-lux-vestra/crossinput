@@ -1,14 +1,16 @@
 {
   "commands": [
-    {"name":"systemuiserver_process","required":true,"status":"ok"},
-    {"name":"hidutil_list","required":true,"status":"ok"},
-    {"name":"iohid_device_registry","required":true,"status":"ok"},
-    {"name":"iohid_event_system","required":true,"status":"ok"},
-    {"name":"iohid_event_system_client","required":true,"status":"ok"},
-    {"name":"iohid_event_service","required":true,"status":"ok"},
-    {"name":"display_workspace_accessibility","required":true,"status":"ok"},
-    {"name":"systemui_launchctl_state","required":true,"status":"ok"}
+    {"evidence":"present","name":"systemuiserver_process","required":true,"status":"ok"},
+    {"evidence":"present","name":"hidutil_list","required":false,"status":"ok"},
+    {"evidence":"present","name":"iohid_device_registry","required":true,"status":"ok"},
+    {"evidence":"present","name":"iohid_event_system","required":true,"status":"ok"},
+    {"evidence":"present","name":"iohid_event_system_client","required":true,"status":"ok"},
+    {"evidence":"present","name":"iohid_event_service","required":true,"status":"ok"},
+    {"evidence":"present","name":"display_workspace_accessibility","required":true,"status":"ok"},
+    {"evidence":"present","name":"systemui_launchctl_state","required":true,"status":"ok"}
   ],
+  "evidence_contract_schema": 1,
+  "evidence_mode": {"include_hidutil": false},
   "label":"healthy",
   "marker_timestamp_utc":"2026-08-30T10:00:01.000000Z",
   "run_id":"run-001",

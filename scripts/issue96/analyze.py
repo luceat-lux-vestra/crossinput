@@ -18,12 +18,11 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REQUIRED_MARKERS = ("healthy", "broken", "recovered")
 REQUIRED_SNAPSHOT_LABELS = REQUIRED_MARKERS
 EXPECTED_SNAPSHOT_FILES = {
     "systemuiserver-process.txt",
-    "hidutil-list.txt",
     "iohid-device-registry.txt",
     "iohid-event-system.txt",
     "iohid-event-system-client.txt",
@@ -31,9 +30,24 @@ EXPECTED_SNAPSHOT_FILES = {
     "display-workspace.json",
     "systemuiserver-service.txt",
 }
+OPTIONAL_SNAPSHOT_FILES = {"hidutil-list.txt", "ampersand-diag.filtered.log"}
+REQUIRED_SNAPSHOT_COMMANDS = {
+    "systemuiserver_process": "systemuiserver-process.txt",
+    "iohid_device_registry": "iohid-device-registry.txt",
+    "iohid_event_system": "iohid-event-system.txt",
+    "iohid_event_system_client": "iohid-event-system-client.txt",
+    "iohid_event_service": "iohid-event-service.txt",
+    "display_workspace_accessibility": "display-workspace.json",
+    "systemui_launchctl_state": "systemuiserver-service.txt",
+}
+OPTIONAL_SNAPSHOT_COMMANDS = {
+    "hidutil_list": "hidutil-list.txt",
+    "ampersand_metadata_diag": "ampersand-diag.filtered.log",
+}
 
 VOLATILE_KEYS = {
-    "timestamp", "timestamp_utc", "time", "date", "epoch_ns",
+    "timestamp", "timestamp_utc", "captured_at_utc", "captured_epoch_ns",
+    "marker_timestamp_utc", "time", "date", "epoch_ns",
     "monotonic_ns", "uptime", "elapsed", "duration", "pid", "ppid",
     "process_id", "processid", "parent_pid", "launch_time", "exit_time",
     "activity_identifier", "activityid", "transaction_identifier",
@@ -259,24 +273,170 @@ def load_lifecycle(run: dict[str, Any]) -> list[dict[str, Any]]:
     return values
 
 
-def find_restart(lifecycle: list[dict[str, Any]], markers: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+def marker_pids(marker: dict[str, Any], label: str) -> tuple[set[int], str | None]:
+    values = marker.get("systemuiserver_pids")
+    if not isinstance(values, list):
+        return set(), f"{label.upper()} marker has no usable SystemUIServer PID list"
+    pids = {value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 1}
+    if not pids:
+        return set(), f"{label.upper()} marker has no usable SystemUIServer PID"
+    if len(pids) != len(values):
+        return pids, f"{label.upper()} marker contains an unusable SystemUIServer PID value"
+    return pids, None
+
+
+def find_restart(lifecycle: list[dict[str, Any]], markers: dict[str, dict[str, Any]]) -> tuple[dict[str, Any] | None, list[str]]:
+    """Find exactly one restart bound to the BROKEN/RECOVERED marker PIDs.
+
+    A nearby restart is intentionally never used as a fallback. The marker
+    PID sets are the identity boundary for the physical recovery experiment.
+    """
+
     broken = markers["broken"]["_time"]
     recovered = markers["recovered"]["_time"]
-    exits = [item for item in lifecycle if item.get("event") == "exited"
-             and broken - 10 <= item["_time"] <= recovered]
-    for exited in exits:
-        launches = [item for item in lifecycle if item.get("event") == "launched"
-                    and exited["_time"] <= item["_time"] <= recovered
-                    and item.get("pid") != exited.get("pid")]
-        if launches:
-            launch = launches[0]
-            return {
-                "old_pid": exited.get("pid"),
-                "new_pid": launch.get("pid"),
-                "exit_time": exited["_time"],
-                "launch_time": launch["_time"],
-            }
-    return None
+    broken_pids, broken_issue = marker_pids(markers["broken"], "broken")
+    recovered_pids, recovered_issue = marker_pids(markers["recovered"], "recovered")
+    reasons = [issue for issue in (broken_issue, recovered_issue) if issue]
+    if broken_pids == recovered_pids and len(broken_pids) == 1:
+        reasons.append("BROKEN and RECOVERED record the same only SystemUIServer PID")
+    if reasons:
+        return None, reasons
+
+    interval_exits = [item for item in lifecycle
+                      if item.get("event") == "exited"
+                      and broken <= item["_time"] <= recovered]
+    interval_launches = [item for item in lifecycle
+                         if item.get("event") == "launched"
+                         and broken < item["_time"] <= recovered]
+    if any(not isinstance(item.get("pid"), int) or isinstance(item.get("pid"), bool)
+           or item["pid"] not in broken_pids for item in interval_exits):
+        reasons.append("observed SystemUIServer exit PID does not match the BROKEN marker PID (marker evidence conflict)")
+    if any(not isinstance(item.get("pid"), int) or isinstance(item.get("pid"), bool)
+           or item["pid"] not in recovered_pids for item in interval_launches):
+        reasons.append("observed SystemUIServer launch PID does not match the RECOVERED marker PID (marker evidence conflict)")
+    if reasons:
+        return None, reasons
+
+    exits = [item for item in lifecycle
+             if item.get("event") == "exited"
+             and isinstance(item.get("pid"), int)
+             and item["pid"] in broken_pids
+             and broken <= item["_time"] <= recovered]
+    launches = [item for item in lifecycle
+                if item.get("event") == "launched"
+                and isinstance(item.get("pid"), int)
+                and item["pid"] in recovered_pids
+                and item["_time"] <= recovered]
+    candidates = [
+        (exited, launched)
+        for exited in exits
+        for launched in launches
+        if launched["_time"] > exited["_time"]
+        and launched["pid"] != exited["pid"]
+    ]
+    if len(candidates) > 1:
+        return None, ["multiple marker-bound SystemUIServer restart candidates are ambiguous"]
+    if not candidates:
+        if interval_exits and any(item.get("pid") not in broken_pids for item in interval_exits):
+            reasons.append("observed SystemUIServer exit PID does not match the BROKEN marker PID")
+        if interval_launches and any(item.get("pid") not in recovered_pids for item in interval_launches):
+            reasons.append("observed SystemUIServer launch PID does not match the RECOVERED marker PID")
+        if not reasons:
+            reasons.append("no marker-bound SystemUIServer exit/new-PID launch pair observed between BROKEN and RECOVERED")
+        return None, reasons
+
+    exited, launched = candidates[0]
+    return {
+        "old_pid": exited["pid"],
+        "new_pid": launched["pid"],
+        "broken_marker_pids": sorted(broken_pids),
+        "recovered_marker_pids": sorted(recovered_pids),
+        "exit_time": exited["_time"],
+        "launch_time": launched["_time"],
+    }, []
+
+
+def validate_run_metadata(run: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if run.get("state") != "stopped":
+        reasons.append("capture state is not stopped")
+    shutdown = run.get("shutdown")
+    if not isinstance(shutdown, dict):
+        reasons.append("clean shutdown metadata is missing")
+    else:
+        if shutdown.get("requested") is not True:
+            reasons.append("shutdown metadata does not record a requested stop")
+        if shutdown.get("clean") is not True:
+            reasons.append("capture shutdown was not clean")
+        if shutdown.get("forced_kill") is not False:
+            reasons.append("capture shutdown used forced cleanup")
+        if shutdown.get("remaining_pids") != []:
+            reasons.append("shutdown metadata records remaining observer processes")
+        if not isinstance(shutdown.get("requested_at_utc"), str) or not shutdown.get("requested_at_utc"):
+            reasons.append("shutdown request timestamp is missing")
+    if not isinstance(run.get("stopped_at_utc"), str) or not run.get("stopped_at_utc"):
+        reasons.append("capture stop timestamp is missing")
+
+    if (not isinstance(run.get("harness_source_sha"), str)
+            or not run.get("harness_source_sha")
+            or run.get("harness_source_sha") == "unknown"):
+        reasons.append("harness_source_sha is missing")
+    if run.get("harness_worktree_clean") is not True:
+        reasons.append("harness worktree was not recorded clean")
+
+    identity = run.get("crossinput_build_identity")
+    required_identity = (
+        "bundle_identifier", "bundle_short_version", "bundle_version",
+        "bundle_path", "executable_path",
+    )
+    if not isinstance(identity, dict) or identity.get("resolved") is not True:
+        reasons.append("CrossInput build identity is missing or unresolved")
+    elif any(not isinstance(identity.get(key), str) or not identity.get(key) or identity.get(key) == "unknown"
+             for key in required_identity):
+        reasons.append("CrossInput build identity is missing a required field")
+    elif any(not isinstance(identity.get(key), str) or not identity.get(key)
+             for key in ("crossinput_source_sha", "crossinput_build_identifier")):
+        reasons.append("CrossInput build identity has a malformed optional identity field")
+    identity_path = run["_path"] / "crossinput-build-identity.json"
+    if not identity_path.is_file():
+        reasons.append("crossinput-build-identity.json is missing")
+    else:
+        try:
+            recorded_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            reasons.append("crossinput-build-identity.json is malformed")
+        else:
+            if recorded_identity != identity:
+                reasons.append("CrossInput build identity file disagrees with run metadata")
+
+    evidence_mode = run.get("evidence_mode")
+    if not isinstance(evidence_mode, dict) or not isinstance(evidence_mode.get("include_hidutil"), bool):
+        reasons.append("evidence mode metadata is missing")
+    return reasons
+
+
+def evidence_file_status(path: Path) -> str:
+    """Validate a snapshot evidence contract and return present/not_available."""
+
+    if not path.is_file():
+        raise EvidenceError(f"missing evidence file: {path}")
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        raise EvidenceError(f"empty evidence file: {path}")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        if re.search(r"not_available|[\"']?evidence[\"']?\s*[:=]", text, re.IGNORECASE):
+            raise EvidenceError(f"malformed not_available sentinel: {path}")
+        return "present"
+    if isinstance(value, dict) and "evidence" in value:
+        if (set(value) != {"evidence", "reason"}
+                or value.get("evidence") != "not_available"
+                or not isinstance(value.get("reason"), str)
+                or not value["reason"]):
+            raise EvidenceError(f"malformed not_available sentinel: {path}")
+        return "not_available"
+    return "present"
 
 
 def snapshot_paths(run: dict[str, Any], markers: dict[str, dict[str, Any]] | None = None) -> dict[str, Path]:
@@ -299,6 +459,10 @@ def snapshot_paths(run: dict[str, Any], markers: dict[str, dict[str, Any]] | Non
             continue
         if meta.get("run_id") != run["run_id"]:
             raise EvidenceError(f"snapshot run_id mismatch: {meta_path}")
+        if meta.get("evidence_contract_schema") != 1:
+            raise EvidenceError(f"unsupported evidence contract metadata: {meta_path}")
+        if meta.get("evidence_mode") != run.get("evidence_mode"):
+            raise EvidenceError(f"snapshot evidence mode mismatch: {meta_path}")
         if markers and meta.get("marker_timestamp_utc") != markers[label].get("timestamp_utc"):
             raise EvidenceError(f"snapshot {label} does not match its marker timestamp")
         if label in result:
@@ -306,13 +470,39 @@ def snapshot_paths(run: dict[str, Any], markers: dict[str, dict[str, Any]] | Non
         commands = meta.get("commands")
         if not isinstance(commands, list):
             raise EvidenceError(f"missing command manifest: {meta_path}")
-        failures = [item.get("name", "unknown") for item in commands
-                    if item.get("status") == "failed"]
-        if failures:
-            raise EvidenceError(f"snapshot {label} has failed command(s): {', '.join(failures)}")
+        command_map: dict[str, dict[str, Any]] = {}
+        for item in commands:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise EvidenceError(f"malformed command manifest: {meta_path}")
+            name = item["name"]
+            if name in command_map:
+                raise EvidenceError(f"duplicate command in manifest: {meta_path}: {name}")
+            command_map[name] = item
+        for name in REQUIRED_SNAPSHOT_COMMANDS:
+            item = command_map.get(name)
+            if not item:
+                raise EvidenceError(f"snapshot {label} is missing required command: {name}")
+            if item.get("required") is not True or item.get("status") != "ok":
+                raise EvidenceError(f"snapshot {label} has failed required command: {name}")
+            if item.get("evidence") not in {"present", "not_available"}:
+                raise EvidenceError(f"snapshot {label} has invalid evidence status for {name}")
         missing_files = sorted(name for name in EXPECTED_SNAPSHOT_FILES if not (path / name).is_file())
         if missing_files:
             raise EvidenceError(f"snapshot {label} is missing evidence file(s): {', '.join(missing_files)}")
+        for name, filename in {**REQUIRED_SNAPSHOT_COMMANDS, **OPTIONAL_SNAPSHOT_COMMANDS}.items():
+            evidence_path = path / filename
+            if not evidence_path.is_file() and name in OPTIONAL_SNAPSHOT_COMMANDS:
+                continue
+            evidence = evidence_file_status(evidence_path)
+            item = command_map.get(name)
+            if item is None:
+                if name in REQUIRED_SNAPSHOT_COMMANDS:
+                    raise EvidenceError(f"snapshot {label} is missing command metadata: {name}")
+                continue
+            if item.get("evidence") != evidence:
+                raise EvidenceError(f"snapshot {label} evidence metadata disagrees for {name}")
+            if evidence == "not_available" and item.get("status") != "ok":
+                raise EvidenceError(f"snapshot {label} not_available evidence is not successful for {name}")
         result[label] = path
     missing = [label for label in REQUIRED_SNAPSHOT_LABELS if label not in result]
     if missing:
@@ -328,6 +518,9 @@ def snapshot_records(snapshot: Path) -> dict[str, set[str]]:
     for path in sorted(snapshot.iterdir()):
         if not path.is_file() or path.name in ignored or path.name.endswith(".stderr"):
             continue
+        if path.name in EXPECTED_SNAPSHOT_FILES | OPTIONAL_SNAPSHOT_FILES:
+            if evidence_file_status(path) == "not_available":
+                continue
         if path.name.endswith(".json"):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -435,14 +628,14 @@ def analyze_run(run_path: str | Path) -> dict[str, Any]:
     lifecycle = load_lifecycle(run)
     snapshots = snapshot_paths(run, markers)
     snapshot_states = {label: snapshot_records(path) for label, path in snapshots.items()}
-    restart = find_restart(lifecycle, markers)
+    restart, restart_reasons = find_restart(lifecycle, markers)
     unified = load_unified(run)
     workspace = load_workspace_events(run)
     log_records = unified_window_records(unified, markers, restart)
     transition_delta = delta(snapshot_states["healthy"], snapshot_states["broken"])
     recovery_delta = delta(snapshot_states["broken"], snapshot_states["recovered"])
-    status = "COMPLETE" if restart else "INCOMPLETE"
-    reasons = [] if restart else ["no SystemUIServer exit/new-PID launch pair observed between BROKEN and RECOVERED"]
+    reasons = validate_run_metadata(run) + restart_reasons
+    status = "COMPLETE" if not reasons else "INCOMPLETE"
     if not log_records:
         status = "INCOMPLETE"
         reasons.append("no relevant unified-log records in the bounded analysis window")
@@ -490,7 +683,8 @@ def render_run_report(result: dict[str, Any]) -> str:
         "",
         f"STATUS: {result['status']}",
         f"RUN: `{run['run_id']}`",
-        f"SOURCE SHA: `{run.get('source_sha', 'unknown')}`",
+        f"HARNESS SOURCE SHA: `{run.get('harness_source_sha', 'unknown')}`",
+        f"CROSSINPUT BUILD IDENTITY: `{json.dumps(run.get('crossinput_build_identity', {}), sort_keys=True)}`",
         "",
         "The marker labels are operator assertions only. The analyzer does not classify the rendered cursor shape.",
         "",
@@ -502,11 +696,23 @@ def render_run_report(result: dict[str, Any]) -> str:
     lines.extend(["", "## SystemUIServer lifecycle anchor", ""])
     if restart:
         lines.append(
-            f"- observed old PID `{restart['old_pid']}` exit at `{_fmt_time(restart['exit_time'])}` "
-            f"and new PID `{restart['new_pid']}` launch at `{_fmt_time(restart['launch_time'])}`"
+            f"- BROKEN marker PID: `{restart['old_pid']}`"
         )
+        lines.append(
+            f"- observed exit: PID `{restart['old_pid']}` at `{_fmt_time(restart['exit_time'])}`"
+        )
+        lines.append(
+            f"- observed launch: PID `{restart['new_pid']}` at `{_fmt_time(restart['launch_time'])}`"
+        )
+        lines.append(
+            f"- RECOVERED marker PID: `{restart['new_pid']}`"
+        )
+        lines.append("- restart binding: `VALID`")
     else:
-        lines.append("- no complete exit/new-PID launch pair observed")
+        lines.append("- restart binding: `INVALID`")
+        for reason in result["reasons"]:
+            if "SystemUIServer" in reason or "restart" in reason:
+                lines.append(f"- {reason}")
     lines.extend([
         "",
         "## Semantic snapshot delta: HEALTHY -> BROKEN",
@@ -575,12 +781,40 @@ def compare_runs(results: list[dict[str, Any]]) -> str:
     ids = [item["run"]["run_id"] for item in results]
     if len(set(ids)) != len(ids):
         raise EvidenceError("comparison requires distinct run IDs")
-    source_shas = {item["run"].get("source_sha", "unknown") for item in results}
-    if len(source_shas) != 1:
-        raise EvidenceError("comparison requires matching source SHA values")
-    complete = all(item["status"] == "COMPLETE" for item in results)
+    harness_shas = {item["run"].get("harness_source_sha", "unknown") for item in results}
+    if len(harness_shas) != 1 or "unknown" in harness_shas:
+        raise EvidenceError("comparison requires matching known harness_source_sha values")
+    if any(item["run"].get("harness_worktree_clean") is not True for item in results):
+        raise EvidenceError("comparison requires clean harness worktrees")
+    evidence_modes = {
+        json.dumps(item["run"].get("evidence_mode"), sort_keys=True)
+        for item in results
+    }
+    if len(evidence_modes) != 1:
+        compatible = False
+        comparison_reason = "comparison requires matching evidence modes"
+    else:
+        identities = []
+        for item in results:
+            identity = item["run"].get("crossinput_build_identity")
+            if not isinstance(identity, dict) or identity.get("resolved") is not True:
+                identities.append(None)
+                continue
+            identity_keys = (
+                "bundle_identifier", "bundle_short_version", "bundle_version",
+                "bundle_path", "executable_path", "crossinput_source_sha",
+                "crossinput_build_identifier",
+            )
+            if any(not isinstance(identity.get(key), str) or not identity.get(key)
+                   for key in identity_keys):
+                identities.append(None)
+            else:
+                identities.append(tuple(identity[key] for key in identity_keys))
+        compatible = all(identity is not None for identity in identities) and len(set(identities)) == 1
+        comparison_reason = None if compatible else "comparison requires compatible resolved CrossInput build identities"
+    complete = all(item["status"] == "COMPLETE" for item in results) and compatible
     transitions = [meaningful_delta(item["recovery_delta"]) for item in results]
-    recurring = set.intersection(*transitions) if transitions else set()
+    recurring = set.intersection(*transitions) if transitions and complete else set()
     lines = [
         "# Issue #96 repeated-run semantic comparison",
         "",
@@ -610,6 +844,8 @@ def compare_runs(results: list[dict[str, Any]]) -> str:
         "- SystemUIServer restart recovering the cursor does not prove that SystemUIServer owns the defective state.",
         "- The rendered native cursor remains human-observed because public cursor APIs do not reliably expose the WindowServer-composited cursor shape.",
     ])
+    if comparison_reason:
+        lines.extend(["", "## Fail-closed comparison reason", "", f"- {comparison_reason}"])
     return "\n".join(lines) + "\n"
 
 

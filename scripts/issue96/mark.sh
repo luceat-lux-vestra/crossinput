@@ -50,7 +50,7 @@ entry = {
     "epoch_ns": epoch_ns,
     "monotonic_ns": time.monotonic_ns(),
     "systemuiserver_pids": systemui,
-    "source_sha": run.get("source_sha", "unknown"),
+    "harness_source_sha": run.get("harness_source_sha", "unknown"),
 }
 with markers_path.open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(entry, sort_keys=True) + "\n")
