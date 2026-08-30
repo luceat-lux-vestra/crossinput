@@ -63,11 +63,11 @@ The default evidence root is outside the repository:
 all commands if another local evidence root is preferred.
 
 `capture.sh start` compiles the three Swift helpers into that run's `bin/`
-directory before any HEALTHY marker can be recorded. It records helper hashes
-and the harness checkout SHA in `run.json`; the compiled helpers are never
-installed globally. They remain alongside the preserved run evidence for
-manual archival/cleanup after analysis, and no helper process is left after
-`capture.sh stop`.
+directory before any HEALTHY marker can be recorded. It records helper hashes,
+the harness checkout SHA, and the actual running CrossInput executable's
+SHA-256 in `run.json`; the compiled helpers are never installed globally. They
+remain alongside the preserved run evidence for manual archival/cleanup after
+analysis, and no helper process is left after `capture.sh stop`.
 
 The selected unified log is retained as `raw/unified.jsonl`, but it is not a
 byte-for-byte dump of the system log. Only allowlisted metadata fields and a
@@ -123,10 +123,12 @@ manual command when needed:
 
 `capture.sh start` fails unless exactly one running Ampersand application can
 be resolved through public `NSWorkspace` metadata. It records bundle ID,
-short version, bundle version, executable/bundle paths, process ID, and any
-embedded candidate/build identity that can be read without changing the app.
-An unavailable embedded source SHA is recorded as `unknown`; it is never
-replaced with the harness SHA.
+short version, bundle/executable paths, process ID, and the SHA-256 of the
+running executable. The executable SHA-256 is the authoritative same-binary
+key. Candidate/source SHA and build-identifier fields are retained only when
+explicitly exposed as bundle metadata; otherwise they are `unknown`. The
+helper never scans arbitrary executable bytes for a candidate SHA and never
+replaces an unavailable source SHA with the harness SHA.
 
 `capture.sh stop` validates the stored command lines before sending TERM and
 uses a five-second bounded cleanup. A validated capture process is KILLed only
@@ -173,6 +175,11 @@ Unrelated pre-BROKEN restarts, marker PID mismatches, missing marker PIDs,
 same-only marker PIDs, and multiple candidate pairs are `INCOMPLETE`. PIDs are
 not treated as root-cause evidence; they delimit and authenticate the restart
 interval.
+
+The analyzer also uses the public workspace notification stream to check
+CrossInput continuity. A termination of the initial CrossInput PID/bundle, or
+a relaunch of the same bundle with a different PID, between HEALTHY and
+RECOVERED contaminates the experiment and makes the run `INCOMPLETE`.
 
 ### IORegistry/HID
 
@@ -250,8 +257,14 @@ service configuration.
   or private WindowServer state. A stable physical/virtual topology does not
   exclude private client state changes.
 - PIDs, launch timing, and process recreation are correlation anchors only.
+- The executable SHA-256 proves that two captures observed the same executable
+  bytes; it does not identify the source commit or prove that the process was
+  built from a particular checkout.
 - `NSWorkspace` notifications are observer-process notifications and are not a
   complete dump of AppKit cursor tracking or private system UI registration.
+- CrossInput continuity validation is limited to termination/relaunch events
+  exposed to the public `NSWorkspace` notification center. Missing or delayed
+  notifications cannot prove continuous execution.
 - A successful public API call, an `NSCursor` fingerprint, or a snapshot delta
   cannot establish what was actually rendered on screen.
 - The commands require a real macOS host with the listed tools and an
@@ -315,7 +328,8 @@ pixels or screen recordings through this harness.
 misordered markers, missing labeled snapshots, failed required snapshot
 commands, empty or malformed evidence, malformed JSONL, empty selected unified
 logs, missing required snapshot files, an unclean/unrecorded capture stop, an
-unresolved CrossInput identity, or an unobserved marker-bound SystemUIServer
+unresolved or hashless CrossInput identity, CrossInput process termination or
+relaunch during the experiment, or an unobserved marker-bound SystemUIServer
 exit/new-PID launch pair. It does not treat the harness checkout SHA as the
 CrossInput build identity.
 
@@ -341,9 +355,15 @@ not ownership or root-cause proof.
 The comparison command computes only when every run is `COMPLETE`, all harness
 worktrees are known clean, the evidence modes match (including the opt-in
 `hidutil` flag), and the resolved CrossInput identities match on bundle ID,
-version/build, paths, and any known source/build identity. Unknown or
-different app identities cannot receive a `HIGH` recurring finding. A
-different harness SHA is rejected.
+version/build, paths, and executable SHA-256. Unknown or different app
+identities cannot receive a `HIGH` recurring finding. A missing executable
+SHA-256 is unresolved for repeated-run purposes. A different harness SHA is
+rejected. The structured comparison status is also the CLI exit status:
+`COMPLETE` returns 0 and `INCOMPLETE` returns 3.
+
+The optional source SHA and build-identifier fields remain visible in the
+report as secondary metadata; they are not substituted for, or allowed to
+override, the executable SHA-256 same-binary key.
 
 The comparison command computes:
 
@@ -400,6 +420,7 @@ Run: run-___
 Branch: ___
 Harness source SHA: ___
 CrossInput build identity: ___
+CrossInput executable SHA-256: ___
 Host macOS/build: ___
 Device/setup: ___
 
@@ -419,6 +440,10 @@ Capture shutdown:
 - state: stopped / ___
 - clean: true / false
 - forced_kill: false / true
+
+CrossInput continuity:
+- initial PID / bundle: ___
+- continuity: VALID / INCOMPLETE
 
 Evidence contract:
 - required sources: present / not_available / INCOMPLETE

@@ -65,6 +65,7 @@ UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
+EXECUTABLE_SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 HEX_ADDRESS_RE = re.compile(r"\b0x[0-9a-f]{6,}\b", re.IGNORECASE)
 STABLE_HEX_RE = re.compile(
     r"\b(?:locationid|registryid|ioregistryentryid)\s*[=:]?\s*(0x[0-9a-f]+)",
@@ -397,6 +398,14 @@ def validate_run_metadata(run: dict[str, Any]) -> list[str]:
     elif any(not isinstance(identity.get(key), str) or not identity.get(key)
              for key in ("crossinput_source_sha", "crossinput_build_identifier")):
         reasons.append("CrossInput build identity has a malformed optional identity field")
+    if isinstance(identity, dict):
+        pid = identity.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            reasons.append("CrossInput build identity initial PID is missing or malformed")
+        executable_sha256 = identity.get("executable_sha256")
+        if (not isinstance(executable_sha256, str)
+                or not EXECUTABLE_SHA256_RE.fullmatch(executable_sha256)):
+            reasons.append("CrossInput executable SHA-256 is missing or malformed")
     identity_path = run["_path"] / "crossinput-build-identity.json"
     if not identity_path.is_file():
         reasons.append("crossinput-build-identity.json is missing")
@@ -578,6 +587,54 @@ def load_workspace_events(run: dict[str, Any]) -> list[dict[str, Any]]:
     return values
 
 
+def validate_crossinput_continuity(
+    run: dict[str, Any], markers: dict[str, dict[str, Any]], workspace: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Reject runs where the observed CrossInput process restarted mid-experiment."""
+
+    identity = run.get("crossinput_build_identity")
+    if not isinstance(identity, dict):
+        return {"status": "UNAVAILABLE", "issues": []}
+    initial_pid = identity.get("pid")
+    bundle_identifier = identity.get("bundle_identifier")
+    if (not isinstance(initial_pid, int) or isinstance(initial_pid, bool) or initial_pid <= 1
+            or not isinstance(bundle_identifier, str) or not bundle_identifier):
+        return {
+            "status": "UNAVAILABLE",
+            "initial_pid": initial_pid,
+            "bundle_identifier": bundle_identifier,
+            "issues": [],
+        }
+
+    start = markers["healthy"]["_time"]
+    end = markers["recovered"]["_time"]
+    issues: list[str] = []
+    for event in workspace:
+        if not start <= event["_time"] <= end:
+            continue
+        application = event.get("application")
+        if not isinstance(application, dict):
+            continue
+        event_pid = application.get("pid")
+        event_bundle = application.get("bundle_id")
+        if event.get("event") == "application_terminated" and (
+                event_pid == initial_pid or event_bundle == bundle_identifier):
+            issues.append(
+                f"CrossInput process continuity was broken: observed termination of PID {initial_pid}"
+            )
+        elif event.get("event") == "application_launched" and (
+                event_bundle == bundle_identifier and event_pid != initial_pid):
+            issues.append(
+                f"CrossInput process continuity was broken: observed relaunch of {bundle_identifier}"
+            )
+    return {
+        "status": "INVALID" if issues else "VALID",
+        "initial_pid": initial_pid,
+        "bundle_identifier": bundle_identifier,
+        "issues": issues,
+    }
+
+
 def unified_window_records(unified: list[dict[str, Any]], markers: dict[str, dict[str, Any]],
                            restart: dict[str, Any] | None) -> list[dict[str, Any]]:
     broken = markers["broken"]["_time"]
@@ -631,10 +688,11 @@ def analyze_run(run_path: str | Path) -> dict[str, Any]:
     restart, restart_reasons = find_restart(lifecycle, markers)
     unified = load_unified(run)
     workspace = load_workspace_events(run)
+    crossinput_continuity = validate_crossinput_continuity(run, markers, workspace)
     log_records = unified_window_records(unified, markers, restart)
     transition_delta = delta(snapshot_states["healthy"], snapshot_states["broken"])
     recovery_delta = delta(snapshot_states["broken"], snapshot_states["recovered"])
-    reasons = validate_run_metadata(run) + restart_reasons
+    reasons = validate_run_metadata(run) + restart_reasons + crossinput_continuity["issues"]
     status = "COMPLETE" if not reasons else "INCOMPLETE"
     if not log_records:
         status = "INCOMPLETE"
@@ -648,6 +706,7 @@ def analyze_run(run_path: str | Path) -> dict[str, Any]:
         "restart": restart,
         "unified": log_records,
         "workspace": workspace,
+        "crossinput_continuity": crossinput_continuity,
         "transition_delta": transition_delta,
         "recovery_delta": recovery_delta,
         "status": status,
@@ -693,6 +752,13 @@ def render_run_report(result: dict[str, Any]) -> str:
     ]
     for label in REQUIRED_MARKERS:
         lines.append(f"- {label.upper()}: `{markers[label].get('timestamp_utc', 'unknown')}`")
+    continuity = result["crossinput_continuity"]
+    lines.extend(["", "## CrossInput process continuity", ""])
+    lines.append(f"- initial PID: `{continuity.get('initial_pid', 'unknown')}`")
+    lines.append(f"- bundle identifier: `{continuity.get('bundle_identifier', 'unknown')}`")
+    lines.append(f"- continuity: `{continuity.get('status', 'UNAVAILABLE')}`")
+    for issue in continuity.get("issues", []):
+        lines.append(f"- {issue}")
     lines.extend(["", "## SystemUIServer lifecycle anchor", ""])
     if restart:
         lines.append(
@@ -775,7 +841,7 @@ def render_run_report(result: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def compare_runs(results: list[dict[str, Any]]) -> str:
+def compare_runs(results: list[dict[str, Any]]) -> tuple[str, str]:
     if len(results) < 2:
         raise EvidenceError("at least two runs are required for comparison")
     ids = [item["run"]["run_id"] for item in results]
@@ -802,8 +868,7 @@ def compare_runs(results: list[dict[str, Any]]) -> str:
                 continue
             identity_keys = (
                 "bundle_identifier", "bundle_short_version", "bundle_version",
-                "bundle_path", "executable_path", "crossinput_source_sha",
-                "crossinput_build_identifier",
+                "bundle_path", "executable_path", "executable_sha256",
             )
             if any(not isinstance(identity.get(key), str) or not identity.get(key)
                    for key in identity_keys):
@@ -846,7 +911,8 @@ def compare_runs(results: list[dict[str, Any]]) -> str:
     ])
     if comparison_reason:
         lines.extend(["", "## Fail-closed comparison reason", "", f"- {comparison_reason}"])
-    return "\n".join(lines) + "\n"
+    status = "COMPLETE" if complete else "INCOMPLETE"
+    return "\n".join(lines) + "\n", status
 
 
 def main(argv: list[str]) -> int:
@@ -861,9 +927,9 @@ def main(argv: list[str]) -> int:
             output = args.output or (results[0]["run"]["_path"] / "semantic-report.md")
             exit_code = 0 if results[0]["status"] == "COMPLETE" else 3
         else:
-            report = compare_runs(results)
+            report, comparison_status = compare_runs(results)
             output = args.output or (Path(args.runs[0]).expanduser().resolve().parent / "issue96-comparison-report.md")
-            exit_code = 0 if all(item["status"] == "COMPLETE" for item in results) else 3
+            exit_code = 0 if comparison_status == "COMPLETE" else 3
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report, encoding="utf-8")
         print(report, end="")

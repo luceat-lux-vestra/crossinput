@@ -7,6 +7,7 @@
     "crossinput_build_identifier": "unknown",
     "crossinput_source_sha": "unknown",
     "executable_path": "/Applications/Ampersand.app/Contents/MacOS/Ampersand",
+    "executable_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
     "pid": 400,
     "process_name": "Ampersand",
     "resolved": true,

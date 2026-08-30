@@ -175,7 +175,8 @@ class Issue96AnalyzerTests(unittest.TestCase):
                 service = run / "snapshots" / "003-recovered" / "systemuiserver-service.txt"
                 service.write_text(service.read_text(encoding="utf-8") + "registration_refresh = observed\n", encoding="utf-8")
                 results.append(analyze.analyze_run(run))
-            report = analyze.compare_runs(results)
+            report, status = analyze.compare_runs(results)
+            self.assertEqual(status, "COMPLETE")
             self.assertIn("HIGH` recurring candidate", report)
             self.assertIn("registration_refresh", report)
 
@@ -272,6 +273,38 @@ class Issue96AnalyzerTests(unittest.TestCase):
             lifecycle.write_text("\n".join(json.dumps(item) for item in records) + "\n", encoding="utf-8")
             self.assert_incomplete(copied, "multiple marker-bound SystemUIServer restart candidates")
 
+    def test_crossinput_continuity_rejects_initial_process_termination(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            workspace = copied / "raw/workspace-events.jsonl"
+            with workspace.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "event": "application_terminated",
+                    "application": {
+                        "pid": 400,
+                        "bundle_id": "com.crossinput.Ampersand",
+                        "name": "Ampersand",
+                    },
+                    "timestamp_utc": "2026-08-30T10:04:00Z",
+                }) + "\n")
+            self.assert_incomplete(copied, "CrossInput process continuity was broken")
+
+    def test_crossinput_continuity_rejects_relaunch_with_new_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = self.copy_fixture(Path(temporary))
+            workspace = copied / "raw/workspace-events.jsonl"
+            with workspace.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "event": "application_launched",
+                    "application": {
+                        "pid": 401,
+                        "bundle_id": "com.crossinput.Ampersand",
+                        "name": "Ampersand",
+                    },
+                    "timestamp_utc": "2026-08-30T10:04:01Z",
+                }) + "\n")
+            self.assert_incomplete(copied, "CrossInput process continuity was broken")
+
     def test_shutdown_contract_clean_stopped_run_is_allowed(self) -> None:
         self.assertEqual(analyze.analyze_run(FIXTURE)["status"], "COMPLETE")
 
@@ -347,7 +380,18 @@ class Issue96AnalyzerTests(unittest.TestCase):
             first = self.copy_fixture(root, "run-001")
             second = self.copy_fixture(root, "run-002")
             self.rename_fixture_run(second, "run-002")
-            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["crossinput_build_identity"]["crossinput_source_sha"] = "candidate-metadata"
+            data["crossinput_build_identity"]["crossinput_build_identifier"] = "build-metadata"
+            self.write_json(second / "run.json", data)
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            identity["crossinput_source_sha"] = "candidate-metadata"
+            identity["crossinput_build_identifier"] = "build-metadata"
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "COMPLETE")
             self.assertIn("STATUS: COMPLETE", report)
 
     def test_identity_contract_different_app_build_blocks_comparison(self) -> None:
@@ -362,9 +406,59 @@ class Issue96AnalyzerTests(unittest.TestCase):
             assert isinstance(data, dict)
             data["crossinput_build_identity"]["bundle_version"] = "2"
             self.write_json(second / "run.json", data)
-            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            identity["bundle_version"] = "2"
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "INCOMPLETE")
             self.assertIn("STATUS: INCOMPLETE", report)
             self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_identity_contract_different_executable_hash_blocks_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["crossinput_build_identity"]["executable_sha256"] = "2" * 64
+            self.write_json(second / "run.json", data)
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            identity["executable_sha256"] = "2" * 64
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "INCOMPLETE")
+            self.assertIn("compatible resolved CrossInput build identities", report)
+            self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_identity_contract_missing_executable_hash_blocks_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            del data["crossinput_build_identity"]["executable_sha256"]
+            self.write_json(second / "run.json", data)
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            del identity["executable_sha256"]
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "INCOMPLETE")
+            self.assertIn("compatible resolved CrossInput build identities", report)
+            self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_identity_helper_hashes_binary_without_scanning_for_source_sha(self) -> None:
+        helper = HERE / "crossinput_identity.swift"
+        source = helper.read_text(encoding="utf-8")
+        self.assertIn("SHA256.hash(data: executableData)", source)
+        self.assertNotIn("NSRegularExpression", source)
+        self.assertNotIn("String(decoding: executableData", source)
 
     def test_identity_contract_unknown_app_blocks_high_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -378,10 +472,54 @@ class Issue96AnalyzerTests(unittest.TestCase):
             assert isinstance(data, dict)
             data["crossinput_build_identity"]["resolved"] = False
             self.write_json(second / "run.json", data)
-            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            identity["resolved"] = False
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "INCOMPLETE")
             self.assertIn("STATUS: INCOMPLETE", report)
             self.assertIn("compatible resolved CrossInput build identities", report)
             self.assertNotIn("HIGH` recurring candidate", report)
+
+    def test_comparison_cli_returns_incomplete_exit_for_build_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["crossinput_build_identity"]["executable_sha256"] = "3" * 64
+            self.write_json(second / "run.json", data)
+            identity = self.load_json(second / "crossinput-build-identity.json")
+            assert isinstance(identity, dict)
+            identity["executable_sha256"] = "3" * 64
+            self.write_json(second / "crossinput-build-identity.json", identity)
+            output = root / "comparison.md"
+            exit_code = analyze.main([str(first), str(second), "--output", str(output)])
+            self.assertEqual(exit_code, 3)
+            self.assertIn("STATUS: INCOMPLETE", output.read_text(encoding="utf-8"))
+
+    def test_comparison_cli_returns_incomplete_exit_for_evidence_mode_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = self.copy_fixture(root, "run-001")
+            second = self.copy_fixture(root, "run-002")
+            self.rename_fixture_run(second, "run-002")
+            data = self.load_json(second / "run.json")
+            assert isinstance(data, dict)
+            data["evidence_mode"]["include_hidutil"] = True
+            self.write_json(second / "run.json", data)
+            for meta_path in second.glob("snapshots/*/snapshot.meta.json"):
+                meta = self.load_json(meta_path)
+                assert isinstance(meta, dict)
+                meta["evidence_mode"]["include_hidutil"] = True
+                self.write_json(meta_path, meta)
+            output = root / "comparison.md"
+            exit_code = analyze.main([str(first), str(second), "--output", str(output)])
+            self.assertEqual(exit_code, 3)
+            self.assertIn("STATUS: INCOMPLETE", output.read_text(encoding="utf-8"))
 
     def test_identity_contract_missing_app_metadata_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -415,7 +553,8 @@ class Issue96AnalyzerTests(unittest.TestCase):
                 assert isinstance(meta, dict)
                 meta["evidence_mode"]["include_hidutil"] = True
                 self.write_json(meta_path, meta)
-            report = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            report, status = analyze.compare_runs([analyze.analyze_run(first), analyze.analyze_run(second)])
+            self.assertEqual(status, "INCOMPLETE")
             self.assertIn("STATUS: INCOMPLETE", report)
             self.assertIn("matching evidence modes", report)
 
