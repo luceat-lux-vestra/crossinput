@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var hostDisplays: [HostDisplayEdgeOption] = []
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
+    private(set) var issue96ProbeHarness: Issue96TargetDisplayInvalidationProbeHarness?
     /// Invalidates an in-flight connect/reconnect action when the user starts
     /// a newer action or intentionally disconnects.
     private var connectionIntentGeneration: UInt64 = 0
@@ -114,6 +115,16 @@ final class AppModel: ObservableObject {
             self?.controlState = state
         }
         refreshHostDisplays()
+        if Issue96ProbeConfiguration.isEnabled() {
+            switch Issue96TargetDisplaySelection.resolve(from: hostDisplays) {
+            case let .selected(targetDisplayID):
+                issue96ProbeHarness = Issue96ProbeFactory.makeIfEnabled(
+                    targetDisplayID: targetDisplayID)
+            case let selection:
+                Diagnostics.log(
+                    "issue96-target-display-probe startup result=fail-closed reason=\(selection.failClosedReason ?? "unknown")")
+            }
+        }
     }
 
     // MARK: - Session
