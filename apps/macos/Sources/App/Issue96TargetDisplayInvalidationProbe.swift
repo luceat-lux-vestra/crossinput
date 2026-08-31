@@ -151,6 +151,28 @@ enum Issue96ProbeWindowConfiguration {
     static let initiallyActivatesApplication = false
 }
 
+enum Issue96ProbeWindowFrame {
+    /// NSWindow's initializer with an explicit screen interprets the initial
+    /// content rect in that screen's local coordinate space. NSScreen frames
+    /// are global, so normalize the visible frame before centering the panel;
+    /// otherwise a non-primary screen origin is applied twice.
+    static func centered(
+        visibleFrame: NSRect,
+        screenFrame: NSRect,
+        size: NSSize) -> NSRect {
+        let localVisibleFrame = NSRect(
+            x: visibleFrame.minX - screenFrame.minX,
+            y: visibleFrame.minY - screenFrame.minY,
+            width: visibleFrame.width,
+            height: visibleFrame.height)
+        return NSRect(
+            x: localVisibleFrame.midX - size.width / 2,
+            y: localVisibleFrame.midY - size.height / 2,
+            width: size.width,
+            height: size.height)
+    }
+}
+
 struct Issue96ProbeWindowState: Equatable, Sendable {
     let appIsActive: Bool
     let isKeyWindow: Bool
@@ -312,12 +334,10 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         }
 
         let size = NSSize(width: 220, height: 64)
-        let visibleFrame = targetScreen.visibleFrame
-        let frame = NSRect(
-            x: visibleFrame.midX - size.width / 2,
-            y: visibleFrame.midY - size.height / 2,
-            width: size.width,
-            height: size.height)
+        let frame = Issue96ProbeWindowFrame.centered(
+            visibleFrame: targetScreen.visibleFrame,
+            screenFrame: targetScreen.frame,
+            size: size)
         let panel = NSPanel(
             contentRect: frame,
             styleMask: Issue96ProbeWindowConfiguration.styleMask,

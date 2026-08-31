@@ -100,6 +100,17 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
     }
 
+    func testProbePanelFrameNormalizesNonPrimaryScreenOriginOnce() {
+        let screenFrame = NSRect(x: 909, y: -1586, width: 2454, height: 1586)
+        let visibleFrame = NSRect(x: 909, y: -1586, width: 2454, height: 1540)
+        let frame = Issue96ProbeWindowFrame.centered(
+            visibleFrame: visibleFrame,
+            screenFrame: screenFrame,
+            size: NSSize(width: 220, height: 64))
+
+        XCTAssertEqual(frame, NSRect(x: 1117, y: 738, width: 220, height: 64))
+    }
+
     func testTargetSelectionRequiresExactlyOneConfiguredEdgeDisplay() {
         let none = Issue96TargetDisplaySelection.resolve(from: [display(11), display(42)])
         XCTAssertEqual(none, .noneConfigured)
