@@ -29,6 +29,13 @@ reported as BROKEN for `cursor-rect`, `redraw`, `tracking-area`,
 the off-target Unix-domain control channel. This instrumentation does not
 extend or reinterpret that negative probe matrix.
 
+The owned diagnostic panel itself has since been physically confirmed to
+reproduce BROKEN: native resize cursors remain visually stale as the ordinary
+arrow after the cross-display activation transition. While BROKEN, the panel
+remains visible on the configured display and continues to receive
+`mouseEntered`, `mouseExited`, and `mouseMoved` callbacks. This is lifecycle
+observation evidence, not an inferred cursor state or a root-cause conclusion.
+
 ## Opt-in and target selection
 
 The harness remains disabled unless the app is launched with:
@@ -88,8 +95,9 @@ area uses `.activeInActiveApp` and `.cursorUpdate`. AppKit documents that
 `.activeAlways` combined with `.cursorUpdate` suppresses `cursorUpdate(with:)`,
 so that invalid combination is deliberately not constructed. Consequently,
 `cursor-update` observation is meaningful only while the application is
-active; application activation state is recorded alongside the trace rather
-than inferred from cursor callbacks.
+active. Therefore, the absence of `cursor-update` while the app is inactive is
+expected and is not causal evidence; application activation state is recorded
+alongside the trace rather than inferred from cursor callbacks.
 
 ## Lifecycle callbacks instrumented
 
@@ -171,6 +179,7 @@ cursor-rect
 tracking-area
 window-update
 activation-control
+recovery-app-activate
 mark-baseline-healthy
 mark-broken-confirmed
 mark-recovery-action
@@ -202,7 +211,10 @@ tests assert that all trace/control commands dispatch zero primitive calls.
 
 The five earlier primitive commands remain separately identifiable and retain
 their original one-family dispatcher mapping. Their presence does not imply
-that the new lifecycle controls execute them.
+that the new lifecycle controls execute them. `recovery-app-activate` is a
+separate affected-window recovery experiment because the owned panel itself is
+the observed BROKEN surface; it is not a rewrite of the historical
+`activation-control` probe.
 
 Their exact mappings remain:
 
@@ -213,6 +225,18 @@ Their exact mappings remain:
 | `tracking-area` | remove/add both owned tracking areas |
 | `window-update` | `window.orderFront(nil)` |
 | `activation-control` | `NSApplication.activate`; `window.makeKeyAndOrderFront` |
+| `recovery-app-activate` | `NSApplication.activate(ignoringOtherApps: true)` only, after fail-closed checks |
+
+`recovery-app-activate` requires the panel to exist on the configured target
+display and the application to be inactive. If the app is already active it
+returns `application-already-active` without calling the activation API. On a
+valid inactive state it performs exactly one public AppKit operation:
+`NSApplication.shared.activate(ignoringOtherApps: true)`. It does not call
+`makeKey`, `makeMain`, any ordering method, redraw, cursor-rect invalidation,
+tracking-area rebuild, cursor setter, synthetic input, or pointer movement.
+AppKit notifications that naturally follow activation remain observable in
+the existing trace. The command does not add any automatic trial marker and
+does not claim cursor recovery.
 
 ## Physical protocol for a later controlled trial
 
@@ -255,6 +279,21 @@ The recovery transitions to characterize later are independent trials only:
 
 The trace must be compared as observed event sequences. The code must not
 infer `HEALTHY` or `BROKEN` and must not infer causality from a missing event.
+
+For the new activation trial, the human/operator sequence is specifically:
+
+```text
+human confirms BROKEN while CrossInput is inactive
+  -> off-target mark-broken-confirmed
+  -> off-target mark-recovery-action
+  -> off-target recovery-app-activate
+  -> observe the same native cursor region
+  -> off-target mark-recovered or mark-still-broken
+  -> off-target dump-trace
+```
+
+No physical result for this activation-only trial is claimed until it is
+performed from a fresh controlled state after independent exact-HEAD review.
 
 ## Interpretation
 

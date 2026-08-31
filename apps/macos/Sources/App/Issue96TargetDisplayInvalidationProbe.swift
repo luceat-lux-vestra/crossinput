@@ -28,6 +28,7 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     case trackingArea = "tracking-area"
     case windowUpdate = "window-update"
     case activationControl = "activation-control"
+    case recoveryAppActivate = "recovery-app-activate"
     case status
     case markBaselineHealthy = "mark-baseline-healthy"
     case markBrokenConfirmed = "mark-broken-confirmed"
@@ -39,6 +40,10 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
 
     static var probeKinds: [Issue96ProbeCommand] {
         [.redraw, .cursorRect, .trackingArea, .windowUpdate, .activationControl]
+    }
+
+    static var recoveryKinds: [Issue96ProbeCommand] {
+        [.recoveryAppActivate]
     }
 
     static var traceControlKinds: [Issue96ProbeCommand] {
@@ -153,26 +158,58 @@ protocol Issue96ProbePrimitiveOperations: AnyObject {
     func activationPositiveControl() -> Issue96ProbeOperationResult
 }
 
+/// The affected-window recovery experiment is intentionally separate from the
+/// historical primitive operations. This keeps the new command from being
+/// silently routed through the old activation positive control.
+@MainActor
+protocol Issue96ApplicationActivationRecoveryOperations: AnyObject {
+    func applicationActivationOnly() -> Issue96ProbeOperationResult
+}
+
+/// The state transition itself is kept injectable so the already-active
+/// fail-closed branch can be tested without activating the test runner.
+@MainActor
+struct Issue96ApplicationActivationCoordinator {
+    let applicationIsActive: () -> Bool
+    let activateApplication: () -> Void
+
+    func run() -> Issue96ProbeOperationResult {
+        let api = "NSApplication.activate(ignoringOtherApps: true)"
+        guard !applicationIsActive() else {
+            return .failed(api: api, reason: "application-already-active")
+        }
+
+        activateApplication()
+        return .applied(api: api)
+    }
+}
+
 @MainActor
 struct Issue96ProbeDispatcher {
-    private let operations: any Issue96ProbePrimitiveOperations
+    private let primitiveOperations: any Issue96ProbePrimitiveOperations
+    private let applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations
 
-    init(operations: any Issue96ProbePrimitiveOperations) {
-        self.operations = operations
+    init(
+        operations: any Issue96ProbePrimitiveOperations,
+        applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations) {
+        primitiveOperations = operations
+        self.applicationActivationRecovery = applicationActivationRecovery
     }
 
     func dispatch(_ command: Issue96ProbeCommand) -> Issue96ProbeOperationResult? {
         switch command {
         case .redraw:
-            return operations.redrawOnly()
+            return primitiveOperations.redrawOnly()
         case .cursorRect:
-            return operations.cursorRectInvalidationOnly()
+            return primitiveOperations.cursorRectInvalidationOnly()
         case .trackingArea:
-            return operations.trackingAreaRebuildOnly()
+            return primitiveOperations.trackingAreaRebuildOnly()
         case .windowUpdate:
-            return operations.nonActivatingWindowUpdateOnly()
+            return primitiveOperations.nonActivatingWindowUpdateOnly()
         case .activationControl:
-            return operations.activationPositiveControl()
+            return primitiveOperations.activationPositiveControl()
+        case .recoveryAppActivate:
+            return applicationActivationRecovery.applicationActivationOnly()
         case .status, .markBaselineHealthy, .markBrokenConfirmed, .markRecoveryAction,
              .markRecovered, .markStillBroken, .clearTrace, .dumpTrace:
             return nil
@@ -265,7 +302,10 @@ struct Issue96ProbeRecord: Equatable, Sendable {
     }
 
     var responseLine: String {
-        "OK sequence=\(sequence) kind=\(kind.rawValue) api_success=\(result.succeeded)"
+        if kind == .recoveryAppActivate, let failureReason = result.failureReason {
+            return "ERROR sequence=\(sequence) kind=\(kind.rawValue) reason=\(failureReason)"
+        }
+        return "OK sequence=\(sequence) kind=\(kind.rawValue) api_success=\(result.succeeded)"
     }
 }
 
@@ -482,6 +522,49 @@ final class Issue96ProbeAppKitOperations: Issue96ProbePrimitiveOperations {
     }
 }
 
+/// AppKit implementation of the affected-window application activation
+/// recovery operation. It validates the owned panel's current display and
+/// active state, then requests only application activation. It does not order,
+/// key, main, redraw, invalidate, rebuild, or move anything.
+@MainActor
+final class Issue96ApplicationActivationAppKitOperation: Issue96ApplicationActivationRecoveryOperations {
+    weak var window: NSWindow?
+    let targetDisplayID: CGDirectDisplayID
+    private let coordinator: Issue96ApplicationActivationCoordinator
+
+    init(
+        window: NSWindow,
+        targetDisplayID: CGDirectDisplayID,
+        applicationIsActive: @escaping () -> Bool = { NSApplication.shared.isActive },
+        activateApplication: @escaping () -> Void = {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }) {
+        self.window = window
+        self.targetDisplayID = targetDisplayID
+        coordinator = Issue96ApplicationActivationCoordinator(
+            applicationIsActive: applicationIsActive,
+            activateApplication: activateApplication)
+    }
+
+    func applicationActivationOnly() -> Issue96ProbeOperationResult {
+        let api = "NSApplication.activate(ignoringOtherApps: true)"
+        guard let window else {
+            return .failed(api: api, reason: "diagnostic-window-unavailable")
+        }
+        guard Self.displayID(for: window.screen) == targetDisplayID else {
+            return .failed(api: api, reason: "diagnostic-window-not-on-target-display")
+        }
+        return coordinator.run()
+    }
+
+    private static func displayID(for screen: NSScreen?) -> CGDirectDisplayID? {
+        guard let number = screen?.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else { return nil }
+        return CGDirectDisplayID(number.uint32Value)
+    }
+}
+
 @MainActor
 final class Issue96TargetDisplayInvalidationProbeHarness {
     let targetDisplayID: CGDirectDisplayID
@@ -535,13 +618,18 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         view.rebuildOwnedTrackingAreas()
 
         let operations = Issue96ProbeAppKitOperations(window: panel, view: view)
+        let applicationActivationRecovery = Issue96ApplicationActivationAppKitOperation(
+            window: panel,
+            targetDisplayID: selectedDisplayID)
         let endpoint = Issue96ProbeControlEndpoint(path: Issue96ProbeConfiguration.socketPath)
 
         self.targetDisplayID = selectedDisplayID
         self.panel = panel
         self.view = view
         self.lifecycleTrace = lifecycleTrace
-        self.dispatcher = Issue96ProbeDispatcher(operations: operations)
+        self.dispatcher = Issue96ProbeDispatcher(
+            operations: operations,
+            applicationActivationRecovery: applicationActivationRecovery)
         self.endpoint = endpoint
         self.lifecycleObservers = lifecycleObservers
 

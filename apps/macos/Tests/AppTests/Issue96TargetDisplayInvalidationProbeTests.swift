@@ -8,7 +8,9 @@ import EdgeSwitch
 final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
     func testEachProbeCommandDispatchesExactlyOnePrimitive() {
         let operations = RecordingProbeOperations()
-        let dispatcher = Issue96ProbeDispatcher(operations: operations)
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: operations,
+            applicationActivationRecovery: operations)
 
         for command in Issue96ProbeCommand.probeKinds {
             operations.calls.removeAll()
@@ -29,6 +31,53 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertEqual(Issue96ProbeCommand.parse("dump-trace"), .dumpTrace)
         XCTAssertNil(Issue96ProbeCommand.parse("redraw extra"))
         XCTAssertNil(Issue96ProbeCommand.parse(""))
+        XCTAssertEqual(Issue96ProbeCommand.parse("recovery-app-activate\n"), .recoveryAppActivate)
+        XCTAssertNil(Issue96ProbeCommand.parse("recovery-app-activate extra"))
+    }
+
+    func testApplicationActivationRecoveryDispatchesExactlyOneSeparateOperation() {
+        let operations = RecordingProbeOperations()
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: operations,
+            applicationActivationRecovery: operations)
+
+        XCTAssertNotNil(dispatcher.dispatch(.recoveryAppActivate))
+        XCTAssertEqual(operations.calls, [.recoveryAppActivate])
+        XCTAssertFalse(operations.calls.contains(.redraw))
+        XCTAssertFalse(operations.calls.contains(.cursorRect))
+        XCTAssertFalse(operations.calls.contains(.trackingArea))
+        XCTAssertFalse(operations.calls.contains(.windowUpdate))
+        XCTAssertFalse(operations.calls.contains(.activationControl))
+    }
+
+    func testAlreadyActiveApplicationActivationFailsClosedWithoutActivationCall() {
+        var activationCallCount = 0
+        let coordinator = Issue96ApplicationActivationCoordinator(
+            applicationIsActive: { true },
+            activateApplication: { activationCallCount += 1 })
+
+        let result = coordinator.run()
+
+        XCTAssertEqual(
+            result,
+            .failed(
+                api: "NSApplication.activate(ignoringOtherApps: true)",
+                reason: "application-already-active"))
+        XCTAssertEqual(activationCallCount, 0)
+    }
+
+    func testInactiveApplicationActivationInvokesOnlyInjectedActivationCall() {
+        var activationCallCount = 0
+        let coordinator = Issue96ApplicationActivationCoordinator(
+            applicationIsActive: { false },
+            activateApplication: { activationCallCount += 1 })
+
+        let result = coordinator.run()
+
+        XCTAssertEqual(
+            result,
+            .applied(api: "NSApplication.activate(ignoringOtherApps: true)"))
+        XCTAssertEqual(activationCallCount, 1)
     }
 
     func testLifecycleTraceIsBoundedOrderedAndClearable() {
@@ -109,7 +158,9 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
 
     func testTraceControlCommandsDoNotDispatchAppKitPrimitives() {
         let operations = RecordingProbeOperations()
-        let dispatcher = Issue96ProbeDispatcher(operations: operations)
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: operations,
+            applicationActivationRecovery: operations)
         let commands: [Issue96ProbeCommand] = [.status] + Issue96ProbeCommand.traceControlKinds
 
         for command in commands {
@@ -348,13 +399,33 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         }
     }
 
+    func testApplicationActivationFailureResponseIsExplicitAndNonRecoveryClaiming() {
+        let state = Issue96ProbeWindowState(appIsActive: true, isKeyWindow: false, isMainWindow: false)
+        let record = Issue96ProbeRecord(
+            sequence: 8,
+            monotonicNanoseconds: 456,
+            kind: .recoveryAppActivate,
+            targetDisplayID: 11,
+            panelDisplayID: 11,
+            before: state,
+            after: state,
+            result: .failed(
+                api: "NSApplication.activate(ignoringOtherApps: true)",
+                reason: "application-already-active"))
+
+        XCTAssertEqual(
+            record.responseLine,
+            "ERROR sequence=8 kind=recovery-app-activate reason=application-already-active")
+        XCTAssertFalse(record.responseLine.contains("recovered"))
+    }
+
     private func display(_ id: CGDirectDisplayID, edge: ScreenEdge? = nil) -> HostDisplayEdgeOption {
         HostDisplayEdgeOption(id: id, name: "Display \(id)", width: 1920, height: 1080, edge: edge)
     }
 }
 
 @MainActor
-private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations {
+private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations, Issue96ApplicationActivationRecoveryOperations {
     var calls: [Issue96ProbeCommand] = []
 
     func redrawOnly() -> Issue96ProbeOperationResult {
@@ -380,6 +451,11 @@ private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations {
     func activationPositiveControl() -> Issue96ProbeOperationResult {
         calls.append(.activationControl)
         return .applied(api: "recording.activation-control")
+    }
+
+    func applicationActivationOnly() -> Issue96ProbeOperationResult {
+        calls.append(.recoveryAppActivate)
+        return .applied(api: "recording.application-activation-only")
     }
 }
 
