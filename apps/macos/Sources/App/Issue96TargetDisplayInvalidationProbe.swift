@@ -29,9 +29,45 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     case windowUpdate = "window-update"
     case activationControl = "activation-control"
     case status
+    case markBaselineHealthy = "mark-baseline-healthy"
+    case markBrokenConfirmed = "mark-broken-confirmed"
+    case markRecoveryAction = "mark-recovery-action"
+    case markRecovered = "mark-recovered"
+    case markStillBroken = "mark-still-broken"
+    case clearTrace = "clear-trace"
+    case dumpTrace = "dump-trace"
 
     static var probeKinds: [Issue96ProbeCommand] {
-        allCases.filter { $0 != .status }
+        [.redraw, .cursorRect, .trackingArea, .windowUpdate, .activationControl]
+    }
+
+    static var traceControlKinds: [Issue96ProbeCommand] {
+        [
+            .markBaselineHealthy,
+            .markBrokenConfirmed,
+            .markRecoveryAction,
+            .markRecovered,
+            .markStillBroken,
+            .clearTrace,
+            .dumpTrace,
+        ]
+    }
+
+    var markerEvent: Issue96LifecycleEvent? {
+        switch self {
+        case .markBaselineHealthy:
+            return .markerBaselineHealthy
+        case .markBrokenConfirmed:
+            return .markerBrokenConfirmed
+        case .markRecoveryAction:
+            return .markerRecoveryAction
+        case .markRecovered:
+            return .markerRecovered
+        case .markStillBroken:
+            return .markerStillBroken
+        default:
+            return nil
+        }
     }
 
     static func parse(_ line: String) -> Issue96ProbeCommand? {
@@ -137,7 +173,8 @@ struct Issue96ProbeDispatcher {
             return operations.nonActivatingWindowUpdateOnly()
         case .activationControl:
             return operations.activationPositiveControl()
-        case .status:
+        case .status, .markBaselineHealthy, .markBrokenConfirmed, .markRecoveryAction,
+             .markRecovered, .markStillBroken, .clearTrace, .dumpTrace:
             return nil
         }
     }
@@ -145,6 +182,12 @@ struct Issue96ProbeDispatcher {
 
 enum Issue96ProbeWindowConfiguration {
     static let styleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
+    static let trackingAreaOptions: NSTrackingArea.Options = [
+        .activeAlways,
+        .mouseEnteredAndExited,
+        .mouseMoved,
+        .cursorUpdate,
+    ]
     static let becomesKeyOnlyIfNeeded = true
     static let initiallyMakesKeyWindow = false
     static let initiallyMakesMainWindow = false
@@ -221,14 +264,27 @@ struct Issue96ProbeRecord: Equatable, Sendable {
 
 @MainActor
 final class Issue96ProbeView: NSView {
+    private let lifecycleTrace: Issue96LifecycleTrace?
     private var ownedTrackingArea: NSTrackingArea?
+
+    init(frame frameRect: NSRect, lifecycleTrace: Issue96LifecycleTrace? = nil) {
+        self.lifecycleTrace = lifecycleTrace
+        super.init(frame: frameRect)
+    }
+
+    required init?(coder: NSCoder) {
+        lifecycleTrace = nil
+        super.init(coder: coder)
+    }
 
     override var acceptsFirstResponder: Bool { false }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { false }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeLeftRight)
+        lifecycleTrace?.record(event: .resetCursorRects)
+        addCursorRect(rect(for: .resizeHorizontal), cursor: .resizeLeftRight)
+        addCursorRect(rect(for: .resizeVertical), cursor: .resizeUpDown)
     }
 
     /// Rebuilds only the tracking area owned by this diagnostic view.
@@ -238,7 +294,7 @@ final class Issue96ProbeView: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .mouseEnteredAndExited, .cursorUpdate],
+            options: Issue96ProbeWindowConfiguration.trackingAreaOptions,
             owner: self,
             userInfo: nil)
         addTrackingArea(area)
@@ -246,22 +302,119 @@ final class Issue96ProbeView: NSView {
     }
 
     override func updateTrackingAreas() {
+        lifecycleTrace?.record(event: .updateTrackingAreas)
         super.updateTrackingAreas()
         rebuildOwnedTrackingArea()
     }
 
+    override func cursorUpdate(with event: NSEvent) {
+        let region = region(at: event.locationInWindow)
+        lifecycleTrace?.record(event: .cursorUpdate, region: region)
+        cursor(for: region).set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        lifecycleTrace?.record(event: .mouseEntered, region: region(at: event.locationInWindow))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        lifecycleTrace?.record(event: .mouseExited, region: region(at: event.locationInWindow))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        lifecycleTrace?.record(event: .mouseMoved, region: region(at: event.locationInWindow))
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        lifecycleTrace?.record(event: .viewDidMoveToWindow)
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        lifecycleTrace?.record(event: .viewDidMoveToSuperview)
+    }
+
+    override func layout() {
+        super.layout()
+        lifecycleTrace?.record(event: .viewLayout)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        lifecycleTrace?.record(event: .viewDraw)
         NSColor.windowBackgroundColor.withAlphaComponent(0.94).setFill()
         dirtyRect.fill()
 
         let title = NSAttributedString(
-            string: "CrossInput Issue #96 probe",
+            string: "CrossInput Issue #96 cursor lifecycle",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 12, weight: .medium),
                 .foregroundColor: NSColor.labelColor,
             ])
-        let titleRect = NSRect(x: 12, y: bounds.midY - 7, width: bounds.width - 24, height: 18)
+        let titleRect = NSRect(x: 16, y: bounds.maxY - 30, width: bounds.width - 32, height: 18)
         title.draw(in: titleRect)
+
+        let colors: [Issue96CursorRegion: NSColor] = [
+            .resizeHorizontal: .systemBlue,
+            .resizeVertical: .systemGreen,
+            .resizeDiagonal: .systemOrange,
+        ]
+        for region in Issue96CursorRegion.cursorRegions {
+            let regionRect = rect(for: region)
+            colors[region]?.withAlphaComponent(0.22).setFill()
+            NSBezierPath(roundedRect: regionRect, xRadius: 8, yRadius: 8).fill()
+            colors[region]?.setStroke()
+            let border = NSBezierPath(roundedRect: regionRect, xRadius: 8, yRadius: 8)
+            border.lineWidth = 1
+            border.stroke()
+
+            let label = NSAttributedString(
+                string: region.rawValue,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.labelColor,
+                ])
+            label.draw(in: regionRect.insetBy(dx: 8, dy: regionRect.height / 2 - 8))
+        }
+    }
+
+    private func rect(for region: Issue96CursorRegion) -> NSRect {
+        let regions = Issue96CursorRegion.cursorRegions
+        guard let index = regions.firstIndex(of: region) else { return .zero }
+        let gap: CGFloat = 12
+        let left: CGFloat = 16
+        let width = (bounds.width - left * 2 - gap * CGFloat(regions.count - 1))
+            / CGFloat(regions.count)
+        return NSRect(
+            x: left + CGFloat(index) * (width + gap),
+            y: 32,
+            width: width,
+            height: bounds.height - 78)
+    }
+
+    private func region(at point: NSPoint) -> Issue96CursorRegion {
+        for region in Issue96CursorRegion.cursorRegions where rect(for: region).contains(point) {
+            return region
+        }
+        return .background
+    }
+
+    private func cursor(for region: Issue96CursorRegion) -> NSCursor {
+        switch region {
+        case .resizeHorizontal:
+            return .resizeLeftRight
+        case .resizeVertical:
+            return .resizeUpDown
+        case .resizeDiagonal, .background:
+            // AppKit exposes built-in horizontal/vertical resize cursors but
+            // no built-in diagonal resize cursor on this SDK. Keep the
+            // diagonal tile as a symbolic lifecycle region without inventing
+            // a custom cursor that would obscure native behavior.
+            return .arrow
+        }
     }
 }
 
@@ -319,9 +472,11 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
     let targetDisplayID: CGDirectDisplayID
     let panel: NSPanel
     let view: Issue96ProbeView
+    let lifecycleTrace: Issue96LifecycleTrace
 
     private let dispatcher: Issue96ProbeDispatcher
     private let endpoint: Issue96ProbeControlEndpoint
+    private let lifecycleObservers: Issue96LifecycleObservers
     private var probeSequence: UInt64 = 0
 
     init?(targetDisplayID selectedDisplayID: CGDirectDisplayID, screens: [NSScreen] = NSScreen.screens) {
@@ -333,18 +488,22 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
             return nil
         }
 
-        let size = NSSize(width: 220, height: 64)
+        let size = NSSize(width: 420, height: 220)
         let frame = Issue96ProbeWindowFrame.centered(
             visibleFrame: targetScreen.visibleFrame,
             screenFrame: targetScreen.frame,
             size: size)
+        let lifecycleTrace = Issue96LifecycleTrace(targetDisplayID: selectedDisplayID)
         let panel = NSPanel(
             contentRect: frame,
             styleMask: Issue96ProbeWindowConfiguration.styleMask,
             backing: .buffered,
             defer: false,
             screen: targetScreen)
-        let view = Issue96ProbeView(frame: NSRect(origin: .zero, size: size))
+        lifecycleTrace.window = panel
+        let view = Issue96ProbeView(
+            frame: NSRect(origin: .zero, size: size),
+            lifecycleTrace: lifecycleTrace)
 
         panel.contentView = view
         panel.hidesOnDeactivate = false
@@ -356,6 +515,7 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.acceptsMouseMovedEvents = true
+        let lifecycleObservers = Issue96LifecycleObservers(trace: lifecycleTrace, window: panel)
         panel.orderFrontRegardless()
         view.rebuildOwnedTrackingArea()
 
@@ -365,8 +525,10 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         self.targetDisplayID = selectedDisplayID
         self.panel = panel
         self.view = view
+        self.lifecycleTrace = lifecycleTrace
         self.dispatcher = Issue96ProbeDispatcher(operations: operations)
         self.endpoint = endpoint
+        self.lifecycleObservers = lifecycleObservers
 
         do {
             try endpoint.start { [weak self] line in
@@ -384,6 +546,7 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
     }
 
     func stop() {
+        lifecycleObservers.stop()
         endpoint.stop()
         panel.orderOut(nil)
     }
@@ -391,6 +554,9 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
     private func handle(line: String) -> String {
         guard let command = Issue96ProbeCommand.parse(line) else {
             return "ERROR reason=unsupported-command\n"
+        }
+        if let traceResponse = Issue96ProbeTraceControl.handle(command, trace: lifecycleTrace) {
+            return traceResponse
         }
         if command == .status {
             return statusLine()
@@ -418,7 +584,8 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         let state = windowState()
         let panelDisplayID = Self.displayID(for: panel.screen).map(String.init) ?? "none"
         return "OK kind=status target_display_id=\(targetDisplayID) panel_display_id=\(panelDisplayID)"
-            + " app_active=\(state.appIsActive) key=\(state.isKeyWindow) main=\(state.isMainWindow)\n"
+            + " app_active=\(state.appIsActive) key=\(state.isKeyWindow) main=\(state.isMainWindow)"
+            + " trace_count=\(lifecycleTrace.count)\n"
     }
 
     private func windowState() -> Issue96ProbeWindowState {

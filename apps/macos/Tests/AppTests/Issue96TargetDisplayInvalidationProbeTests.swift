@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import App
 import EdgeSwitch
 
@@ -23,8 +24,128 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
     func testCommandParserAcceptsOnlyOneExactCommand() {
         XCTAssertEqual(Issue96ProbeCommand.parse("redraw\n"), .redraw)
         XCTAssertEqual(Issue96ProbeCommand.parse("cursor-rect"), .cursorRect)
+        XCTAssertEqual(Issue96ProbeCommand.parse("mark-baseline-healthy"), .markBaselineHealthy)
+        XCTAssertEqual(Issue96ProbeCommand.parse("dump-trace"), .dumpTrace)
         XCTAssertNil(Issue96ProbeCommand.parse("redraw extra"))
         XCTAssertNil(Issue96ProbeCommand.parse(""))
+    }
+
+    func testLifecycleTraceIsBoundedOrderedAndClearable() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11, capacity: 3)
+
+        trace.record(event: .viewDraw)
+        trace.record(event: .cursorUpdate, region: .resizeHorizontal)
+        trace.record(event: .mouseMoved, region: .resizeVertical)
+        trace.record(event: .markerBrokenConfirmed)
+
+        XCTAssertEqual(trace.records.count, 3)
+        XCTAssertEqual(trace.records.map(\.sequence), [2, 3, 4])
+        XCTAssertEqual(trace.records.map(\.event), [.cursorUpdate, .mouseMoved, .markerBrokenConfirmed])
+
+        trace.clear()
+        XCTAssertTrue(trace.records.isEmpty)
+        let next = trace.record(event: .markerRecovered)
+        XCTAssertEqual(next.sequence, 5)
+    }
+
+    func testLifecycleTraceUsesStableEventsAndSymbolicRegionsOnly() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11)
+        let record = trace.record(event: .cursorUpdate, region: .resizeDiagonal)
+
+        XCTAssertEqual(record.event.rawValue, "cursor-update")
+        XCTAssertEqual(record.region?.rawValue, "resize-diagonal")
+        XCTAssertTrue(record.traceLine.contains("event=cursor-update"))
+        XCTAssertTrue(record.traceLine.contains("region=resize-diagonal"))
+        for forbidden in ["x=", "y=", "delta", "keyCode", "clipboard", "HID", "payload"] {
+            XCTAssertFalse(record.traceLine.localizedCaseInsensitiveContains(forbidden),
+                           "forbidden input data appeared in lifecycle trace: \(forbidden)")
+        }
+    }
+
+    func testLifecycleEventVocabularyCoversRequiredCallbacksAndMarkers() {
+        let required: Set<Issue96LifecycleEvent> = [
+            .resetCursorRects,
+            .cursorUpdate,
+            .updateTrackingAreas,
+            .mouseEntered,
+            .mouseExited,
+            .mouseMoved,
+            .applicationDidBecomeActive,
+            .applicationDidResignActive,
+            .windowDidBecomeKey,
+            .windowDidResignKey,
+            .windowDidBecomeMain,
+            .windowDidResignMain,
+            .windowDidChangeOcclusionState,
+            .windowDidMiniaturize,
+            .windowDidDeminiaturize,
+            .windowDidChangeScreen,
+            .windowDidMove,
+            .windowDidResize,
+            .windowWillClose,
+            .viewDidMoveToWindow,
+            .viewDidMoveToSuperview,
+            .viewLayout,
+            .viewDraw,
+            .markerBaselineHealthy,
+            .markerBrokenConfirmed,
+            .markerRecoveryAction,
+            .markerRecovered,
+            .markerStillBroken,
+        ]
+
+        XCTAssertEqual(Set(Issue96LifecycleEvent.allCases), required)
+        XCTAssertTrue(Issue96ProbeWindowConfiguration.trackingAreaOptions.contains(.mouseMoved))
+        XCTAssertEqual(
+            Issue96CursorRegion.cursorRegions,
+            [.resizeHorizontal, .resizeVertical, .resizeDiagonal])
+    }
+
+    func testTraceControlCommandsDoNotDispatchAppKitPrimitives() {
+        let operations = RecordingProbeOperations()
+        let dispatcher = Issue96ProbeDispatcher(operations: operations)
+        let commands: [Issue96ProbeCommand] = [.status] + Issue96ProbeCommand.traceControlKinds
+
+        for command in commands {
+            XCTAssertNil(dispatcher.dispatch(command), "trace control dispatched a primitive: \(command.rawValue)")
+        }
+        XCTAssertTrue(operations.calls.isEmpty)
+    }
+
+    func testOneMarkerCommandAddsExactlyOneMarker() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11)
+
+        let response = Issue96ProbeTraceControl.handle(.markBaselineHealthy, trace: trace)
+
+        XCTAssertEqual(response, "OK kind=mark-baseline-healthy sequence=1\n")
+        XCTAssertEqual(trace.records.count, 1)
+        XCTAssertEqual(trace.records[0].event, .markerBaselineHealthy)
+    }
+
+    func testClearAndDumpTraceDoNotMutateAppKitOrTraceDuringDump() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11)
+        trace.record(event: .viewDraw)
+        let beforeDump = trace.records
+
+        let dump = Issue96ProbeTraceControl.handle(.dumpTrace, trace: trace)
+        XCTAssertNotNil(dump)
+        XCTAssertEqual(trace.records, beforeDump)
+        XCTAssertTrue(dump?.contains("event=view-draw") == true)
+
+        let clear = Issue96ProbeTraceControl.handle(.clearTrace, trace: trace)
+        XCTAssertEqual(clear, "OK kind=clear-trace count=0\n")
+        XCTAssertTrue(trace.records.isEmpty)
+    }
+
+    func testTraceDumpIsBounded() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11, capacity: 1_000)
+        for _ in 0..<1_000 {
+            trace.record(event: .mouseMoved, region: .background)
+        }
+
+        let dump = trace.dumpResponse()
+        XCTAssertLessThanOrEqual(dump.utf8.count, Issue96LifecycleTrace.maximumDumpBytes)
+        XCTAssertTrue(dump.contains("count=1000"))
     }
 
     func testEndpointExecutionInvokesOneValidHandlerExactlyOnce() async {
