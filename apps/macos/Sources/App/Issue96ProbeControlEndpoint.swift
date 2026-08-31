@@ -134,6 +134,7 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
                 if errno == EAGAIN || errno == EWOULDBLOCK { return }
                 return
             }
+            Self.preventSigPipe(on: client)
             guard connectionSlots.wait(timeout: .now()) == .success else {
                 Self.write("ERROR reason=endpoint-busy\n", to: client)
                 shutdown(client, SHUT_RDWR)
@@ -199,9 +200,18 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
 
     private static func write(_ value: String, to client: Int32) {
         let data = Data(value.utf8)
-        data.withUnsafeBytes { buffer in
-            guard let baseAddress = buffer.baseAddress else { return }
-            _ = Darwin.write(client, baseAddress, buffer.count)
+        _ = Issue96ProbeSocketWriter.writeAll(data, to: client, write: Darwin.write)
+    }
+
+    private static func preventSigPipe(on client: Int32) {
+        var value: Int32 = 1
+        _ = withUnsafePointer(to: &value) { pointer in
+            setsockopt(
+                client,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                pointer,
+                socklen_t(MemoryLayout<Int32>.size))
         }
     }
 
@@ -209,6 +219,36 @@ final class Issue96ProbeControlEndpoint: @unchecked Sendable {
         case pathTooLong
         case pathOccupied
         case systemCall(String)
+    }
+}
+
+enum Issue96ProbeSocketWriter {
+    typealias WriteCall = (Int32, UnsafeRawPointer?, Int) -> Int
+
+    @discardableResult
+    static func writeAll(
+        _ data: Data,
+        to client: Int32,
+        write: WriteCall) -> Bool {
+        data.withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return true }
+
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(
+                    client,
+                    baseAddress.advanced(by: offset),
+                    buffer.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0, errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
     }
 }
 

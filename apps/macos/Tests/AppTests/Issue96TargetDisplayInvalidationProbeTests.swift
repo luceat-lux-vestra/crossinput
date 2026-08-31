@@ -1,5 +1,6 @@
-import XCTest
 import AppKit
+import Darwin
+import XCTest
 @testable import App
 import EdgeSwitch
 
@@ -95,7 +96,12 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         ]
 
         XCTAssertEqual(Set(Issue96LifecycleEvent.allCases), required)
-        XCTAssertTrue(Issue96ProbeWindowConfiguration.trackingAreaOptions.contains(.mouseMoved))
+        XCTAssertTrue(Issue96ProbeWindowConfiguration.mouseTrackingAreaOptions.contains(.activeAlways))
+        XCTAssertTrue(Issue96ProbeWindowConfiguration.mouseTrackingAreaOptions.contains(.mouseMoved))
+        XCTAssertFalse(Issue96ProbeWindowConfiguration.mouseTrackingAreaOptions.contains(.cursorUpdate))
+        XCTAssertTrue(Issue96ProbeWindowConfiguration.cursorUpdateTrackingAreaOptions.contains(.activeInActiveApp))
+        XCTAssertTrue(Issue96ProbeWindowConfiguration.cursorUpdateTrackingAreaOptions.contains(.cursorUpdate))
+        XCTAssertFalse(Issue96ProbeWindowConfiguration.cursorUpdateTrackingAreaOptions.contains(.activeAlways))
         XCTAssertEqual(
             Issue96CursorRegion.cursorRegions,
             [.resizeHorizontal, .resizeVertical, .resizeDiagonal])
@@ -146,6 +152,54 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dump = trace.dumpResponse()
         XCTAssertLessThanOrEqual(dump.utf8.count, Issue96LifecycleTrace.maximumDumpBytes)
         XCTAssertTrue(dump.contains("count=1000"))
+    }
+
+    func testTruncatedTraceDumpPreservesNewestChronologicalSuffixAndMarker() {
+        let trace = Issue96LifecycleTrace(targetDisplayID: 11, capacity: 1_000)
+        for _ in 0..<999 {
+            trace.record(event: .mouseMoved, region: .background)
+        }
+        let marker = trace.record(event: .markerBrokenConfirmed)
+
+        let dump = trace.dumpResponse()
+        let lines = dump.split(separator: "\n").map(String.init)
+        let sequenceLines = lines.filter { $0.hasPrefix("TRACE sequence=") }
+        let sequences = sequenceLines.compactMap { line -> UInt64? in
+            let fields = line.split(separator: " ")
+            guard let sequence = fields.first(where: { $0.hasPrefix("sequence=") }) else { return nil }
+            return UInt64(sequence.dropFirst("sequence=".count))
+        }
+
+        XCTAssertTrue(dump.contains("truncated=true"))
+        XCTAssertTrue(dump.contains("event=marker-broken-confirmed"))
+        XCTAssertTrue(dump.contains("sequence=\(marker.sequence)"))
+        XCTAssertEqual(sequences, sequences.sorted())
+        XCTAssertEqual(sequences.last, marker.sequence)
+        XCTAssertLessThanOrEqual(dump.utf8.count, Issue96LifecycleTrace.maximumDumpBytes)
+    }
+
+    func testSocketWriterCompletesLargePayloadAcrossShortWritesAndEINTR() {
+        let payload = Data((0..<(Issue96LifecycleTrace.maximumDumpBytes + 123)).map { UInt8($0 % 251) })
+        var received = Data()
+        var callCount = 0
+        var shouldInterrupt = true
+
+        let success = Issue96ProbeSocketWriter.writeAll(payload, to: 99) { _, pointer, count in
+            callCount += 1
+            if shouldInterrupt {
+                shouldInterrupt = false
+                errno = EINTR
+                return -1
+            }
+            guard let pointer else { return -1 }
+            let amount = min(count, 17)
+            received.append(Data(bytes: pointer, count: amount))
+            return amount
+        }
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(received, payload)
+        XCTAssertGreaterThan(callCount, 2)
     }
 
     func testEndpointExecutionInvokesOneValidHandlerExactlyOnce() async {

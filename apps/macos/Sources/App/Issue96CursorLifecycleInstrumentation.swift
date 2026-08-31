@@ -98,7 +98,9 @@ final class Issue96LifecycleTrace {
     let targetDisplayID: CGDirectDisplayID
     let capacity: Int
     weak var window: NSWindow?
-    private(set) var records: [Issue96LifecycleTraceRecord] = []
+    private var storage: [Issue96LifecycleTraceRecord?]
+    private var headIndex = 0
+    private var storedCount = 0
 
     private var nextSequence: UInt64 = 0
 
@@ -106,12 +108,20 @@ final class Issue96LifecycleTrace {
         targetDisplayID: CGDirectDisplayID,
         window: NSWindow? = nil,
         capacity: Int = Issue96LifecycleTrace.defaultCapacity) {
+        let boundedCapacity = max(1, capacity)
         self.targetDisplayID = targetDisplayID
         self.window = window
-        self.capacity = max(1, capacity)
+        self.capacity = boundedCapacity
+        storage = Array(repeating: nil, count: boundedCapacity)
     }
 
-    var count: Int { records.count }
+    var count: Int { storedCount }
+
+    var records: [Issue96LifecycleTraceRecord] {
+        (0..<storedCount).compactMap { offset in
+            storage[(headIndex + offset) % capacity]
+        }
+    }
 
     @discardableResult
     func record(
@@ -126,38 +136,50 @@ final class Issue96LifecycleTrace {
             targetDisplayID: targetDisplayID,
             windowDisplayID: Self.displayID(for: window?.screen),
             windowState: windowState())
-        records.append(record)
-        if records.count > capacity {
-            records.removeFirst(records.count - capacity)
+        if storedCount < capacity {
+            let index = (headIndex + storedCount) % capacity
+            storage[index] = record
+            storedCount += 1
+        } else {
+            storage[headIndex] = record
+            headIndex = (headIndex + 1) % capacity
         }
         return record
     }
 
     func clear() {
-        records.removeAll(keepingCapacity: true)
+        storage = Array(repeating: nil, count: capacity)
+        headIndex = 0
+        storedCount = 0
     }
 
     func dumpResponse() -> String {
-        let completeHeader = "OK kind=dump-trace count=\(records.count) capacity=\(capacity) truncated=false\n"
-        let completeBody = completeHeader + records.map(\.traceLine).joined()
+        let currentRecords = records
+        let completeHeader = "OK kind=dump-trace count=\(currentRecords.count) capacity=\(capacity) truncated=false\n"
+        let completeBody = completeHeader + currentRecords.map(\.traceLine).joined()
         guard completeBody.utf8.count > Self.maximumDumpBytes else {
             return completeBody
         }
 
-        let prefix = "OK kind=dump-trace count=\(records.count)"
-        var includedLines: [String] = []
-        for record in records {
-            let candidateCount = includedLines.count + 1
+        // Preserve the newest contiguous suffix so an immediately preceding
+        // lifecycle event and the latest off-target marker survive truncation.
+        // Build output in chronological order even though selection walks
+        // backwards from the newest record.
+        let prefix = "OK kind=dump-trace count=\(currentRecords.count)"
+        var newestFirstLines: [String] = []
+        for record in currentRecords.reversed() {
+            let candidateCount = newestFirstLines.count + 1
             let candidateHeader = prefix
                 + " included=\(candidateCount) capacity=\(capacity) truncated=true\n"
-            let candidateBody = candidateHeader + (includedLines + [record.traceLine]).joined()
+            let candidateLines = [record.traceLine] + Array(newestFirstLines.reversed())
+            let candidateBody = candidateHeader + candidateLines.joined()
             guard candidateBody.utf8.count <= Self.maximumDumpBytes else { break }
-            includedLines.append(record.traceLine)
+            newestFirstLines.append(record.traceLine)
         }
 
         let truncatedHeader = prefix
-            + " included=\(includedLines.count) capacity=\(capacity) truncated=true\n"
-        return truncatedHeader + includedLines.joined()
+            + " included=\(newestFirstLines.count) capacity=\(capacity) truncated=true\n"
+        return truncatedHeader + newestFirstLines.reversed().joined()
     }
 
     private func windowState() -> Issue96LifecycleTraceWindowState {

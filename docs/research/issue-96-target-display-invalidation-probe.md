@@ -82,6 +82,15 @@ The macOS SDK used for this build does not expose a built-in diagonal resize
 retained as a symbolic region for callback classification. Only the built-in
 horizontal and vertical native resize cursors are registered.
 
+The view uses two separate owned tracking areas. The mouse lifecycle area uses
+`.activeAlways`, `.mouseEnteredAndExited`, and `.mouseMoved`. The cursor-update
+area uses `.activeInActiveApp` and `.cursorUpdate`. AppKit documents that
+`.activeAlways` combined with `.cursorUpdate` suppresses `cursorUpdate(with:)`,
+so that invalid combination is deliberately not constructed. Consequently,
+`cursor-update` observation is meaningful only while the application is
+active; application activation state is recorded alongside the trace rather
+than inferred from cursor callbacks.
+
 ## Lifecycle callbacks instrumented
 
 The view records these callbacks:
@@ -139,9 +148,12 @@ Fields are:
 * window key/main state;
 * window visibility and public occlusion-state raw value.
 
-The in-memory trace is a deterministic FIFO ring with capacity 1,000 records.
+The in-memory trace is a deterministic circular ring with capacity 1,000
+records, avoiding an array front-shift on every high-frequency callback.
 `clear-trace` clears retained records but does not reset the monotonic sequence.
-`dump-trace` is capped at 64 KiB and reports whether output was truncated.
+`dump-trace` is capped at 64 KiB and reports whether output was truncated. When
+truncated, it retains the newest contiguous suffix and emits that suffix in
+chronological order, preserving the latest trial marker and nearby callbacks.
 No raw coordinates, event payloads, keys, clipboard data, HID reports, or
 screen content are retained or emitted.
 
@@ -168,6 +180,11 @@ clear-trace
 dump-trace
 ```
 
+The socket writer handles short writes, retries `EINTR`, and sets
+`SO_NOSIGPIPE` for accepted clients. A disconnected client can therefore
+discard its response without terminating the process; no partial write is
+reported as a complete response internally.
+
 Use the repository script from SSH or another off-target shell:
 
 ```sh
@@ -193,7 +210,7 @@ Their exact mappings remain:
 | --- | --- |
 | `redraw` | `view.needsDisplay = true`; `view.displayIfNeeded()` |
 | `cursor-rect` | `window.invalidateCursorRects(for: view)` |
-| `tracking-area` | owned tracking-area remove/add |
+| `tracking-area` | remove/add both owned tracking areas |
 | `window-update` | `window.orderFront(nil)` |
 | `activation-control` | `NSApplication.activate`; `window.makeKeyAndOrderFront` |
 

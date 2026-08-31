@@ -182,10 +182,17 @@ struct Issue96ProbeDispatcher {
 
 enum Issue96ProbeWindowConfiguration {
     static let styleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
-    static let trackingAreaOptions: NSTrackingArea.Options = [
+    // AppKit documents that .activeAlways and .cursorUpdate must not be
+    // combined: that combination suppresses cursorUpdate(with:). Keep the
+    // always-active mouse lifecycle area separate from the cursor-update
+    // area so each callback has an unambiguous tracking configuration.
+    static let mouseTrackingAreaOptions: NSTrackingArea.Options = [
         .activeAlways,
         .mouseEnteredAndExited,
         .mouseMoved,
+    ]
+    static let cursorUpdateTrackingAreaOptions: NSTrackingArea.Options = [
+        .activeInActiveApp,
         .cursorUpdate,
     ]
     static let becomesKeyOnlyIfNeeded = true
@@ -265,7 +272,7 @@ struct Issue96ProbeRecord: Equatable, Sendable {
 @MainActor
 final class Issue96ProbeView: NSView {
     private let lifecycleTrace: Issue96LifecycleTrace?
-    private var ownedTrackingArea: NSTrackingArea?
+    private var ownedTrackingAreas: [NSTrackingArea] = []
 
     init(frame frameRect: NSRect, lifecycleTrace: Issue96LifecycleTrace? = nil) {
         self.lifecycleTrace = lifecycleTrace
@@ -287,24 +294,32 @@ final class Issue96ProbeView: NSView {
         addCursorRect(rect(for: .resizeVertical), cursor: .resizeUpDown)
     }
 
-    /// Rebuilds only the tracking area owned by this diagnostic view.
-    func rebuildOwnedTrackingArea() {
-        if let ownedTrackingArea {
-            removeTrackingArea(ownedTrackingArea)
+    /// Rebuilds only the tracking areas owned by this diagnostic view.
+    func rebuildOwnedTrackingAreas() {
+        for trackingArea in ownedTrackingAreas {
+            removeTrackingArea(trackingArea)
         }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: Issue96ProbeWindowConfiguration.trackingAreaOptions,
-            owner: self,
-            userInfo: nil)
-        addTrackingArea(area)
-        ownedTrackingArea = area
+        ownedTrackingAreas = [
+            NSTrackingArea(
+                rect: bounds,
+                options: Issue96ProbeWindowConfiguration.mouseTrackingAreaOptions,
+                owner: self,
+                userInfo: nil),
+            NSTrackingArea(
+                rect: bounds,
+                options: Issue96ProbeWindowConfiguration.cursorUpdateTrackingAreaOptions,
+                owner: self,
+                userInfo: nil),
+        ]
+        for trackingArea in ownedTrackingAreas {
+            addTrackingArea(trackingArea)
+        }
     }
 
     override func updateTrackingAreas() {
         lifecycleTrace?.record(event: .updateTrackingAreas)
         super.updateTrackingAreas()
-        rebuildOwnedTrackingArea()
+        rebuildOwnedTrackingAreas()
     }
 
     override func cursorUpdate(with event: NSEvent) {
@@ -443,8 +458,8 @@ final class Issue96ProbeAppKitOperations: Issue96ProbePrimitiveOperations {
     }
 
     func trackingAreaRebuildOnly() -> Issue96ProbeOperationResult {
-        view.rebuildOwnedTrackingArea()
-        return .applied(api: "view.removeTrackingArea+view.addTrackingArea")
+        view.rebuildOwnedTrackingAreas()
+        return .applied(api: "view.removeTrackingArea+view.addTrackingArea (owned areas)")
     }
 
     func nonActivatingWindowUpdateOnly() -> Issue96ProbeOperationResult {
@@ -517,7 +532,7 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         panel.acceptsMouseMovedEvents = true
         let lifecycleObservers = Issue96LifecycleObservers(trace: lifecycleTrace, window: panel)
         panel.orderFrontRegardless()
-        view.rebuildOwnedTrackingArea()
+        view.rebuildOwnedTrackingAreas()
 
         let operations = Issue96ProbeAppKitOperations(window: panel, view: view)
         let endpoint = Issue96ProbeControlEndpoint(path: Issue96ProbeConfiguration.socketPath)
