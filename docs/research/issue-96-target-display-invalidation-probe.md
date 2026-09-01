@@ -48,6 +48,12 @@ presentation state. A later resign-active notification or late marker does not
 invalidate the observation made during the explicitly confirmed active
 interval.
 
+The `26892febac34da24a817e37f7d951fb49b20c283` draft was not physically
+tested. Independent review found that its borderless/nonactivating diagnostic
+panel was not explicitly key-capable, so `window.makeKey()` could fail to
+realize the requested transition. The corrected diagnostic design below adds
+only explicit key eligibility to the Issue #96 panel before any physical trial.
+
 ## Opt-in and target selection
 
 The harness remains disabled unless the app is launched with:
@@ -77,15 +83,19 @@ display is required:
 The harness does not hardcode a display ID, inspect the current pointer, read
 `AppSettings`, or reach into `InputCapture` to select a target.
 
-The diagnostic window is a CrossInput-owned non-activating floating `NSPanel`
-with a minimal custom `NSView`. Its frame is normalized to the selected
-screen's local coordinate space before construction, so a non-primary screen
-origin is not applied twice. It is ordered and its tracking state is
-stabilized before the experiment; that setup is not a probe command.
+The diagnostic window is a CrossInput-owned `Issue96ProbePanel`, a
+non-activating floating `NSPanel` with a minimal custom `NSView`. The diagnostic
+subclass explicitly overrides `canBecomeKey` to return `true`, solely so the
+dedicated `recovery-window-key` trial can request an actual key transition. Its
+frame is normalized to the selected screen's local coordinate space before
+construction, so a non-primary screen origin is not applied twice. It is
+ordered and its tracking state is stabilized before the experiment; that setup
+is not a probe command.
 
-The window is not key or main by default, does not accept first mouse, and
-does not intentionally activate the application. No menu or clickable probe
-control is presented on the target display.
+Key eligibility does not change baseline state: the window is not key or main
+by default, does not accept first mouse, and does not intentionally activate
+the application. No menu or clickable probe control is presented on the target
+display.
 
 ## Diagnostic cursor regions
 
@@ -273,6 +283,12 @@ remains `key=false`, the result is `INVALID / TRANSITION NOT REALIZED`, not
 `STILL BROKEN`. AppKit callbacks that naturally follow `makeKey()` are
 retained as evidence.
 
+The panel's `canBecomeKey == true` capability is not itself a key transition.
+Only `recovery-window-key` requests `window.makeKey()`, and API invocation is
+still not transition proof. Physical evidence must confirm
+`window-did-become-key` and/or `key=true`; human visual HEALTHY/BROKEN judgment
+of the cursor remains authoritative.
+
 ## Physical protocol for a later controlled trial
 
 No physical result is claimed by this implementation or its automated tests.
@@ -328,9 +344,31 @@ human confirms BROKEN while CrossInput is inactive
   -> off-target dump-trace
 ```
 
-The next independent trial is `recovery-window-key`. Do not perform this
-physical trial from the same contaminated state as another recovery command.
-Its operator protocol is:
+The next independent trial is `recovery-window-key`. Because the diagnostic
+panel characteristic changed, first revalidate reproduction from a fresh
+launch of the exact reviewed HEAD. Do not perform this physical trial from the
+same contaminated state as another recovery command.
+
+The operator must begin with:
+
+```text
+fresh launch of exact reviewed HEAD
+
+HEALTHY
+  -> other-display real app activation
+  -> return pointer
+  -> verify the diagnostic horizontal/vertical cursor is still BROKEN
+```
+
+If BROKEN is no longer reproducible with the key-capable diagnostic subclass,
+stop and record:
+
+```text
+NEGATIVE / DIAGNOSTIC SURFACE CHARACTERISTIC CHANGED
+```
+
+Do not proceed to `recovery-window-key`. If BROKEN still reproduces, the
+operator protocol is:
 
 ```text
 1. Start from fresh HEALTHY state.
@@ -338,11 +376,7 @@ Its operator protocol is:
 2. clear-trace
 3. mark-baseline-healthy
 
-4. Reproduce:
-   HEALTHY
-   -> activate another display's normal app/window
-   -> return pointer to target display
-   -> visually confirm diagnostic horizontal/vertical cursor is BROKEN
+4. Confirm the fresh-launch reproduction above remains BROKEN.
 
 5. Off-target:
    mark-broken-confirmed

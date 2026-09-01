@@ -223,6 +223,13 @@ struct Issue96WindowKeyRecoveryCoordinator {
     }
 }
 
+/// Diagnostic-only panel capability required by the non-key -> key trial.
+/// This does not make the panel key during baseline setup.
+@MainActor
+final class Issue96ProbePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
 @MainActor
 struct Issue96ProbeDispatcher {
     private let primitiveOperations: any Issue96ProbePrimitiveOperations
@@ -662,7 +669,7 @@ final class Issue96WindowKeyRecoveryAppKitOperation: Issue96WindowKeyRecoveryOpe
 @MainActor
 final class Issue96TargetDisplayInvalidationProbeHarness {
     let targetDisplayID: CGDirectDisplayID
-    let panel: NSPanel
+    let panel: Issue96ProbePanel
     let view: Issue96ProbeView
     let lifecycleTrace: Issue96LifecycleTrace
 
@@ -686,7 +693,7 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
             screenFrame: targetScreen.frame,
             size: size)
         let lifecycleTrace = Issue96LifecycleTrace(targetDisplayID: selectedDisplayID)
-        let panel = NSPanel(
+        let panel = Issue96ProbePanel(
             contentRect: frame,
             styleMask: Issue96ProbeWindowConfiguration.styleMask,
             backing: .buffered,

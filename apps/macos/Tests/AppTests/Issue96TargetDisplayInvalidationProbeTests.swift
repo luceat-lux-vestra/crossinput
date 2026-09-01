@@ -467,6 +467,22 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertEqual(many, .ambiguous([11, 42]))
     }
 
+    func testDiagnosticPanelSubclassIsKeyCapableWithoutChangingBaselineState() {
+        let panel = Issue96ProbePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+            styleMask: Issue96ProbeWindowConfiguration.styleMask,
+            backing: .buffered,
+            defer: true)
+        panel.becomesKeyOnlyIfNeeded = Issue96ProbeWindowConfiguration.becomesKeyOnlyIfNeeded
+
+        XCTAssertTrue(panel.canBecomeKey)
+        XCTAssertFalse(panel.isKeyWindow)
+        XCTAssertFalse(panel.isMainWindow)
+        XCTAssertTrue(panel.styleMask.contains(.borderless))
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.becomesKeyOnlyIfNeeded)
+    }
+
     func testDiagnosticWindowConfigurationIsNonActivatingByDefault() {
         XCTAssertTrue(Issue96ProbeWindowConfiguration.styleMask.contains(.borderless))
         XCTAssertTrue(Issue96ProbeWindowConfiguration.styleMask.contains(.nonactivatingPanel))
