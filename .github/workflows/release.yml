@@ -28,8 +28,6 @@ jobs:
   dmg:
     runs-on: macos-15
     timeout-minutes: 30
-    # Release mutation is the only write this workflow needs, and it is scoped
-    # to the single job that performs it.
     permissions:
       contents: write
     steps:
@@ -47,7 +45,6 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
-          # The build must not have ambient push access to the repository.
           persist-credentials: false
 
       - name: Verify checked-out tag identity
@@ -59,6 +56,15 @@ jobs:
           head_commit="$(git rev-parse HEAD)"
           test "${head_commit}" = "${tag_commit}"
           test -z "$(git status --porcelain)"
+
+          # Tag immutability alone does not prove the source was reviewed. Refuse
+          # publication unless the tagged commit is already reachable from main.
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${head_commit}" origin/main || {
+            echo "release tag ${RELEASE_TAG} points to ${head_commit}, which is not reviewed main history" >&2
+            exit 1
+          }
+
           echo "commit=${head_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Build DMG
@@ -106,11 +112,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Branch on the HTTP status line, not on substring-matching an error
-          # message: "not found" also appears in auth/permission failures, and
-          # treating those as "no release yet" is a fail-open path. Anything
-          # that is neither 200 nor 404 - including a transport failure, which
-          # produces no status line at all - aborts the release.
           set +e
           lookup="$(gh api --include \
             "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null \
@@ -146,13 +147,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Closes the tag -> source -> artifact -> release chain: the release
-          # that now exists must carry this tag, the tag must still resolve to
-          # the commit that was built, and both asset names must be present.
           release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
           test "$(jq -r '.tag_name' <<<"${release}")" = "${RELEASE_TAG}"
 
-          # Resolves lightweight and annotated tags alike, server-side.
           published_commit="$(gh api \
             "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
           test "${published_commit}" = "${SOURCE_COMMIT}"
