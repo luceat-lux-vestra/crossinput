@@ -24,6 +24,8 @@ area/ci:
       - any-glob-to-any-file:
           - ".github/**"
           - "scripts/check-*.sh"
+          - "scripts/check-*.py"
+          - "scripts/lib/workflow_yaml.py"
           - "scripts/test-*.py"
           - "scripts/*fixture*.sh"
 

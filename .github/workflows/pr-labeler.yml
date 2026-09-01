@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 concurrency:
   group: pr-labeler-${{ github.event.pull_request.number }}
@@ -22,6 +20,13 @@ jobs:
     name: classify
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Label writes only. This workflow never checks out or executes
+    # fork-controlled code, so the pull_request_target token stays confined to
+    # this job.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     steps:
       - name: Ensure managed labels and classify PR type
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0

@@ -1,0 +1,131 @@
+name: Hardening audit
+
+# Weekly drift detection for controls that live outside the diff: ruleset and
+# required-check drift, action pinning, workflow permissions and trust
+# boundaries, and CodeQL authority. Detection is read-only; only the reporting
+# job may write, and it only ever touches one owned issue.
+#
+# This workflow deliberately says nothing about ADR-0012 physical-device
+# evidence acceptance. It checks that the analyzer/verifier tooling is present
+# and unbroken; it never produces, credits, or substitutes for a device cycle.
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardening-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: detect
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Static and live hardening audit
+        id: audit
+        env:
+          # Read-only for the live half. Ruleset and Actions-policy readbacks
+          # need repository administration scope that GITHUB_TOKEN cannot hold,
+          # so those come back as SKIPPED findings unless a scoped PAT is
+          # provided. A skip is reported, never silently treated as a pass.
+          GH_TOKEN: ${{ secrets.HARDENING_AUDIT_TOKEN || github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          python3 scripts/check-workflow-policy.py --live --allow-live-skip \
+            | tee hardening-audit.txt
+        continue-on-error: true
+
+      - name: Physical-evidence tooling contract
+        # Integrity of the verifier only. No device evidence is generated here.
+        run: |
+          set -euo pipefail
+          python3 scripts/test-handoff-stability-analyzer.py
+          python3 scripts/test-issue62-aggregator.py
+
+      - name: Publish audit report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hardening-audit
+          path: hardening-audit.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail the detection job on findings
+        if: steps.audit.outcome != 'success'
+        run: |
+          echo "hardening audit reported findings; see the job log and artifact" >&2
+          exit 1
+
+  report:
+    name: report
+    needs: detect
+    if: always() && needs.detect.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only write in this workflow, isolated from detection.
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: hardening-audit
+        continue-on-error: true
+
+      - name: Upsert the owned drift issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- hardening-audit -->';
+            const title = 'chore(repo): hardening drift detected';
+            let report = 'The audit report artifact was not available; see the workflow run.';
+            try {
+              report = fs.readFileSync('hardening-audit.txt', 'utf8').trim() || report;
+            } catch (error) {
+              if (error.code !== 'ENOENT') throw error;
+            }
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              `Scheduled hardening audit reported drift on \`${context.sha}\`.`,
+              '',
+              '```',
+              report.slice(0, 55000),
+              '```',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'This issue is maintained idempotently by `.github/workflows/hardening-audit.yml`.',
+              'It reports control drift only and never speaks to ADR-0012 physical-device',
+              'evidence acceptance.',
+            ].join('\n');
+
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, state: 'all', labels: 'area/ci', per_page: 100,
+            });
+            const owned = existing.find(issue =>
+              !issue.pull_request && issue.title === title && (issue.body || '').includes(marker));
+
+            if (!owned) {
+              await github.rest.issues.create({
+                ...context.repo, title, body, labels: ['area/ci', 'type/task', 'priority/medium'],
+              });
+              return;
+            }
+            await github.rest.issues.update({
+              ...context.repo, issue_number: owned.number, body, state: 'open',
+            });

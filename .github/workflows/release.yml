@@ -15,7 +15,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
@@ -28,6 +28,10 @@ jobs:
   dmg:
     runs-on: macos-15
     timeout-minutes: 30
+    # Release mutation is the only write this workflow needs, and it is scoped
+    # to the single job that performs it.
+    permissions:
+      contents: write
     steps:
       - name: Validate release tag input
         shell: bash
@@ -43,8 +47,11 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+          # The build must not have ambient push access to the repository.
+          persist-credentials: false
 
       - name: Verify checked-out tag identity
+        id: source
         shell: bash
         run: |
           set -euo pipefail
@@ -52,6 +59,7 @@ jobs:
           head_commit="$(git rev-parse HEAD)"
           test "${head_commit}" = "${tag_commit}"
           test -z "$(git status --porcelain)"
+          echo "commit=${head_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
@@ -96,24 +104,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Branch on the HTTP status line, not on substring-matching an error
+          # message: "not found" also appears in auth/permission failures, and
+          # treating those as "no release yet" is a fail-open path. Anything
+          # that is neither 200 nor 404 - including a transport failure, which
+          # produces no status line at all - aborts the release.
           set +e
-          release_view_output="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" 2>&1)"
-          release_view_status=$?
+          lookup="$(gh api --include \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null \
+            | grep -m1 -E '^HTTP/')"
           set -e
 
-          if [[ ${release_view_status} -eq 0 ]]; then
-            gh release upload "${RELEASE_TAG}" \
-              "${DMG}" "${CHECKSUM}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          elif grep -qiE 'release not found|not found' <<<"${release_view_output}"; then
-            gh release create "${RELEASE_TAG}" \
-              "${DMG}" "${CHECKSUM}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "Ampersand ${VERSION}" \
-              --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
-          else
-            printf '%s\n' "${release_view_output}" >&2
-            exit "${release_view_status}"
-          fi
+          case "${lookup}" in
+            HTTP*\ 200*)
+              gh release upload "${RELEASE_TAG}" \
+                "${DMG}" "${CHECKSUM}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --clobber
+              ;;
+            HTTP*\ 404*)
+              gh release create "${RELEASE_TAG}" \
+                "${DMG}" "${CHECKSUM}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --verify-tag \
+                --title "Ampersand ${VERSION}" \
+                --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
+              ;;
+            *)
+              echo "release lookup was inconclusive, refusing to publish: ${lookup}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify published release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Closes the tag -> source -> artifact -> release chain: the release
+          # that now exists must carry this tag, the tag must still resolve to
+          # the commit that was built, and both asset names must be present.
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          test "$(jq -r '.tag_name' <<<"${release}")" = "${RELEASE_TAG}"
+
+          # Resolves lightweight and annotated tags alike, server-side.
+          published_commit="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          test "${published_commit}" = "${SOURCE_COMMIT}"
+
+          assets="$(jq -r '.assets[].name' <<<"${release}")"
+          grep -qx "Ampersand-${VERSION}.dmg" <<<"${assets}"
+          grep -qx "Ampersand-${VERSION}.sha256" <<<"${assets}"
