@@ -81,9 +81,11 @@ jobs:
           (cd dist && shasum -a 256 "Ampersand-${VERSION}.dmg" > "Ampersand-${VERSION}.sha256")
           test -s "${CHECKSUM}"
 
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "dmg=${DMG}" >> "${GITHUB_OUTPUT}"
-          echo "checksum=${CHECKSUM}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "version=${VERSION}"
+            echo "dmg=${DMG}"
+            echo "checksum=${CHECKSUM}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
