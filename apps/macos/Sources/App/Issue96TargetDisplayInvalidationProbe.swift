@@ -29,6 +29,7 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     case windowUpdate = "window-update"
     case activationControl = "activation-control"
     case recoveryAppActivate = "recovery-app-activate"
+    case recoveryWindowKey = "recovery-window-key"
     case status
     case markBaselineHealthy = "mark-baseline-healthy"
     case markBrokenConfirmed = "mark-broken-confirmed"
@@ -43,7 +44,7 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     }
 
     static var recoveryKinds: [Issue96ProbeCommand] {
-        [.recoveryAppActivate]
+        [.recoveryAppActivate, .recoveryWindowKey]
     }
 
     static var traceControlKinds: [Issue96ProbeCommand] {
@@ -166,6 +167,13 @@ protocol Issue96ApplicationActivationRecoveryOperations: AnyObject {
     func applicationActivationOnly() -> Issue96ProbeOperationResult
 }
 
+/// The affected-window key transition is a separate recovery experiment. It
+/// intentionally has no application-activation operation available to it.
+@MainActor
+protocol Issue96WindowKeyRecoveryOperations: AnyObject {
+    func windowKeyTransitionOnly() -> Issue96ProbeOperationResult
+}
+
 /// The state transition itself is kept injectable so the already-active
 /// fail-closed branch can be tested without activating the test runner.
 @MainActor
@@ -184,16 +192,50 @@ struct Issue96ApplicationActivationCoordinator {
     }
 }
 
+/// Preconditions and the one requested key-window operation are injectable so
+/// tests can exercise the exact state machine without changing XCTest window
+/// or application state.
+@MainActor
+struct Issue96WindowKeyRecoveryCoordinator {
+    let windowExists: () -> Bool
+    let windowIsOnTargetDisplay: () -> Bool
+    let applicationIsActive: () -> Bool
+    let windowIsKey: () -> Bool
+    let makeWindowKey: () -> Void
+
+    func run() -> Issue96ProbeOperationResult {
+        let api = "window.makeKey()"
+        guard windowExists() else {
+            return .failed(api: api, reason: "diagnostic-window-unavailable")
+        }
+        guard windowIsOnTargetDisplay() else {
+            return .failed(api: api, reason: "diagnostic-window-not-on-target-display")
+        }
+        guard applicationIsActive() else {
+            return .failed(api: api, reason: "application-not-active")
+        }
+        guard !windowIsKey() else {
+            return .failed(api: api, reason: "diagnostic-window-already-key")
+        }
+
+        makeWindowKey()
+        return .applied(api: api)
+    }
+}
+
 @MainActor
 struct Issue96ProbeDispatcher {
     private let primitiveOperations: any Issue96ProbePrimitiveOperations
     private let applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations
+    private let windowKeyRecovery: any Issue96WindowKeyRecoveryOperations
 
     init(
         operations: any Issue96ProbePrimitiveOperations,
-        applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations) {
+        applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations,
+        windowKeyRecovery: any Issue96WindowKeyRecoveryOperations) {
         primitiveOperations = operations
         self.applicationActivationRecovery = applicationActivationRecovery
+        self.windowKeyRecovery = windowKeyRecovery
     }
 
     func dispatch(_ command: Issue96ProbeCommand) -> Issue96ProbeOperationResult? {
@@ -210,6 +252,8 @@ struct Issue96ProbeDispatcher {
             return primitiveOperations.activationPositiveControl()
         case .recoveryAppActivate:
             return applicationActivationRecovery.applicationActivationOnly()
+        case .recoveryWindowKey:
+            return windowKeyRecovery.windowKeyTransitionOnly()
         case .status, .markBaselineHealthy, .markBrokenConfirmed, .markRecoveryAction,
              .markRecovered, .markStillBroken, .clearTrace, .dumpTrace:
             return nil
@@ -302,7 +346,8 @@ struct Issue96ProbeRecord: Equatable, Sendable {
     }
 
     var responseLine: String {
-        if kind == .recoveryAppActivate, let failureReason = result.failureReason {
+        if (kind == .recoveryAppActivate || kind == .recoveryWindowKey),
+           let failureReason = result.failureReason {
             return "ERROR sequence=\(sequence) kind=\(kind.rawValue) reason=\(failureReason)"
         }
         return "OK sequence=\(sequence) kind=\(kind.rawValue) api_success=\(result.succeeded)"
@@ -565,6 +610,55 @@ final class Issue96ApplicationActivationAppKitOperation: Issue96ApplicationActiv
     }
 }
 
+/// AppKit implementation of the affected-window non-key -> key recovery
+/// experiment. The only requested AppKit mutation is `window.makeKey()`;
+/// lifecycle notifications and the resulting key state remain evidence.
+@MainActor
+final class Issue96WindowKeyRecoveryAppKitOperation: Issue96WindowKeyRecoveryOperations {
+    weak var window: NSWindow?
+    private let applicationIsActive: () -> Bool
+    private let windowIsOnTargetDisplay: () -> Bool
+    private let windowIsKey: () -> Bool
+    private let makeWindowKey: () -> Void
+
+    init(
+        window: NSWindow,
+        targetDisplayID: CGDirectDisplayID,
+        applicationIsActive: @escaping () -> Bool = { NSApplication.shared.isActive },
+        windowIsOnTargetDisplay: (() -> Bool)? = nil,
+        windowIsKey: (() -> Bool)? = nil,
+        makeWindowKey: (() -> Void)? = nil) {
+        self.window = window
+        self.applicationIsActive = applicationIsActive
+        self.windowIsOnTargetDisplay = windowIsOnTargetDisplay ?? { [weak window] in
+            Self.displayID(for: window?.screen) == targetDisplayID
+        }
+        self.windowIsKey = windowIsKey ?? { [weak window] in
+            window?.isKeyWindow ?? false
+        }
+        self.makeWindowKey = makeWindowKey ?? { [weak window] in
+            window?.makeKey()
+        }
+    }
+
+    func windowKeyTransitionOnly() -> Issue96ProbeOperationResult {
+        Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { [weak self] in self?.window != nil },
+            windowIsOnTargetDisplay: windowIsOnTargetDisplay,
+            applicationIsActive: applicationIsActive,
+            windowIsKey: windowIsKey,
+            makeWindowKey: makeWindowKey)
+            .run()
+    }
+
+    private static func displayID(for screen: NSScreen?) -> CGDirectDisplayID? {
+        guard let number = screen?.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else { return nil }
+        return CGDirectDisplayID(number.uint32Value)
+    }
+}
+
 @MainActor
 final class Issue96TargetDisplayInvalidationProbeHarness {
     let targetDisplayID: CGDirectDisplayID
@@ -621,6 +715,9 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         let applicationActivationRecovery = Issue96ApplicationActivationAppKitOperation(
             window: panel,
             targetDisplayID: selectedDisplayID)
+        let windowKeyRecovery = Issue96WindowKeyRecoveryAppKitOperation(
+            window: panel,
+            targetDisplayID: selectedDisplayID)
         let endpoint = Issue96ProbeControlEndpoint(path: Issue96ProbeConfiguration.socketPath)
 
         self.targetDisplayID = selectedDisplayID
@@ -629,7 +726,8 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         self.lifecycleTrace = lifecycleTrace
         self.dispatcher = Issue96ProbeDispatcher(
             operations: operations,
-            applicationActivationRecovery: applicationActivationRecovery)
+            applicationActivationRecovery: applicationActivationRecovery,
+            windowKeyRecovery: windowKeyRecovery)
         self.endpoint = endpoint
         self.lifecycleObservers = lifecycleObservers
 

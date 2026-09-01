@@ -36,6 +36,18 @@ remains visible on the configured display and continues to receive
 `mouseEntered`, `mouseExited`, and `mouseMoved` callbacks. This is lifecycle
 observation evidence, not an inferred cursor state or a root-cause conclusion.
 
+The activation-only recovery trial was then performed on exact HEAD
+`3ce56e1fd8b533df73bf64b323b1f4c1974e6457`. The recorded sequence included
+`marker-broken-confirmed app_active=false key=false main=false`,
+`marker-recovery-action app_active=false key=false main=false`, and
+`application-did-become-active app_active=true key=false main=false`. The
+operator visually checked the affected horizontal/vertical native cursor while
+the application was active, and it remained BROKEN. Application activation
+alone was therefore insufficient to recover the BROKEN native cursor
+presentation state. A later resign-active notification or late marker does not
+invalidate the observation made during the explicitly confirmed active
+interval.
+
 ## Opt-in and target selection
 
 The harness remains disabled unless the app is launched with:
@@ -180,6 +192,7 @@ tracking-area
 window-update
 activation-control
 recovery-app-activate
+recovery-window-key
 mark-baseline-healthy
 mark-broken-confirmed
 mark-recovery-action
@@ -226,6 +239,7 @@ Their exact mappings remain:
 | `window-update` | `window.orderFront(nil)` |
 | `activation-control` | `NSApplication.activate`; `window.makeKeyAndOrderFront` |
 | `recovery-app-activate` | `NSApplication.activate(ignoringOtherApps: true)` only, after fail-closed checks |
+| `recovery-window-key` | `window.makeKey()` only, after fail-closed checks |
 
 `recovery-app-activate` requires the panel to exist on the configured target
 display and the application to be inactive. If the app is already active it
@@ -237,6 +251,27 @@ tracking-area rebuild, cursor setter, synthetic input, or pointer movement.
 AppKit notifications that naturally follow activation remain observable in
 the existing trace. The command does not add any automatic trial marker and
 does not claim cursor recovery.
+
+`recovery-window-key` is a separate affected-window recovery experiment. It
+requires, in order, that the diagnostic window still exists, remains on the
+configured target display, the application is already active, and the
+diagnostic window is currently non-key. Failure returns an explicit reason:
+`diagnostic-window-unavailable`,
+`diagnostic-window-not-on-target-display`, `application-not-active`, or
+`diagnostic-window-already-key`. It never activates the application, orders the
+window, makes it main, redraws, resizes, invalidates cursor rectangles,
+rebuilds tracking areas, changes content, moves the window or pointer, sends
+synthetic input, sets a cursor, hides/shows the window, or uses private APIs.
+
+On valid preconditions it invokes only the public AppKit operation
+`window.makeKey()`. `api_success=true` means only that this request was issued
+after the fail-closed preconditions; it does not prove that the nonactivating
+panel became key and does not claim cursor recovery. The physical trial is
+valid only when lifecycle evidence shows `window-did-become-key` and/or later
+state with `is_key_window=true`. If `makeKey()` is invoked but the panel
+remains `key=false`, the result is `INVALID / TRANSITION NOT REALIZED`, not
+`STILL BROKEN`. AppKit callbacks that naturally follow `makeKey()` are
+retained as evidence.
 
 ## Physical protocol for a later controlled trial
 
@@ -280,7 +315,8 @@ The recovery transitions to characterize later are independent trials only:
 The trace must be compared as observed event sequences. The code must not
 infer `HEALTHY` or `BROKEN` and must not infer causality from a missing event.
 
-For the new activation trial, the human/operator sequence is specifically:
+The accepted activation-only physical result above is not repeated. For
+reference, its already-completed sequence was:
 
 ```text
 human confirms BROKEN while CrossInput is inactive
@@ -292,8 +328,59 @@ human confirms BROKEN while CrossInput is inactive
   -> off-target dump-trace
 ```
 
-No physical result for this activation-only trial is claimed until it is
-performed from a fresh controlled state after independent exact-HEAD review.
+The next independent trial is `recovery-window-key`. Do not perform this
+physical trial from the same contaminated state as another recovery command.
+Its operator protocol is:
+
+```text
+1. Start from fresh HEALTHY state.
+
+2. clear-trace
+3. mark-baseline-healthy
+
+4. Reproduce:
+   HEALTHY
+   -> activate another display's normal app/window
+   -> return pointer to target display
+   -> visually confirm diagnostic horizontal/vertical cursor is BROKEN
+
+5. Off-target:
+   mark-broken-confirmed
+
+6. Ensure CrossInput application becomes active using the already-established
+   activation step.
+
+7. Verify:
+   app_active=true
+   key=false
+
+8. While still active and without contaminating the target display:
+   mark-recovery-action
+   recovery-window-key
+
+9. Confirm through lifecycle/status evidence that:
+   key=true
+   and/or window-did-become-key occurred.
+
+10. Only if key transition was realized:
+    visually inspect the same native horizontal/vertical cursor region.
+
+11. Off-target:
+    mark-recovered
+    OR
+    mark-still-broken
+
+12. dump-trace
+```
+
+The activation step in step 6 is setup for this trial, not its recovery
+variable. It must occur before `mark-recovery-action`. If CrossInput cannot
+remain active while the off-target command is invoked, use remote SSH/control
+from another device rather than clicking a local Terminal and deactivating the
+application. Do not stack another recovery transition. Do not use screenshots
+or screen recording in this protocol. Human visual HEALTHY/BROKEN judgment of
+the same cursor region remains authoritative; lifecycle evidence only
+determines whether the requested key transition was realized.
 
 ## Interpretation
 

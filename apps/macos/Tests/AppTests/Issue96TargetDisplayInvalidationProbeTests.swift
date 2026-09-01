@@ -10,7 +10,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let operations = RecordingProbeOperations()
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
-            applicationActivationRecovery: operations)
+            applicationActivationRecovery: operations,
+            windowKeyRecovery: operations)
 
         for command in Issue96ProbeCommand.probeKinds {
             operations.calls.removeAll()
@@ -33,13 +34,17 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertNil(Issue96ProbeCommand.parse(""))
         XCTAssertEqual(Issue96ProbeCommand.parse("recovery-app-activate\n"), .recoveryAppActivate)
         XCTAssertNil(Issue96ProbeCommand.parse("recovery-app-activate extra"))
+        XCTAssertEqual(Issue96ProbeCommand.parse("recovery-window-key\n"), .recoveryWindowKey)
+        XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-key extra"))
+        XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-key recovery-app-activate"))
     }
 
     func testApplicationActivationRecoveryDispatchesExactlyOneSeparateOperation() {
         let operations = RecordingProbeOperations()
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
-            applicationActivationRecovery: operations)
+            applicationActivationRecovery: operations,
+            windowKeyRecovery: operations)
 
         XCTAssertNotNil(dispatcher.dispatch(.recoveryAppActivate))
         XCTAssertEqual(operations.calls, [.recoveryAppActivate])
@@ -48,6 +53,21 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertFalse(operations.calls.contains(.trackingArea))
         XCTAssertFalse(operations.calls.contains(.windowUpdate))
         XCTAssertFalse(operations.calls.contains(.activationControl))
+    }
+
+    func testWindowKeyRecoveryDispatchesExactlyOneDedicatedOperation() {
+        let primitiveOperations = RecordingProbeOperations()
+        let applicationActivationRecovery = RecordingApplicationActivationRecovery()
+        let windowKeyRecovery = RecordingWindowKeyRecovery()
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: primitiveOperations,
+            applicationActivationRecovery: applicationActivationRecovery,
+            windowKeyRecovery: windowKeyRecovery)
+
+        XCTAssertNotNil(dispatcher.dispatch(.recoveryWindowKey))
+        XCTAssertEqual(windowKeyRecovery.calls, 1)
+        XCTAssertTrue(primitiveOperations.calls.isEmpty)
+        XCTAssertTrue(applicationActivationRecovery.calls.isEmpty)
     }
 
     func testAlreadyActiveApplicationActivationFailsClosedWithoutActivationCall() {
@@ -78,6 +98,103 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
             result,
             .applied(api: "NSApplication.activate(ignoringOtherApps: true)"))
         XCTAssertEqual(activationCallCount, 1)
+    }
+
+    func testWindowKeyRecoveryUnavailableWindowFailsClosed() {
+        var makeKeyCallCount = 0
+        let coordinator = Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { false },
+            windowIsOnTargetDisplay: { true },
+            applicationIsActive: { true },
+            windowIsKey: { false },
+            makeWindowKey: { makeKeyCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(api: "window.makeKey()", reason: "diagnostic-window-unavailable"))
+        XCTAssertEqual(makeKeyCallCount, 0)
+    }
+
+    func testWindowKeyRecoveryAlreadyKeyFailsClosedWithoutMakeKeyCall() {
+        var makeKeyCallCount = 0
+        let coordinator = Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            applicationIsActive: { true },
+            windowIsKey: { true },
+            makeWindowKey: { makeKeyCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(api: "window.makeKey()", reason: "diagnostic-window-already-key"))
+        XCTAssertEqual(makeKeyCallCount, 0)
+    }
+
+    func testWindowKeyRecoveryInactiveApplicationFailsClosedWithoutMakeKeyCall() {
+        var makeKeyCallCount = 0
+        let coordinator = Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            applicationIsActive: { false },
+            windowIsKey: { false },
+            makeWindowKey: { makeKeyCallCount += 1 })
+        let applicationActivationRecovery = RecordingApplicationActivationRecovery()
+        let windowKeyRecovery = RecordingWindowKeyRecovery(result: { coordinator.run() })
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: RecordingProbeOperations(),
+            applicationActivationRecovery: applicationActivationRecovery,
+            windowKeyRecovery: windowKeyRecovery)
+
+        XCTAssertEqual(dispatcher.dispatch(.recoveryWindowKey),
+                       .failed(api: "window.makeKey()", reason: "application-not-active"))
+        XCTAssertEqual(makeKeyCallCount, 0)
+        XCTAssertTrue(applicationActivationRecovery.calls.isEmpty)
+    }
+
+    func testWindowKeyRecoveryOffTargetWindowFailsClosedWithoutMakeKeyCall() {
+        var makeKeyCallCount = 0
+        let coordinator = Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { false },
+            applicationIsActive: { true },
+            windowIsKey: { false },
+            makeWindowKey: { makeKeyCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(api: "window.makeKey()", reason: "diagnostic-window-not-on-target-display"))
+        XCTAssertEqual(makeKeyCallCount, 0)
+    }
+
+    func testWindowKeyRecoveryValidStateCallsInjectedMakeKeyExactlyOnce() {
+        var makeKeyCallCount = 0
+        let coordinator = Issue96WindowKeyRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            applicationIsActive: { true },
+            windowIsKey: { false },
+            makeWindowKey: { makeKeyCallCount += 1 })
+
+        XCTAssertEqual(coordinator.run(), .applied(api: "window.makeKey()"))
+        XCTAssertEqual(makeKeyCallCount, 1)
+    }
+
+    func testWindowKeyRecoveryFailureResponseIsExplicitAndNonRecoveryClaiming() {
+        let state = Issue96ProbeWindowState(appIsActive: true, isKeyWindow: true, isMainWindow: false)
+        let record = Issue96ProbeRecord(
+            sequence: 9,
+            monotonicNanoseconds: 789,
+            kind: .recoveryWindowKey,
+            targetDisplayID: 11,
+            panelDisplayID: 11,
+            before: state,
+            after: state,
+            result: .failed(api: "window.makeKey()", reason: "diagnostic-window-already-key"))
+
+        XCTAssertEqual(
+            record.responseLine,
+            "ERROR sequence=9 kind=recovery-window-key reason=diagnostic-window-already-key")
+        XCTAssertFalse(record.responseLine.contains("recovered"))
     }
 
     func testLifecycleTraceIsBoundedOrderedAndClearable() {
@@ -160,7 +277,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let operations = RecordingProbeOperations()
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
-            applicationActivationRecovery: operations)
+            applicationActivationRecovery: operations,
+            windowKeyRecovery: operations)
         let commands: [Issue96ProbeCommand] = [.status] + Issue96ProbeCommand.traceControlKinds
 
         for command in commands {
@@ -425,7 +543,9 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
 }
 
 @MainActor
-private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations, Issue96ApplicationActivationRecoveryOperations {
+private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations,
+    Issue96ApplicationActivationRecoveryOperations,
+    Issue96WindowKeyRecoveryOperations {
     var calls: [Issue96ProbeCommand] = []
 
     func redrawOnly() -> Issue96ProbeOperationResult {
@@ -456,6 +576,38 @@ private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations, I
     func applicationActivationOnly() -> Issue96ProbeOperationResult {
         calls.append(.recoveryAppActivate)
         return .applied(api: "recording.application-activation-only")
+    }
+
+    func windowKeyTransitionOnly() -> Issue96ProbeOperationResult {
+        calls.append(.recoveryWindowKey)
+        return .applied(api: "recording.window-key-transition-only")
+    }
+}
+
+@MainActor
+private final class RecordingApplicationActivationRecovery: Issue96ApplicationActivationRecoveryOperations {
+    var calls: [Issue96ProbeCommand] = []
+
+    func applicationActivationOnly() -> Issue96ProbeOperationResult {
+        calls.append(.recoveryAppActivate)
+        return .applied(api: "recording.application-activation-only")
+    }
+}
+
+@MainActor
+private final class RecordingWindowKeyRecovery: Issue96WindowKeyRecoveryOperations {
+    var calls = 0
+    private let result: () -> Issue96ProbeOperationResult
+
+    init(result: @escaping () -> Issue96ProbeOperationResult = {
+        .applied(api: "recording.window-key-transition-only")
+    }) {
+        self.result = result
+    }
+
+    func windowKeyTransitionOnly() -> Issue96ProbeOperationResult {
+        calls += 1
+        return result()
     }
 }
 
