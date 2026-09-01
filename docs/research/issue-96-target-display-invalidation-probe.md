@@ -12,6 +12,12 @@ Investigation base commit:
 e9b6ea474fffa1b0393f58f6ce3bbac74056686f
 ```
 
+Baseline immediately before this resize-experiment change:
+
+```text
+bdeb3af3363d397d3d0965b6628e2f43a93af146
+```
+
 Prior reviewed invalidation probe lineage:
 
 ```text
@@ -43,10 +49,17 @@ The activation-only recovery trial was then performed on exact HEAD
 `application-did-become-active app_active=true key=false main=false`. The
 operator visually checked the affected horizontal/vertical native cursor while
 the application was active, and it remained BROKEN. Application activation
-alone was therefore insufficient to recover the BROKEN native cursor
-presentation state. A later resign-active notification or late marker does not
+alone was therefore physically negative and insufficient to recover the BROKEN
+native cursor presentation state. A later resign-active notification or late marker does not
 invalidate the observation made during the explicitly confirmed active
 interval.
+
+The realized non-key -> key physical trial was also physically negative. Its trace
+contained two realized non-key -> key transitions, so it was not a perfectly
+isolated single-request trace. Even with that caveat, the affected panel was
+observed in the realized key state while the native cursor remained BROKEN;
+being key was insufficient. This resize experiment does not repeat, combine,
+or reinterpret that trial.
 
 The `26892febac34da24a817e37f7d951fb49b20c283` draft was not physically
 tested. Independent review found that its borderless/nonactivating diagnostic
@@ -203,6 +216,7 @@ window-update
 activation-control
 recovery-app-activate
 recovery-window-key
+recovery-window-resize
 mark-baseline-healthy
 mark-broken-confirmed
 mark-recovery-action
@@ -250,6 +264,7 @@ Their exact mappings remain:
 | `activation-control` | `NSApplication.activate`; `window.makeKeyAndOrderFront` |
 | `recovery-app-activate` | `NSApplication.activate(ignoringOtherApps: true)` only, after fail-closed checks |
 | `recovery-window-key` | `window.makeKey()` only, after fail-closed checks |
+| `recovery-window-resize` | `window.setFrame(_:display: false, animate: false)` once, after fail-closed checks |
 
 `recovery-app-activate` requires the panel to exist on the configured target
 display and the application to be inactive. If the app is already active it
@@ -289,132 +304,92 @@ still not transition proof. Physical evidence must confirm
 `window-did-become-key` and/or `key=true`; human visual HEALTHY/BROKEN judgment
 of the cursor remains authoritative.
 
-## Physical protocol for a later controlled trial
+`recovery-window-resize` is the next and only new recovery experiment in this
+change. It requires, in order, that the diagnostic window still exists, remains
+on the configured target display, has an available valid current frame, that
+the current frame is within its public minimum/maximum size limits, that the
+requested frame is valid and within those limits, and that the requested frame
+changes the size. Failure returns one of:
+`diagnostic-window-unavailable`, `diagnostic-window-not-on-target-display`,
+`diagnostic-window-frame-unavailable`, `diagnostic-window-frame-invalid`,
+`diagnostic-window-frame-not-resizable`, `requested-resize-frame-invalid`,
+`requested-resize-frame-not-resizable`, or `resize-would-not-change-size`.
+Every failure is returned as `ERROR` and makes zero resize mutation calls.
+
+On valid preconditions it invokes exactly one public AppKit frame operation:
+
+```swift
+window.setFrame(requestedFrame, display: false, animate: false)
+```
+
+`requestedFrame` preserves the current frame origin, preserves the current
+height, and increases the current width by exactly 16 points. The call is not
+animated, and the original frame is not restored by the command. No
+application-active, key-window, main-window, visibility, ordering, redraw,
+cursor-rect, tracking-area, cursor-set, pointer, or event-posting operation is
+part of this path. The frame API is programmatic; the panel's existing
+nonactivating diagnostic configuration is not changed to make it user
+resizable.
+
+`api_success=true` means only that this one request was issued after the
+fail-closed checks. It does not prove that AppKit realized the new size or that
+the cursor recovered. Resize records include bounded before/after panel-size
+metadata. A later physical trial must also retain naturally emitted
+`window-did-resize` and/or resulting frame-size evidence. The command does not
+manually invoke resize, layout, draw, cursor, tracking, ordering, or any other
+lifecycle mechanism.
+
+## Physical protocol for the later controlled resize trial
 
 No physical result is claimed by this implementation or its automated tests.
-After independent strict review of the final implementation HEAD, each trial
-must start fresh:
+This commit only makes `recovery-window-resize` testable. After independent
+strict review of the final implementation HEAD, the trial must start from a
+FRESH controlled BROKEN state:
 
 ```text
-HEALTHY
-  -> off-target clear-trace
-  -> off-target mark-baseline-healthy
-  -> observe the native cursor in a diagnostic region
-  -> move to another display
-  -> activate/click a normal window on that other display
-  -> return to the target display and observe the same region
-  -> if BROKEN, off-target mark-broken-confirmed and dump-trace
-  -> perform one explicitly selected natural recovery transition
-  -> observe the same region
-  -> off-target mark-recovered or mark-still-broken
-  -> off-target dump-trace
+1. Fresh launch of the exact reviewed SHA.
+2. Confirm the diagnostic panel is initially HEALTHY.
+3. Reproduce BROKEN using the known cross-display real-application activation trigger.
+4. Visually reconfirm the diagnostic horizontal/vertical resize cursor is BROKEN.
+5. Perform any required experiment setup BEFORE the recovery marker.
+6. Reconfirm the cursor is still BROKEN after setup.
+7. clear-trace / establish a clean evidence window as appropriate.
+8. mark-broken-confirmed.
+9. mark-recovery-action.
+10. Execute exactly one recovery-window-resize.
+11. Observe the same cursor visually.
+12. Record exactly one of mark-recovered or mark-still-broken.
+13. status.
+14. dump-trace.
 ```
 
-Do not click, keypress, use menus, display terminal output, take screenshots,
-or record the target display before its result is observed. A target-display
-interaction not explicitly selected as the recovery transition makes the
-trial `INVALID / CONTAMINATED`; repeat from a fresh state. Do not stack
-recovery transitions. The activation positive control from the old harness is
-not a recovery transition for this instrumentation and remains separate.
+The off-target operator should have the control shell ready before step 7, so
+no target-display interaction is needed after the recovery marker. Do not
+click, keypress, use menus, display terminal output, take screenshots, or
+record the target display before its result is observed. Any target-display
+interaction not required by the known BROKEN reproduction or explicitly
+selected resize request makes the trial `INVALID / CONTAMINATED`; repeat from
+a fresh state.
 
-The recovery transitions to characterize later are independent trials only:
+Do not execute activation recovery, key recovery, `redraw`, cursor
+invalidation, tracking rebuild, ordering, or synthetic-input operations during
+the same physical recovery trial. The historical activation-only and key
+trials are separate evidence and are not repeated or combined here.
 
-1. application inactive -> active;
-2. diagnostic window non-key -> key;
-3. diagnostic window occluded -> exposed;
-4. natural content redraw;
-5. window resize;
-6. pointer leaves a native cursor region -> re-enters;
-7. pointer leaves the window -> re-enters;
-8. application content update without activation.
+The trace must be compared as observed event sequences. If one requested
+`setFrame` call naturally emits multiple `window-did-resize` callbacks, retain
+and report every callback honestly; do not hide or normalize the sequence. A
+resize API response alone is not proof that the lifecycle transition occurred.
+The physical trial requires `window-did-resize` and/or resulting frame-size
+evidence plus human visual HEALTHY/BROKEN observation. If neither is observed,
+record `INVALID / TRANSITION NOT REALIZED`, not `STILL BROKEN`. The code must
+not infer HEALTHY or BROKEN and must not infer causality from a missing event.
 
-The trace must be compared as observed event sequences. The code must not
-infer `HEALTHY` or `BROKEN` and must not infer causality from a missing event.
-
-The accepted activation-only physical result above is not repeated. For
-reference, its already-completed sequence was:
-
-```text
-human confirms BROKEN while CrossInput is inactive
-  -> off-target mark-broken-confirmed
-  -> off-target mark-recovery-action
-  -> off-target recovery-app-activate
-  -> observe the same native cursor region
-  -> off-target mark-recovered or mark-still-broken
-  -> off-target dump-trace
-```
-
-The next independent trial is `recovery-window-key`. Because the diagnostic
-panel characteristic changed, first revalidate reproduction from a fresh
-launch of the exact reviewed HEAD. Do not perform this physical trial from the
-same contaminated state as another recovery command.
-
-The operator must begin with:
-
-```text
-fresh launch of exact reviewed HEAD
-
-HEALTHY
-  -> other-display real app activation
-  -> return pointer
-  -> verify the diagnostic horizontal/vertical cursor is still BROKEN
-```
-
-If BROKEN is no longer reproducible with the key-capable diagnostic subclass,
-stop and record:
-
-```text
-NEGATIVE / DIAGNOSTIC SURFACE CHARACTERISTIC CHANGED
-```
-
-Do not proceed to `recovery-window-key`. If BROKEN still reproduces, the
-operator protocol is:
-
-```text
-1. Start from fresh HEALTHY state.
-
-2. clear-trace
-3. mark-baseline-healthy
-
-4. Confirm the fresh-launch reproduction above remains BROKEN.
-
-5. Off-target:
-   mark-broken-confirmed
-
-6. Ensure CrossInput application becomes active using the already-established
-   activation step.
-
-7. Verify:
-   app_active=true
-   key=false
-
-8. While still active and without contaminating the target display:
-   mark-recovery-action
-   recovery-window-key
-
-9. Confirm through lifecycle/status evidence that:
-   key=true
-   and/or window-did-become-key occurred.
-
-10. Only if key transition was realized:
-    visually inspect the same native horizontal/vertical cursor region.
-
-11. Off-target:
-    mark-recovered
-    OR
-    mark-still-broken
-
-12. dump-trace
-```
-
-The activation step in step 6 is setup for this trial, not its recovery
-variable. It must occur before `mark-recovery-action`. If CrossInput cannot
-remain active while the off-target command is invoked, use remote SSH/control
-from another device rather than clicking a local Terminal and deactivating the
-application. Do not stack another recovery transition. Do not use screenshots
-or screen recording in this protocol. Human visual HEALTHY/BROKEN judgment of
-the same cursor region remains authoritative; lifecycle evidence only
-determines whether the requested key transition was realized.
+Resize has NOT yet been physically tested. No automated test claims cursor
+recovery; human cursor observation remains authoritative. Preserve the
+resulting app-active, key, main, target/panel display, visibility, and
+occlusion state in the normal diagnostic records, including any natural state
+changes caused by the resize.
 
 ## Interpretation
 

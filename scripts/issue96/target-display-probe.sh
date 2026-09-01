@@ -6,12 +6,12 @@ set -euo pipefail
 SOCKET_PATH="${CROSSINPUT_ISSUE96_PROBE_SOCKET:-${HOME:?HOME is required}/Library/Application Support/Ampersand/Diagnostics/issue-96-target-display.sock}"
 
 if [ "$#" -ne 1 ]; then
-    echo "usage: $0 redraw|cursor-rect|tracking-area|window-update|activation-control|recovery-app-activate|recovery-window-key|status|mark-baseline-healthy|mark-broken-confirmed|mark-recovery-action|mark-recovered|mark-still-broken|clear-trace|dump-trace" >&2
+    echo "usage: $0 redraw|cursor-rect|tracking-area|window-update|activation-control|recovery-app-activate|recovery-window-key|recovery-window-resize|status|mark-baseline-healthy|mark-broken-confirmed|mark-recovery-action|mark-recovered|mark-still-broken|clear-trace|dump-trace" >&2
     exit 2
 fi
 
 case "$1" in
-    redraw|cursor-rect|tracking-area|window-update|activation-control|recovery-app-activate|recovery-window-key|status|mark-baseline-healthy|mark-broken-confirmed|mark-recovery-action|mark-recovered|mark-still-broken|clear-trace|dump-trace) ;;
+    redraw|cursor-rect|tracking-area|window-update|activation-control|recovery-app-activate|recovery-window-key|recovery-window-resize|status|mark-baseline-healthy|mark-broken-confirmed|mark-recovery-action|mark-recovered|mark-still-broken|clear-trace|dump-trace) ;;
     *) echo "unsupported Issue #96 probe command: $1" >&2; exit 2 ;;
 esac
 

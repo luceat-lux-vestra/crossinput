@@ -11,7 +11,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
             applicationActivationRecovery: operations,
-            windowKeyRecovery: operations)
+            windowKeyRecovery: operations,
+            windowResizeRecovery: operations)
 
         for command in Issue96ProbeCommand.probeKinds {
             operations.calls.removeAll()
@@ -37,6 +38,9 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertEqual(Issue96ProbeCommand.parse("recovery-window-key\n"), .recoveryWindowKey)
         XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-key extra"))
         XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-key recovery-app-activate"))
+        XCTAssertEqual(Issue96ProbeCommand.parse("recovery-window-resize\n"), .recoveryWindowResize)
+        XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-resize extra"))
+        XCTAssertNil(Issue96ProbeCommand.parse("recovery-window-resize recovery-window-key"))
     }
 
     func testApplicationActivationRecoveryDispatchesExactlyOneSeparateOperation() {
@@ -44,7 +48,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
             applicationActivationRecovery: operations,
-            windowKeyRecovery: operations)
+            windowKeyRecovery: operations,
+            windowResizeRecovery: operations)
 
         XCTAssertNotNil(dispatcher.dispatch(.recoveryAppActivate))
         XCTAssertEqual(operations.calls, [.recoveryAppActivate])
@@ -62,12 +67,33 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dispatcher = Issue96ProbeDispatcher(
             operations: primitiveOperations,
             applicationActivationRecovery: applicationActivationRecovery,
-            windowKeyRecovery: windowKeyRecovery)
+            windowKeyRecovery: windowKeyRecovery,
+            windowResizeRecovery: RecordingWindowResizeRecovery())
 
         XCTAssertNotNil(dispatcher.dispatch(.recoveryWindowKey))
         XCTAssertEqual(windowKeyRecovery.calls, 1)
         XCTAssertTrue(primitiveOperations.calls.isEmpty)
         XCTAssertTrue(applicationActivationRecovery.calls.isEmpty)
+    }
+
+    func testWindowResizeRecoveryDispatchesExactlyOneDedicatedOperation() {
+        let primitiveOperations = RecordingProbeOperations()
+        let applicationActivationRecovery = RecordingApplicationActivationRecovery()
+        let windowKeyRecovery = RecordingWindowKeyRecovery()
+        let windowResizeRecovery = RecordingWindowResizeRecovery()
+        let dispatcher = Issue96ProbeDispatcher(
+            operations: primitiveOperations,
+            applicationActivationRecovery: applicationActivationRecovery,
+            windowKeyRecovery: windowKeyRecovery,
+            windowResizeRecovery: windowResizeRecovery)
+
+        XCTAssertEqual(
+            dispatcher.dispatch(.recoveryWindowResize),
+            .applied(api: "recording.window-resize-transition-only"))
+        XCTAssertEqual(windowResizeRecovery.calls, 1)
+        XCTAssertTrue(primitiveOperations.calls.isEmpty)
+        XCTAssertTrue(applicationActivationRecovery.calls.isEmpty)
+        XCTAssertEqual(windowKeyRecovery.calls, 0)
     }
 
     func testAlreadyActiveApplicationActivationFailsClosedWithoutActivationCall() {
@@ -143,7 +169,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dispatcher = Issue96ProbeDispatcher(
             operations: RecordingProbeOperations(),
             applicationActivationRecovery: applicationActivationRecovery,
-            windowKeyRecovery: windowKeyRecovery)
+            windowKeyRecovery: windowKeyRecovery,
+            windowResizeRecovery: RecordingWindowResizeRecovery())
 
         XCTAssertEqual(dispatcher.dispatch(.recoveryWindowKey),
                        .failed(api: "window.makeKey()", reason: "application-not-active"))
@@ -177,6 +204,184 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
 
         XCTAssertEqual(coordinator.run(), .applied(api: "window.makeKey()"))
         XCTAssertEqual(makeKeyCallCount, 1)
+    }
+
+    func testWindowResizeRecoveryUnavailableWindowFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { false },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { XCTFail("frame must not be read for an unavailable window"); return nil },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-unavailable"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryOffTargetWindowFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { false },
+            currentFrame: { XCTFail("frame must not be read for an off-target window"); return nil },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-not-on-target-display"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryUnavailableFrameFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { nil },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-frame-unavailable"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryInvalidFrameFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { NSRect(x: 0, y: 0, width: 0, height: 220) },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-frame-invalid"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryNonResizableFrameFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let frame = NSRect(x: 12, y: 34, width: 420, height: 220)
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { frame },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in false },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-frame-not-resizable"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryInvalidRequestedFrameFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let frame = NSRect(x: 12, y: 34, width: 420, height: 220)
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { frame },
+            proposedFrame: { _ in
+                NSRect(x: 12, y: 34, width: CGFloat.infinity, height: 220)
+            },
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "requested-resize-frame-invalid"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryNoSizeChangeFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        let frame = NSRect(x: 12, y: 34, width: 420, height: 220)
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { frame },
+            proposedFrame: { _ in frame },
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "resize-would-not-change-size"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryRequestedFrameOutsideLimitsFailsClosedWithoutResizeCall() {
+        var resizeCallCount = 0
+        var validationCallCount = 0
+        let frame = NSRect(x: 12, y: 34, width: 420, height: 220)
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { frame },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in
+                validationCallCount += 1
+                return validationCallCount == 1
+            },
+            resizeWindow: { _ in resizeCallCount += 1 })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "requested-resize-frame-not-resizable"))
+        XCTAssertEqual(resizeCallCount, 0)
+    }
+
+    func testWindowResizeRecoveryValidStateRequestsOneDeterministicResizeWithoutRestore() {
+        var resizeCallCount = 0
+        var requestedFrame: NSRect?
+        let frame = NSRect(x: 12, y: 34, width: 420, height: 220)
+        let coordinator = Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { true },
+            windowIsOnTargetDisplay: { true },
+            currentFrame: { frame },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { _ in true },
+            resizeWindow: {
+                resizeCallCount += 1
+                requestedFrame = $0
+            })
+
+        XCTAssertEqual(
+            coordinator.run(),
+            .applied(api: Issue96WindowResizeRecoveryConfiguration.api))
+        XCTAssertEqual(resizeCallCount, 1)
+        XCTAssertEqual(
+            requestedFrame,
+            NSRect(x: 12, y: 34, width: 436, height: 220))
     }
 
     func testWindowKeyRecoveryFailureResponseIsExplicitAndNonRecoveryClaiming() {
@@ -278,7 +483,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         let dispatcher = Issue96ProbeDispatcher(
             operations: operations,
             applicationActivationRecovery: operations,
-            windowKeyRecovery: operations)
+            windowKeyRecovery: operations,
+            windowResizeRecovery: operations)
         let commands: [Issue96ProbeCommand] = [.status] + Issue96ProbeCommand.traceControlKinds
 
         for command in commands {
@@ -553,6 +759,31 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
         XCTAssertFalse(record.responseLine.contains("recovered"))
     }
 
+    func testWindowResizeFailureResponseIsExplicitAndNonRecoveryClaiming() {
+        let state = Issue96ProbeWindowState(appIsActive: false, isKeyWindow: false, isMainWindow: false)
+        let record = Issue96ProbeRecord(
+            sequence: 10,
+            monotonicNanoseconds: 800,
+            kind: .recoveryWindowResize,
+            targetDisplayID: 11,
+            panelDisplayID: 11,
+            before: state,
+            after: state,
+            result: .failed(
+                api: Issue96WindowResizeRecoveryConfiguration.api,
+                reason: "diagnostic-window-frame-invalid"),
+            beforePanelSize: Issue96ProbeWindowSize(width: 420, height: 220),
+            afterPanelSize: Issue96ProbeWindowSize(width: 420, height: 220))
+
+        XCTAssertEqual(
+            record.responseLine,
+            "ERROR sequence=10 kind=recovery-window-resize reason=diagnostic-window-frame-invalid")
+        XCTAssertTrue(record.logMessage.contains("api=window.setFrame(_:display: false, animate: false)"))
+        XCTAssertTrue(record.logMessage.contains("panel_size_before=420.0x220.0"))
+        XCTAssertTrue(record.logMessage.contains("panel_size_after=420.0x220.0"))
+        XCTAssertFalse(record.responseLine.contains("recovered"))
+    }
+
     private func display(_ id: CGDirectDisplayID, edge: ScreenEdge? = nil) -> HostDisplayEdgeOption {
         HostDisplayEdgeOption(id: id, name: "Display \(id)", width: 1920, height: 1080, edge: edge)
     }
@@ -561,7 +792,8 @@ final class Issue96TargetDisplayInvalidationProbeTests: XCTestCase {
 @MainActor
 private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations,
     Issue96ApplicationActivationRecoveryOperations,
-    Issue96WindowKeyRecoveryOperations {
+    Issue96WindowKeyRecoveryOperations,
+    Issue96WindowResizeRecoveryOperations {
     var calls: [Issue96ProbeCommand] = []
 
     func redrawOnly() -> Issue96ProbeOperationResult {
@@ -598,6 +830,11 @@ private final class RecordingProbeOperations: Issue96ProbePrimitiveOperations,
         calls.append(.recoveryWindowKey)
         return .applied(api: "recording.window-key-transition-only")
     }
+
+    func windowResizeTransitionOnly() -> Issue96ProbeOperationResult {
+        calls.append(.recoveryWindowResize)
+        return .applied(api: "recording.window-resize-transition-only")
+    }
 }
 
 @MainActor
@@ -624,6 +861,16 @@ private final class RecordingWindowKeyRecovery: Issue96WindowKeyRecoveryOperatio
     func windowKeyTransitionOnly() -> Issue96ProbeOperationResult {
         calls += 1
         return result()
+    }
+}
+
+@MainActor
+private final class RecordingWindowResizeRecovery: Issue96WindowResizeRecoveryOperations {
+    var calls = 0
+
+    func windowResizeTransitionOnly() -> Issue96ProbeOperationResult {
+        calls += 1
+        return .applied(api: "recording.window-resize-transition-only")
     }
 }
 

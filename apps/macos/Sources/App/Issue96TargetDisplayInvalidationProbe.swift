@@ -30,6 +30,7 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     case activationControl = "activation-control"
     case recoveryAppActivate = "recovery-app-activate"
     case recoveryWindowKey = "recovery-window-key"
+    case recoveryWindowResize = "recovery-window-resize"
     case status
     case markBaselineHealthy = "mark-baseline-healthy"
     case markBrokenConfirmed = "mark-broken-confirmed"
@@ -44,7 +45,7 @@ enum Issue96ProbeCommand: String, CaseIterable, Sendable {
     }
 
     static var recoveryKinds: [Issue96ProbeCommand] {
-        [.recoveryAppActivate, .recoveryWindowKey]
+        [.recoveryAppActivate, .recoveryWindowKey, .recoveryWindowResize]
     }
 
     static var traceControlKinds: [Issue96ProbeCommand] {
@@ -174,6 +175,13 @@ protocol Issue96WindowKeyRecoveryOperations: AnyObject {
     func windowKeyTransitionOnly() -> Issue96ProbeOperationResult
 }
 
+/// The affected-window resize is a separate recovery experiment. It exposes
+/// only the one public frame mutation required by that experiment.
+@MainActor
+protocol Issue96WindowResizeRecoveryOperations: AnyObject {
+    func windowResizeTransitionOnly() -> Issue96ProbeOperationResult
+}
+
 /// The state transition itself is kept injectable so the already-active
 /// fail-closed branch can be tested without activating the test runner.
 @MainActor
@@ -223,6 +231,90 @@ struct Issue96WindowKeyRecoveryCoordinator {
     }
 }
 
+enum Issue96WindowResizeRecoveryConfiguration {
+    static let widthDelta: CGFloat = 16
+    static let api = "window.setFrame(_:display: false, animate: false)"
+
+    static func resizedFrame(from frame: NSRect) -> NSRect {
+        NSRect(
+            origin: frame.origin,
+            size: NSSize(width: frame.width + widthDelta, height: frame.height))
+    }
+
+    static func isValidFrame(_ frame: NSRect) -> Bool {
+        guard !frame.isNull, !frame.isInfinite else { return false }
+        return frame.origin.x.isFinite
+            && frame.origin.y.isFinite
+            && frame.width.isFinite
+            && frame.height.isFinite
+            && frame.width > 0
+            && frame.height > 0
+    }
+
+    static func isSizeWithinLimits(
+        _ size: NSSize,
+        minimum: NSSize,
+        maximum: NSSize) -> Bool {
+        guard size.width.isFinite, size.height.isFinite,
+              minimum.width.isFinite, minimum.height.isFinite,
+              maximum.width.isFinite, maximum.height.isFinite,
+              minimum.width >= 0, minimum.height >= 0,
+              maximum.width >= minimum.width, maximum.height >= minimum.height else {
+            return false
+        }
+        return size.width >= minimum.width
+            && size.height >= minimum.height
+            && size.width <= maximum.width
+            && size.height <= maximum.height
+    }
+}
+
+/// Preconditions and the one requested resize operation are injectable so
+/// tests can prove that every invalid state fails before mutation.
+@MainActor
+struct Issue96WindowResizeRecoveryCoordinator {
+    let windowExists: () -> Bool
+    let windowIsOnTargetDisplay: () -> Bool
+    let currentFrame: () -> NSRect?
+    let proposedFrame: (NSRect) -> NSRect
+    let frameIsWithinResizeLimits: (NSRect) -> Bool
+    let resizeWindow: (NSRect) -> Void
+
+    func run() -> Issue96ProbeOperationResult {
+        let api = Issue96WindowResizeRecoveryConfiguration.api
+        guard windowExists() else {
+            return .failed(api: api, reason: "diagnostic-window-unavailable")
+        }
+        guard windowIsOnTargetDisplay() else {
+            return .failed(api: api, reason: "diagnostic-window-not-on-target-display")
+        }
+        guard let currentFrame = currentFrame() else {
+            return .failed(api: api, reason: "diagnostic-window-frame-unavailable")
+        }
+        guard Issue96WindowResizeRecoveryConfiguration.isValidFrame(currentFrame) else {
+            return .failed(api: api, reason: "diagnostic-window-frame-invalid")
+        }
+        guard frameIsWithinResizeLimits(currentFrame) else {
+            return .failed(api: api, reason: "diagnostic-window-frame-not-resizable")
+        }
+
+        let requestedFrame = proposedFrame(currentFrame)
+        guard Issue96WindowResizeRecoveryConfiguration.isValidFrame(requestedFrame) else {
+            return .failed(api: api, reason: "requested-resize-frame-invalid")
+        }
+        guard requestedFrame.width != currentFrame.width
+                || requestedFrame.height != currentFrame.height else {
+            return .failed(api: api, reason: "resize-would-not-change-size")
+        }
+        guard frameIsWithinResizeLimits(requestedFrame) else {
+            return .failed(api: api, reason: "requested-resize-frame-not-resizable")
+        }
+
+        resizeWindow(requestedFrame)
+        return .applied(api: api)
+    }
+}
+
 /// Diagnostic-only panel capability required by the non-key -> key trial.
 /// This does not make the panel key during baseline setup.
 @MainActor
@@ -235,14 +327,17 @@ struct Issue96ProbeDispatcher {
     private let primitiveOperations: any Issue96ProbePrimitiveOperations
     private let applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations
     private let windowKeyRecovery: any Issue96WindowKeyRecoveryOperations
+    private let windowResizeRecovery: any Issue96WindowResizeRecoveryOperations
 
     init(
         operations: any Issue96ProbePrimitiveOperations,
         applicationActivationRecovery: any Issue96ApplicationActivationRecoveryOperations,
-        windowKeyRecovery: any Issue96WindowKeyRecoveryOperations) {
+        windowKeyRecovery: any Issue96WindowKeyRecoveryOperations,
+        windowResizeRecovery: any Issue96WindowResizeRecoveryOperations) {
         primitiveOperations = operations
         self.applicationActivationRecovery = applicationActivationRecovery
         self.windowKeyRecovery = windowKeyRecovery
+        self.windowResizeRecovery = windowResizeRecovery
     }
 
     func dispatch(_ command: Issue96ProbeCommand) -> Issue96ProbeOperationResult? {
@@ -261,6 +356,8 @@ struct Issue96ProbeDispatcher {
             return applicationActivationRecovery.applicationActivationOnly()
         case .recoveryWindowKey:
             return windowKeyRecovery.windowKeyTransitionOnly()
+        case .recoveryWindowResize:
+            return windowResizeRecovery.windowResizeTransitionOnly()
         case .status, .markBaselineHealthy, .markBrokenConfirmed, .markRecoveryAction,
              .markRecovered, .markStillBroken, .clearTrace, .dumpTrace:
             return nil
@@ -317,6 +414,23 @@ struct Issue96ProbeWindowState: Equatable, Sendable {
     let isMainWindow: Bool
 }
 
+struct Issue96ProbeWindowSize: Equatable, Sendable {
+    let width: Double
+    let height: Double
+
+    init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+    }
+
+    init(size: NSSize) {
+        width = Double(size.width)
+        height = Double(size.height)
+    }
+
+    var logValue: String { "\(width)x\(height)" }
+}
+
 struct Issue96ProbeRecord: Equatable, Sendable {
     let sequence: UInt64
     let monotonicNanoseconds: UInt64
@@ -326,6 +440,31 @@ struct Issue96ProbeRecord: Equatable, Sendable {
     let before: Issue96ProbeWindowState
     let after: Issue96ProbeWindowState
     let result: Issue96ProbeOperationResult
+    let beforePanelSize: Issue96ProbeWindowSize?
+    let afterPanelSize: Issue96ProbeWindowSize?
+
+    init(
+        sequence: UInt64,
+        monotonicNanoseconds: UInt64,
+        kind: Issue96ProbeCommand,
+        targetDisplayID: CGDirectDisplayID,
+        panelDisplayID: CGDirectDisplayID?,
+        before: Issue96ProbeWindowState,
+        after: Issue96ProbeWindowState,
+        result: Issue96ProbeOperationResult,
+        beforePanelSize: Issue96ProbeWindowSize? = nil,
+        afterPanelSize: Issue96ProbeWindowSize? = nil) {
+        self.sequence = sequence
+        self.monotonicNanoseconds = monotonicNanoseconds
+        self.kind = kind
+        self.targetDisplayID = targetDisplayID
+        self.panelDisplayID = panelDisplayID
+        self.before = before
+        self.after = after
+        self.result = result
+        self.beforePanelSize = beforePanelSize
+        self.afterPanelSize = afterPanelSize
+    }
 
     private static func displayID(_ value: CGDirectDisplayID?) -> String {
         value.map(String.init) ?? "none"
@@ -349,11 +488,15 @@ struct Issue96ProbeRecord: Equatable, Sendable {
         if let failureReason = result.failureReason {
             message += " fail_closed_reason=\(failureReason)"
         }
+        if kind == .recoveryWindowResize {
+            message += " panel_size_before=\(beforePanelSize?.logValue ?? "none")"
+                + " panel_size_after=\(afterPanelSize?.logValue ?? "none")"
+        }
         return message
     }
 
     var responseLine: String {
-        if (kind == .recoveryAppActivate || kind == .recoveryWindowKey),
+        if Issue96ProbeCommand.recoveryKinds.contains(kind),
            let failureReason = result.failureReason {
             return "ERROR sequence=\(sequence) kind=\(kind.rawValue) reason=\(failureReason)"
         }
@@ -666,6 +809,50 @@ final class Issue96WindowKeyRecoveryAppKitOperation: Issue96WindowKeyRecoveryOpe
     }
 }
 
+/// AppKit implementation of the affected-window resize recovery experiment.
+/// The only requested AppKit mutation is one setFrame call with the current
+/// origin and a fixed width increase. It does not activate, key, order,
+/// redraw, invalidate, rebuild, move, or set a cursor.
+@MainActor
+final class Issue96WindowResizeRecoveryAppKitOperation: Issue96WindowResizeRecoveryOperations {
+    weak var window: NSWindow?
+    private let targetDisplayID: CGDirectDisplayID
+
+    init(window: NSWindow, targetDisplayID: CGDirectDisplayID) {
+        self.window = window
+        self.targetDisplayID = targetDisplayID
+    }
+
+    func windowResizeTransitionOnly() -> Issue96ProbeOperationResult {
+        let window = self.window
+        return Issue96WindowResizeRecoveryCoordinator(
+            windowExists: { window != nil },
+            windowIsOnTargetDisplay: {
+                Self.displayID(for: window?.screen) == self.targetDisplayID
+            },
+            currentFrame: { window?.frame },
+            proposedFrame: Issue96WindowResizeRecoveryConfiguration.resizedFrame,
+            frameIsWithinResizeLimits: { frame in
+                guard let window else { return false }
+                return Issue96WindowResizeRecoveryConfiguration.isSizeWithinLimits(
+                    frame.size,
+                    minimum: window.minSize,
+                    maximum: window.maxSize)
+            },
+            resizeWindow: { frame in
+                window?.setFrame(frame, display: false, animate: false)
+            })
+            .run()
+    }
+
+    private static func displayID(for screen: NSScreen?) -> CGDirectDisplayID? {
+        guard let number = screen?.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else { return nil }
+        return CGDirectDisplayID(number.uint32Value)
+    }
+}
+
 @MainActor
 final class Issue96TargetDisplayInvalidationProbeHarness {
     let targetDisplayID: CGDirectDisplayID
@@ -725,6 +912,9 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         let windowKeyRecovery = Issue96WindowKeyRecoveryAppKitOperation(
             window: panel,
             targetDisplayID: selectedDisplayID)
+        let windowResizeRecovery = Issue96WindowResizeRecoveryAppKitOperation(
+            window: panel,
+            targetDisplayID: selectedDisplayID)
         let endpoint = Issue96ProbeControlEndpoint(path: Issue96ProbeConfiguration.socketPath)
 
         self.targetDisplayID = selectedDisplayID
@@ -734,7 +924,8 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         self.dispatcher = Issue96ProbeDispatcher(
             operations: operations,
             applicationActivationRecovery: applicationActivationRecovery,
-            windowKeyRecovery: windowKeyRecovery)
+            windowKeyRecovery: windowKeyRecovery,
+            windowResizeRecovery: windowResizeRecovery)
         self.endpoint = endpoint
         self.lifecycleObservers = lifecycleObservers
 
@@ -771,10 +962,12 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
         }
 
         let before = windowState()
+        let beforePanelSize = command == .recoveryWindowResize ? panelSize() : nil
         probeSequence &+= 1
         let result = dispatcher.dispatch(command)
             ?? .failed(api: "dispatcher", reason: "unsupported-command")
         let after = windowState()
+        let afterPanelSize = command == .recoveryWindowResize ? panelSize() : nil
         let record = Issue96ProbeRecord(
             sequence: probeSequence,
             monotonicNanoseconds: DispatchTime.now().uptimeNanoseconds,
@@ -783,7 +976,9 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
             panelDisplayID: Self.displayID(for: panel.screen),
             before: before,
             after: after,
-            result: result)
+            result: result,
+            beforePanelSize: beforePanelSize,
+            afterPanelSize: afterPanelSize)
         Diagnostics.log(record.logMessage)
         return record.responseLine + "\n"
     }
@@ -801,6 +996,12 @@ final class Issue96TargetDisplayInvalidationProbeHarness {
             appIsActive: NSApplication.shared.isActive,
             isKeyWindow: panel.isKeyWindow,
             isMainWindow: panel.isMainWindow)
+    }
+
+    private func panelSize() -> Issue96ProbeWindowSize? {
+        let size = panel.frame.size
+        guard size.width.isFinite, size.height.isFinite else { return nil }
+        return Issue96ProbeWindowSize(size: size)
     }
 
     private static func displayID(for screen: NSScreen?) -> CGDirectDisplayID? {
