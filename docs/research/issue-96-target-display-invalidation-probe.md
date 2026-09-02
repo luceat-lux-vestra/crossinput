@@ -391,6 +391,24 @@ resulting app-active, key, main, target/panel display, visibility, and
 occlusion state in the normal diagnostic records, including any natural state
 changes caused by the resize.
 
+## P0 structural cursor-mutation serialization experiment
+
+This branch also contains a bounded production experiment for a structural
+hypothesis: multiple execution contexts may previously have written Quartz
+cursor position concurrently, and a suppression-generation check could be
+separated from its warp by a TOCTOU window. `CursorMutationExecutor` makes the
+event-tap CFRunLoop the single writer for every production
+`CGWarpMouseCursorPosition` call. Hold and restore requests carry their
+ownership generation; stale queued requests are rejected, and non-tap restore
+coordination is synchronous with a bounded timeout. A timeout releases local
+suppression and skips the restore; it never falls back to a caller-thread warp.
+
+This is a structural hypothesis experiment, not a confirmed root cause and
+not a production workaround claim. The AppKit recovery probing is paused.
+The next physical test uses the existing controlled diagnostic panel and the
+known cross-display activation trigger. Physical result is required before
+claiming Issue #96 fixed. No physical experiment is claimed by this change.
+
 ## Interpretation
 
 If the owned diagnostic window reproduces BROKEN, compare HEALTHY, BROKEN, and
@@ -404,9 +422,11 @@ than additional cursor APIs or synthetic events.
 
 ## Production boundary
 
-This change does not modify `InputCapture`, CGEventTap source/location/options,
-event posting, pointer warping, suppression, handoff, Android code, CXI
-protocol, target routing, or Issue #97 generation/watchdog/fail-safe behavior.
-It uses no private CGS/WindowServer SPI, SystemUIServer/Dock restart, root,
-synthetic click, periodic reset, background recovery loop, focus-stealing
-production workaround, or pointer trap.
+This change does not modify CGEventTap source/location/options, event posting,
+pointer delta forwarding, suppression timeout/fail-safe policy, handoff,
+Android code, CXI protocol, target routing, or Issue #97 generation/watchdog/
+fail-safe behavior. It changes only the ownership and serialization boundary
+around existing production pointer warps. It uses no private CGS/WindowServer
+SPI, SystemUIServer/Dock restart, root, synthetic click, periodic reset,
+background recovery loop, focus-stealing production workaround, or pointer
+trap.

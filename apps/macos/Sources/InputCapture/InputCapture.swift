@@ -177,6 +177,7 @@ public final class InputCapture: @unchecked Sendable {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var runLoop: CFRunLoop?
+    private let cursorMutationExecutor: CursorMutationExecutor
     private var watchdog: DispatchSourceTimer?
     /// Dedicated queue for the fail-safe watchdog. The tap queue's only thread
     /// is parked inside CFRunLoopRun() and can never service timer events, so
@@ -192,6 +193,10 @@ public final class InputCapture: @unchecked Sendable {
     /// across a gap or out-of-frame event.
     private var currentEventDisplay: DisplayEdgeConfiguration?
     private var isSuppressing = false
+    /// Prevents duplicate releases while restore coordination is bounded. The
+    /// local suppression state remains owned until the executor invalidates the
+    /// corresponding cursor epoch or its timeout fails safe.
+    private var releaseInProgressGeneration: UInt64?
     private let externalControlClassifier: ExternalControlEventClassifier
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
@@ -247,7 +252,8 @@ public final class InputCapture: @unchecked Sendable {
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
         pointerRestoreOverride: (() -> Void)? = nil,
         suppressionTimeoutOverride: TimeInterval? = nil,
-        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil
+        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil,
+        cursorMutationExecutor: CursorMutationExecutor? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
@@ -257,6 +263,7 @@ public final class InputCapture: @unchecked Sendable {
         self.pointerRestoreOverride = pointerRestoreOverride
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
         self.beforeSuppressedEventEmission = beforeSuppressedEventEmission
+        self.cursorMutationExecutor = cursorMutationExecutor ?? .production()
     }
 
     // MARK: - Lifecycle
@@ -296,9 +303,10 @@ public final class InputCapture: @unchecked Sendable {
         self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         tapQueue.async { [weak self] in
             guard let self else { return }
-            let runLoop = CFRunLoopGetCurrent()
+            guard let runLoop = CFRunLoopGetCurrent() else { return }
             self.runLoop = runLoop
             CFRunLoopAddSource(runLoop, self.runLoopSource, .commonModes)
+            _ = self.cursorMutationExecutor.bind(to: runLoop)
             self.installEmergencyHotKey()
             CFRunLoopRun()
         }
@@ -307,6 +315,7 @@ public final class InputCapture: @unchecked Sendable {
 
     public func stop() {
         release(reason: .captureStopped)
+        cursorMutationExecutor.unbind()
         stateLock.withLock {
             if let tap {
                 CFMachPortInvalidate(tap)
@@ -335,11 +344,15 @@ public final class InputCapture: @unchecked Sendable {
     /// Switches to suppressed mode: pointer events are consumed and forwarded.
     public func suppress() -> UInt64? {
         let generation: UInt64? = stateLock.withLock {
-            guard !isSuppressing else { return nil }
+            guard !isSuppressing, releaseInProgressGeneration == nil else { return nil }
             isSuppressing = true
             suppressionGeneration &+= 1
             keysDown.removeAll()
             keysDownGeneration = suppressionGeneration
+            // Keep the local transition and the executor's ownership epoch
+            // together. A queued restore cannot slip between generation N+1
+            // becoming local and its executor admission.
+            _ = cursorMutationExecutor.beginOwnership(generation: suppressionGeneration)
             return suppressionGeneration
         }
         guard let generation else { return nil }
@@ -357,43 +370,53 @@ public final class InputCapture: @unchecked Sendable {
     /// prevents a stale watchdog, external-control probe, or emergency event
     /// from releasing a newer suppression generation after re-entry.
     private func release(reason: SuppressionReleaseReason, expectedGeneration: UInt64?) {
-        let (wasSuppressing, generation) = stateLock.withLock {
+        let generation: UInt64? = stateLock.withLock {
             if let expectedGeneration,
                (!isSuppressing || suppressionGeneration != expectedGeneration) {
-                return (false, suppressionGeneration)
+                return nil
             }
-            let was = isSuppressing
+            guard isSuppressing, releaseInProgressGeneration == nil else { return nil }
             let gen = suppressionGeneration
-            isSuppressing = false
+            releaseInProgressGeneration = gen
             watchdog?.cancel()
             watchdog = nil
-            return (was, gen)
+            return gen
         }
-        if wasSuppressing {
-            Diagnostics.log(
-                "suppression released generation=\(generation) reason=\(reason.rawValue)"
-            )
-            flushStuckKeys(for: generation)
-            if reason == .externalControl {
-                // External control owns the pointer position. Do not warp it
-                // back to the edge or center; the triggering event is returned
-                // to macOS immediately after this synchronous cleanup.
-                onPointerStateReset?()
-                stateLock.withLock {
-                    edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-                }
-            } else {
-                // Physically return the pointer to the crossing edge point the user
-                // pushed through, so Android->macOS continues seamlessly instead of
-                // jumping to the screen center.
-                if let pointerRestoreOverride {
-                    pointerRestoreOverride()
-                } else {
-                    restorePointerAtEdge()
-                }
+        guard let generation else { return }
+
+        // Invalidate the cursor ownership epoch before local suppression is
+        // released. An admitted mutation either finishes before this returns,
+        // or a queued/stale mutation is rejected by the executor.
+        _ = cursorMutationExecutor.endOwnership(generation: generation)
+        stateLock.withLock {
+            guard releaseInProgressGeneration == generation else { return }
+            isSuppressing = false
+            releaseInProgressGeneration = nil
+        }
+
+        Diagnostics.log(
+            "suppression released generation=\(generation) reason=\(reason.rawValue)"
+        )
+        flushStuckKeys(for: generation)
+        if reason == .externalControl {
+            // External control owns the pointer position. Do not warp it
+            // back to the edge or center; the triggering event is returned
+            // to macOS immediately after this synchronous cleanup.
+            onPointerStateReset?()
+            stateLock.withLock {
+                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
             }
-            onSuppressionReleased?(reason, generation)
+        } else {
+            // Physically return the pointer to the crossing edge point the user
+            // pushed through, so Android->macOS continues seamlessly instead of
+            // jumping to the screen center.
+            if let pointerRestoreOverride {
+                pointerRestoreOverride()
+            } else {
+                restorePointerAtEdge(generation: generation)
+            }
         }
+        onSuppressionReleased?(reason, generation)
     }
 
     public var isSuppressed: Bool {
@@ -675,20 +698,11 @@ public final class InputCapture: @unchecked Sendable {
         onScreenEdge?(candidate.edge)
     }
 
-    private func centerPointer() {
-        let frame = CGDisplayBounds(CGMainDisplayID())
-        CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
-    }
-
     /// Pins the macOS pointer to the configured Android edge of the current
     /// display while suppressed (CGWarpMouseCursorPosition posts no events,
     /// so there is no feedback loop). Keeps the cursor visually at the edge
     /// instead of drifting with the deltas forwarded to Android.
     private func holdPointerAtEdge(generation: UInt64) {
-        // A return may complete while the capture callback is between
-        // forwarding and the pointer warp. Do not re-hold the pointer after
-        // local ownership has already been restored.
-        guard stateLock.withLock({ isSuppressing && suppressionGeneration == generation }) else { return }
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
         let hold = DisplayEdgeResolver.pointerPosition(
@@ -696,17 +710,31 @@ public final class InputCapture: @unchecked Sendable {
             in: display.frame,
             at: currentPosition,
             threshold: edgeThreshold)
-        CGWarpMouseCursorPosition(hold)
+        _ = cursorMutationExecutor.perform(
+            kind: .hold,
+            generation: generation,
+            point: hold,
+            precondition: { [weak self] in
+                guard let self else { return false }
+                return self.stateLock.withLock {
+                    self.isSuppressing && self.suppressionGeneration == generation
+                }
+            }
+        )
     }
 
     /// Physically returns the pointer to the crossing edge point the user
     /// pushed through, so Android→macOS continues seamlessly instead of
     /// jumping to the screen center.
-    private func restorePointerAtEdge() {
+    private func restorePointerAtEdge(generation: UInt64) {
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
               let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else {
             let frame = CGDisplayBounds(CGMainDisplayID())
-            CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
+            _ = cursorMutationExecutor.perform(
+                kind: .restore,
+                generation: generation,
+                point: CGPoint(x: frame.midX, y: frame.midY)
+            )
             // Arm the gates even on the unresolved-display path: without them
             // a subsequent event near any configured edge can instantly
             // re-arm handoff after a fail-safe return (issue #50).
@@ -721,8 +749,14 @@ public final class InputCapture: @unchecked Sendable {
             in: display.frame,
             at: currentPosition,
             threshold: edgeThreshold)
-        CGWarpMouseCursorPosition(hold)
-        postSyntheticMove(at: hold)
+        let restored = cursorMutationExecutor.perform(
+            kind: .restore,
+            generation: generation,
+            point: hold
+        )
+        if restored {
+            postSyntheticMove(at: hold)
+        }
         // Don't re-trigger the edge switch from the pointer sitting on the
         // edge: park detection behind both the short cooldown and the
         // leave-zone gate. The synthetic move posted above arrives through
