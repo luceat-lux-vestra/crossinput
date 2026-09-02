@@ -400,8 +400,11 @@ separated from its warp by a TOCTOU window. `CursorMutationExecutor` makes the
 event-tap CFRunLoop the single writer for every production
 `CGWarpMouseCursorPosition` call. Hold and restore requests carry their
 ownership generation; stale queued requests are rejected, and non-tap restore
-coordination is synchronous with a bounded timeout. A timeout releases local
-suppression and skips the restore; it never falls back to a caller-thread warp.
+coordination is synchronous with a bounded timeout. A request that times out
+while waiting for ownership is cancelled even when it has already been
+dequeued, so it cannot begin a later platform mutation. A suppression timeout
+releases local suppression and skips the restore; it never falls back to a
+caller-thread warp.
 
 This is a structural hypothesis experiment, not a confirmed root cause and
 not a production workaround claim. The AppKit recovery probing is paused.
@@ -423,7 +426,7 @@ than additional cursor APIs or synthetic events.
 ## Production boundary
 
 This change does not modify CGEventTap source/location/options, event posting,
-pointer delta forwarding, suppression timeout/fail-safe policy, handoff,
+pointer delta forwarding, suppression timeout policy, handoff,
 Android code, CXI protocol, target routing, or Issue #97 generation/watchdog/
 fail-safe behavior. It changes only the ownership and serialization boundary
 around existing production pointer warps. It uses no private CGS/WindowServer

@@ -345,15 +345,22 @@ public final class InputCapture: @unchecked Sendable {
     public func suppress() -> UInt64? {
         let generation: UInt64? = stateLock.withLock {
             guard !isSuppressing, releaseInProgressGeneration == nil else { return nil }
-            isSuppressing = true
             suppressionGeneration &+= 1
+            let generation = suppressionGeneration
+            // Ownership must be admitted before local suppression becomes
+            // observable. Otherwise events could be consumed while the
+            // designated cursor writer has no valid ownership epoch.
+            guard cursorMutationExecutor.beginOwnership(generation: generation) else {
+                isSuppressing = false
+                keysDown.removeAll()
+                keysDownGeneration = nil
+                Diagnostics.log("suppression ownership admission failed")
+                return nil
+            }
+            isSuppressing = true
             keysDown.removeAll()
-            keysDownGeneration = suppressionGeneration
-            // Keep the local transition and the executor's ownership epoch
-            // together. A queued restore cannot slip between generation N+1
-            // becoming local and its executor admission.
-            _ = cursorMutationExecutor.beginOwnership(generation: suppressionGeneration)
-            return suppressionGeneration
+            keysDownGeneration = generation
+            return generation
         }
         guard let generation else { return nil }
         startWatchdog(for: generation)

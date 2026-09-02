@@ -23,13 +23,25 @@ private final class WatchdogObservation: @unchecked Sendable {
 }
 
 final class SuppressionWatchdogTests: XCTestCase {
+    private var owners: [InputCaptureTestOwner] = []
+
+    override func tearDown() {
+        owners.forEach { $0.stop() }
+        owners.removeAll()
+        super.tearDown()
+    }
+
     private func makeCapture(
         timeout: TimeInterval,
         released: @escaping @Sendable (SuppressionReleaseReason, UInt64) -> Void
     ) -> InputCapture {
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let owner = InputCaptureTestOwner(executor: executor)
+        owners.append(owner)
         let capture = InputCapture(
             pointerRestoreOverride: {},
-            suppressionTimeoutOverride: timeout
+            suppressionTimeoutOverride: timeout,
+            cursorMutationExecutor: executor
         )
         capture.onSuppressionReleased = released
         return capture

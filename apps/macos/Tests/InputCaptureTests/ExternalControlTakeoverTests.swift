@@ -98,6 +98,13 @@ final class ExternalControlClassifierTests: XCTestCase {
 final class ExternalControlTakeoverTests: XCTestCase {
     private let remoteProcessID: Int32 = 4242
     private let physicalProcessID: Int32 = 4243
+    private var owners: [InputCaptureTestOwner] = []
+
+    override func tearDown() {
+        owners.forEach { $0.stop() }
+        owners.removeAll()
+        super.tearDown()
+    }
 
     private func makeCapture(_ observation: CaptureObservation) -> InputCapture {
         let resolver: @Sendable (Int32) -> ExternalControlEventSource? = { [remoteProcessID, physicalProcessID] processID in
@@ -121,7 +128,13 @@ final class ExternalControlTakeoverTests: XCTestCase {
                 return nil
             }
         }
-        let capture = InputCapture(sourceIdentityResolver: resolver)
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let owner = InputCaptureTestOwner(executor: executor)
+        owners.append(owner)
+        let capture = InputCapture(
+            sourceIdentityResolver: resolver,
+            cursorMutationExecutor: executor
+        )
         capture.onPointerEvent = { event in observation.append(pointer: event) }
         capture.onKeyEvent = { event in observation.append(key: event) }
         capture.onPointerStateReset = { observation.resetPointerState() }

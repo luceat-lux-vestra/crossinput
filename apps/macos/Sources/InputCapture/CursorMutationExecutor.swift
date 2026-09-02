@@ -23,7 +23,10 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         private let stateLock = NSLock()
         private let completion = DispatchSemaphore(value: 0)
         private var cancelled = false
-        private var started = false
+        /// Set only after ownership has been acquired and the request has
+        /// passed the final cancellation/current-generation check. Once set,
+        /// the platform mutation is irrevocably admitted.
+        private var admitted = false
         private var result: Bool?
 
         init(
@@ -48,14 +51,15 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
             complete(executor.commit(self))
         }
 
-        /// Cancels only a request that has not entered the serialized commit.
-        /// A request already holding the commit gate is allowed to finish; its
-        /// platform call began before the coordination timeout was observed.
+        /// Makes cancellation authoritative until the request has passed the
+        /// final admission check. This deliberately waits for the short state
+        /// transition instead of using try-lock: a timeout caller must know
+        /// whether the request was admitted before it returns.
         @discardableResult
         func cancelIfPending() -> Bool {
-            guard stateLock.try() else { return false }
+            stateLock.lock()
             defer { stateLock.unlock() }
-            guard result == nil, !started else { return false }
+            guard result == nil, !admitted else { return false }
             cancelled = true
             result = false
             completion.signal()
@@ -69,30 +73,39 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
             return stateLock.withLock { result }
         }
 
-        /// Atomically admits the request relative to cancellation and the
-        /// executor's ownership gate. The executor's lock remains held while
-        /// the platform mutation runs, so ownership invalidation cannot be
+        /// Waits for ownership without holding the request state lock, so a
+        /// timed-out caller can cancel a dequeued request. Once ownership is
+        /// held, the final state check and admission mark are atomic relative
+        /// to cancellation. The executor's lock remains held while the
+        /// platform mutation runs, so ownership invalidation cannot be
         /// observed as complete before an admitted mutation is finished.
         func beginCommit(using executor: CursorMutationExecutor) -> Bool {
-            guard stateLock.lock(
-                before: Date().addingTimeInterval(executor.coordinationTimeout)
-            ) else {
-                Diagnostics.log("cursor-mutation serialization timeout")
+            guard stateLock.withLock({ result == nil && !cancelled && !self.admitted }) else {
                 return false
             }
-            defer { stateLock.unlock() }
-            guard result == nil, !cancelled else { return false }
             guard executor.ownershipLock.lock(
                 before: Date().addingTimeInterval(executor.coordinationTimeout)
             ) else {
                 return false
             }
             defer { executor.ownershipLock.unlock() }
-            guard executor.isCurrent(kind: kind, generation: generation) else {
-                Diagnostics.log("cursor-mutation stale-generation rejected")
+
+            let admission = stateLock.withLock { () -> (admitted: Bool, stale: Bool) in
+                guard result == nil, !cancelled, !self.admitted else {
+                    return (false, false)
+                }
+                guard executor.isCurrent(kind: kind, generation: generation) else {
+                    return (false, true)
+                }
+                self.admitted = true
+                return (true, false)
+            }
+            guard admission.admitted else {
+                if admission.stale {
+                    Diagnostics.log("cursor-mutation stale-generation rejected")
+                }
                 return false
             }
-            started = true
             mutation()
             return true
         }
@@ -210,16 +223,40 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
 
     @discardableResult
     func beginOwnership(generation: UInt64) -> Bool {
-        guard ownershipLock.lock(
+        // Ownership admission is only valid while the event-tap run loop is
+        // bound. Without this check suppression could consume local input
+        // even though no designated writer exists to service cursor requests.
+        guard pendingLock.lock(
             before: Date().addingTimeInterval(coordinationTimeout)
         ) else {
             Diagnostics.log("cursor-mutation serialization timeout")
             return false
         }
-        defer { ownershipLock.unlock() }
+        guard ownerRunLoop != nil, ownerThreadID != nil, source != nil else {
+            pendingLock.unlock()
+            Diagnostics.log("cursor-mutation owner unavailable")
+            return false
+        }
+        guard ownershipLock.lock(
+            before: Date().addingTimeInterval(coordinationTimeout)
+        ) else {
+            pendingLock.unlock()
+            Diagnostics.log("cursor-mutation serialization timeout")
+            return false
+        }
         latestGeneration = generation
         activeGeneration = generation
+        ownershipLock.unlock()
+        pendingLock.unlock()
         return true
+    }
+
+    /// Test-only contention hook. It lets executor tests hold the same
+    /// ownership gate that serializes production cursor mutations.
+    func withOwnershipLockForTesting(_ body: @Sendable () -> Void) {
+        ownershipLock.lock()
+        defer { ownershipLock.unlock() }
+        body()
     }
 
     /// Invalidates an ownership epoch before `InputCapture` releases local

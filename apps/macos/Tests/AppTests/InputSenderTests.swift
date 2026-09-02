@@ -16,8 +16,95 @@ private final class TestEventBox: @unchecked Sendable {
     }
 }
 
+/// Supplies the bound cursor-owner run loop required by InputCapture's
+/// suppression admission in App-level handoff tests.
+private final class AppTestCursorOwner: @unchecked Sendable {
+    private let executor: CursorMutationExecutor
+    private let queue = DispatchQueue(label: "crossinput.app-cursor-test-owner")
+    private let ready = DispatchSemaphore(value: 0)
+    private let running = DispatchSemaphore(value: 0)
+    private let finished = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
+    private var runLoop: CFRunLoop?
+    private var stopped = false
+
+    init(executor: CursorMutationExecutor) {
+        self.executor = executor
+        queue.async { [weak self] in
+            guard let self, let runLoop = CFRunLoopGetCurrent() else { return }
+            guard executor.bind(to: runLoop) else { return }
+            self.stateLock.withLock { self.runLoop = runLoop }
+            self.ready.signal()
+            self.running.signal()
+            CFRunLoopRun()
+            self.finished.signal()
+        }
+        XCTAssertEqual(
+            ready.wait(timeout: .now() + 1),
+            .success,
+            "app test cursor owner must bind its run loop"
+        )
+    }
+
+    func stop() {
+        let shouldStop = stateLock.withLock { () -> Bool in
+            guard !stopped else { return false }
+            stopped = true
+            return true
+        }
+        guard shouldStop else { return }
+        guard running.wait(timeout: .now() + 1) == .success else { return }
+        guard let runLoop = stateLock.withLock({ self.runLoop }) else { return }
+        executor.unbind()
+        CFRunLoopStop(runLoop)
+        CFRunLoopWakeUp(runLoop)
+        _ = finished.wait(timeout: .now() + 1)
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 @MainActor
 final class InputSenderTests: XCTestCase {
+    nonisolated(unsafe) private var cursorOwners: [AppTestCursorOwner] = []
+    nonisolated(unsafe) private var testCaptures: [InputCapture] = []
+
+    override func tearDown() {
+        testCaptures.forEach { $0.stop() }
+        cursorOwners.forEach { $0.stop() }
+        testCaptures.removeAll()
+        cursorOwners.removeAll()
+        super.tearDown()
+    }
+
+    private func makeTestCapture(
+        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil
+    ) -> InputCapture {
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let owner = AppTestCursorOwner(executor: executor)
+        cursorOwners.append(owner)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedEventEmission: beforeSuppressedEventEmission,
+            cursorMutationExecutor: executor
+        )
+        testCaptures.append(capture)
+        return capture
+    }
+
+    private func makeController(
+        sender: InputSender,
+        switchMachine: EdgeSwitchStateMachine
+    ) -> ControlHandoffController {
+        ControlHandoffController(
+            sender: sender,
+            capture: makeTestCapture(),
+            switchMachine: switchMachine
+        )
+    }
+
     func testMovementUsesHelperAcceptedDelta() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult,
@@ -365,8 +452,7 @@ final class InputSenderTests: XCTestCase {
     func testCoalescedFirstMovementBatchIsAppliedExactlyOnce() async {
         let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
         let sawLocal = CompletionCounter()
         controller.onStateChange = { state in
             if state == .local { sawLocal.call() }
@@ -413,8 +499,7 @@ final class InputSenderTests: XCTestCase {
     func testDisableEdgeSwitchReturnsControlAndKeepsSessionAlive() async {
         let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                   switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
 
         machine.activate()
         machine.pointerAtEdge(.right)
@@ -671,8 +756,7 @@ final class InputSenderTests: XCTestCase {
     func testButtonSafetyRejectionAtSaturationReturnsControlToLocal() async {
         let fixture = makeFixture(maxPendingPointerItems: 2)
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
         let sawLocal = CompletionCounter()
         controller.onStateChange = { state in
             if state == .local { sawLocal.call() }
@@ -715,8 +799,7 @@ final class InputSenderTests: XCTestCase {
     func testRejectedButtonUpAfterDeliveredButtonDownReleasesHeldButton() async {
         let fixture = makeFixture(maxPendingPointerItems: 1)
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
         let sawLocal = CompletionCounter()
         controller.onStateChange = { state in
             if state == .local { sawLocal.call() }
@@ -864,8 +947,7 @@ final class InputSenderTests: XCTestCase {
     func testSafetyRejectionWithoutHeldButtonsSendsNoCleanupFrame() async {
         let fixture = makeFixture(maxPendingPointerItems: 1)
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
 
         machine.activate()
         machine.pointerAtEdge(.right)
@@ -1125,8 +1207,7 @@ final class InputSenderTests: XCTestCase {
     func testCancelledInFlightReturnMovementNeverCreditsHandoff() async {
         let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
         let sawLocal = CompletionCounter()
         controller.onStateChange = { state in
             if state == .local { sawLocal.call() }
@@ -1187,8 +1268,7 @@ final class InputSenderTests: XCTestCase {
     func testStaleDeliveryAcrossReentryNeverCreditsUsableSession() async throws {
         let fixture = makeFixture()
         let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
-        let controller = ControlHandoffController(sender: fixture.sender,
-                                                  switchMachine: machine)
+        let controller = makeController(sender: fixture.sender, switchMachine: machine)
 
         // Observe the ADR-0012 evidence line in a private log window.
         let tempDir = FileManager.default.temporaryDirectory
@@ -1285,8 +1365,7 @@ final class InputSenderTests: XCTestCase {
     func testCapturedPointerBeforeReturnCannotEnterNextRemoteEpoch() async {
         let enteredEmission = DispatchSemaphore(value: 0)
         let continueEmission = DispatchSemaphore(value: 0)
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
+        let capture = makeTestCapture(
             beforeSuppressedEventEmission: {
                 enteredEmission.signal()
                 _ = continueEmission.wait(timeout: .now() + 2)
@@ -1356,8 +1435,7 @@ final class InputSenderTests: XCTestCase {
     func testCapturedKeyboardBeforeReturnCannotEnterNextRemoteEpoch() async {
         let enteredEmission = DispatchSemaphore(value: 0)
         let continueEmission = DispatchSemaphore(value: 0)
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
+        let capture = makeTestCapture(
             beforeSuppressedEventEmission: {
                 enteredEmission.signal()
                 _ = continueEmission.wait(timeout: .now() + 2)
@@ -1415,7 +1493,7 @@ final class InputSenderTests: XCTestCase {
         let reference = SessionReference()
         reference.set(session)
         let sender = InputSender(session: reference)
-        let capture = InputCapture(pointerRestoreOverride: {})
+        let capture = makeTestCapture()
         let machine = EdgeSwitchStateMachine()
         let controller = ControlHandoffController(sender: sender,
                                                    capture: capture,

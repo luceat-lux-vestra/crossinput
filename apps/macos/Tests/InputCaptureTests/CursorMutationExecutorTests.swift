@@ -142,6 +142,76 @@ private final class ExecutorOwnerRunLoop: @unchecked Sendable {
 }
 
 final class CursorMutationExecutorTests: XCTestCase {
+    func testBeginOwnershipFailsWithoutBoundCursorOwnerRunLoop() {
+        let executor = CursorMutationExecutor { _, _ in
+            XCTFail("an unbound executor must not admit ownership")
+        }
+
+        XCTAssertFalse(executor.beginOwnership(generation: 1))
+    }
+
+    func testTimedOutDequeuedRequestCannotMutateAfterOwnershipContentionClears() {
+        let ownershipHeld = DispatchSemaphore(value: 0)
+        let releaseOwnership = DispatchSemaphore(value: 0)
+        let dequeuedBeforeAdmission = DispatchSemaphore(value: 0)
+        let observation = MutationObservation()
+        let executor = CursorMutationExecutor(
+            coordinationTimeout: 0.05,
+            beforeCommitHook: {
+                // Request.run is reached only after drainPending removed the
+                // request from the pending queue.
+                dequeuedBeforeAdmission.signal()
+            },
+            mutation: { kind, point in
+                observation.record(kind: kind, point: point, threadID: currentThreadID())
+            }
+        )
+        let owner = ExecutorOwnerRunLoop(executor: executor, startImmediately: true)
+        defer {
+            releaseOwnership.signal()
+            _ = executor.endOwnership(generation: 1)
+            owner.stop()
+        }
+
+        XCTAssertTrue(executor.beginOwnership(generation: 1))
+        DispatchQueue.global().async {
+            executor.withOwnershipLockForTesting {
+                ownershipHeld.signal()
+                _ = releaseOwnership.wait(timeout: .now() + 1)
+            }
+        }
+        XCTAssertEqual(ownershipHeld.wait(timeout: .now() + 1), .success)
+
+        let result = BoolObservation()
+        let callerFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            result.set(executor.perform(kind: .hold, generation: 1, point: .zero))
+            callerFinished.signal()
+        }
+
+        XCTAssertEqual(
+            dequeuedBeforeAdmission.wait(timeout: .now() + 1),
+            .success,
+            "the request must be dequeued before the bounded wait expires"
+        )
+        XCTAssertEqual(callerFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.value, false)
+
+        // Let the already-dequeued request finish its executor-side path. A
+        // second admitted request proves the owner run loop made progress;
+        // exactly one mutation then identifies only that second request.
+        releaseOwnership.signal()
+        let followUpResult = BoolObservation()
+        let followUpFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            followUpResult.set(executor.perform(kind: .hold, generation: 1, point: .zero))
+            followUpFinished.signal()
+        }
+        XCTAssertEqual(followUpFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(followUpResult.value, true)
+        XCTAssertEqual(observation.kinds, [.hold], "only the follow-up request may mutate")
+    }
+
     func testStaleHoldAfterReleaseCannotMutateAfterOwnershipEnds() {
         let admitted = DispatchSemaphore(value: 0)
         let resume = DispatchSemaphore(value: 0)

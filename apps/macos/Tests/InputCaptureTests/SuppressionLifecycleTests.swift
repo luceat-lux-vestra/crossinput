@@ -37,14 +37,128 @@ private final class TestEventBox: @unchecked Sendable {
     }
 }
 
+/// Supplies the bound event-tap run loop required for suppression admission,
+/// without installing a system event tap.
+final class InputCaptureTestOwner: @unchecked Sendable {
+    let executor: CursorMutationExecutor
+
+    private let queue = DispatchQueue(label: "crossinput.suppression-test-owner")
+    private let ready = DispatchSemaphore(value: 0)
+    private let start = DispatchSemaphore(value: 0)
+    private let running = DispatchSemaphore(value: 0)
+    private let finished = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
+    private var runLoop: CFRunLoop?
+    private var stopped = false
+
+    init(executor: CursorMutationExecutor) {
+        self.executor = executor
+        queue.async { [weak self] in
+            guard let self, let runLoop = CFRunLoopGetCurrent() else { return }
+            guard executor.bind(to: runLoop) else { return }
+            self.stateLock.withLock { self.runLoop = runLoop }
+            self.ready.signal()
+            self.start.signal()
+            _ = self.start.wait(timeout: .distantFuture)
+            self.running.signal()
+            CFRunLoopRun()
+            self.finished.signal()
+        }
+        XCTAssertEqual(
+            ready.wait(timeout: .now() + 1),
+            .success,
+            "suppression test owner must bind its run loop"
+        )
+    }
+
+    func stop() {
+        let shouldStop = stateLock.withLock { () -> Bool in
+            guard !stopped else { return false }
+            stopped = true
+            return true
+        }
+        guard shouldStop else { return }
+        start.signal()
+        guard running.wait(timeout: .now() + 1) == .success else { return }
+        guard let runLoop = stateLock.withLock({ self.runLoop }) else { return }
+        executor.unbind()
+        CFRunLoopStop(runLoop)
+        CFRunLoopWakeUp(runLoop)
+        _ = finished.wait(timeout: .now() + 1)
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 final class SuppressionLifecycleTests: XCTestCase {
+    private var captures: [InputCapture] = []
+    private var owners: [InputCaptureTestOwner] = []
+
+    override func tearDown() {
+        captures.forEach { $0.stop() }
+        owners.forEach { $0.stop() }
+        captures.removeAll()
+        owners.removeAll()
+        super.tearDown()
+    }
+
     private func makeCapture(
         released: (@Sendable (SuppressionReleaseReason, UInt64) -> Void)? = nil,
-        restore: (() -> Void)? = {}
+        restore: (() -> Void)? = {},
+        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil
     ) -> InputCapture {
-        let capture = InputCapture(pointerRestoreOverride: restore)
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let owner = InputCaptureTestOwner(executor: executor)
+        let capture = InputCapture(
+            pointerRestoreOverride: restore,
+            beforeSuppressedEventEmission: beforeSuppressedEventEmission,
+            cursorMutationExecutor: executor
+        )
+        owners.append(owner)
+        captures.append(capture)
         capture.onSuppressionReleased = released
         return capture
+    }
+
+    func testSuppressionFailsClosedWhenCursorOwnershipCannotBeAdmitted() {
+        let ownershipHeld = DispatchSemaphore(value: 0)
+        let releaseOwnership = DispatchSemaphore(value: 0)
+        let executor = CursorMutationExecutor(
+            coordinationTimeout: 0.05,
+            mutation: { _, _ in
+                XCTFail("failed ownership admission must not mutate the cursor")
+            }
+        )
+        let owner = InputCaptureTestOwner(executor: executor)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            cursorMutationExecutor: executor
+        )
+        defer {
+            releaseOwnership.signal()
+            capture.stop()
+            owner.stop()
+        }
+
+        DispatchQueue.global().async {
+            executor.withOwnershipLockForTesting {
+                ownershipHeld.signal()
+                _ = releaseOwnership.wait(timeout: .now() + 1)
+            }
+        }
+        XCTAssertEqual(ownershipHeld.wait(timeout: .now() + 1), .success)
+
+        XCTAssertNil(capture.suppress())
+        XCTAssertFalse(capture.isSuppressed)
+
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true)!
+        let result = capture.handleForTesting(type: .keyDown, event: event)
+        XCTAssertTrue(
+            result?.takeUnretainedValue() === event,
+            "failed admission must leave capture listening so input is not consumed"
+        )
     }
 
     func testDuplicateSuppressionDoesNotDuplicateReleaseOrGeneration() {
@@ -141,8 +255,8 @@ final class SuppressionLifecycleTests: XCTestCase {
     func testSuppressedEventRetainsGenerationAcrossReturnAndReentry() {
         let enteredEmission = DispatchSemaphore(value: 0)
         let continueEmission = DispatchSemaphore(value: 0)
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
+        let capture = makeCapture(
+            restore: {},
             beforeSuppressedEventEmission: {
                 enteredEmission.signal()
                 _ = continueEmission.wait(timeout: .now() + 2)
@@ -176,8 +290,8 @@ final class SuppressionLifecycleTests: XCTestCase {
     func testSuppressedKeyboardEventRetainsGenerationAcrossReturnAndReentry() {
         let enteredEmission = DispatchSemaphore(value: 0)
         let continueEmission = DispatchSemaphore(value: 0)
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
+        let capture = makeCapture(
+            restore: {},
             beforeSuppressedEventEmission: {
                 enteredEmission.signal()
                 _ = continueEmission.wait(timeout: .now() + 2)

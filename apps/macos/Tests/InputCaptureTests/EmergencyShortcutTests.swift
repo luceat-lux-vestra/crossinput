@@ -24,11 +24,23 @@ private final class EmergencyShortcutObservation: @unchecked Sendable {
 }
 
 final class EmergencyShortcutTests: XCTestCase {
+    private var owners: [InputCaptureTestOwner] = []
+
+    override func tearDown() {
+        owners.forEach { $0.stop() }
+        owners.removeAll()
+        super.tearDown()
+    }
+
     private func makeCapture(
         released: @escaping @Sendable (SuppressionReleaseReason, UInt64) -> Void
     ) -> InputCapture {
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let owner = InputCaptureTestOwner(executor: executor)
+        owners.append(owner)
         let capture = InputCapture(
-            pointerRestoreOverride: {}
+            pointerRestoreOverride: {},
+            cursorMutationExecutor: executor
         )
         capture.onSuppressionReleased = released
         return capture
