@@ -319,10 +319,16 @@ final class ControlHandoffController: @unchecked Sendable {
             // cleared here so the first confirmed delivery after re-entering
             // arms a fresh marker (issue #68).
             usableSessionLogged = false
-            if let generation = capture.suppress() {
-                currentSuppressionGeneration = generation
-                lifecycleLock.withLock { activeSuppressionGeneration = generation }
+            guard let generation = capture.suppress() else {
+                // The state-machine transition happened before cursor
+                // ownership could be admitted. Return through the existing
+                // control fail-safe so listening capture and logical state
+                // cannot diverge.
+                switchMachine.forceReturn(reason: .remoteUnavailable)
+                return
             }
+            currentSuppressionGeneration = generation
+            lifecycleLock.withLock { activeSuppressionGeneration = generation }
         case .localActive, .returning, .disabled:
             // Lifecycle invariant (issue #62 code-gate): when local suppression
             // ends for ANY reason — normal boundary return, remote failure,

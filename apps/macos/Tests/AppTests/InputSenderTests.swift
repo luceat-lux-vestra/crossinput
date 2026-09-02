@@ -788,6 +788,65 @@ final class InputSenderTests: XCTestCase {
                        "the rejected button must never be sent")
     }
 
+    /// Suppression admission is part of remote ownership: if it fails, the
+    /// machine must not remain remote while capture is still listening.
+    func testSuppressionAdmissionFailureReturnsToLocalAndAllowsEdgeRetry() async {
+        let executor = CursorMutationExecutor(mutation: { _, _ in })
+        let capture = InputCapture(pointerRestoreOverride: {},
+                                   cursorMutationExecutor: executor)
+        testCaptures.append(capture)
+
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(sender: sender,
+                                                   capture: capture,
+                                                   switchMachine: machine)
+        let edgeArmingCount = CompletionCounter()
+        controller.onStateChange = { state in
+            if case .arming(.right) = state {
+                edgeArmingCount.call()
+            }
+        }
+
+        machine.activate()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+
+        // The unbound executor rejects ownership admission. The controller
+        // must immediately run the machine's returning -> localActive path.
+        controller.capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(edgeArmingCount.value, 1)
+
+        // A generation-tagged event can only be delivered for an active
+        // suppression generation. Failed admission must leave that gate nil.
+        controller.capture.onPointerEventWithGeneration?(
+            PointerEvent(.move(dx: 1, dy: 0)), 1)
+        sender.waitForDrain()
+        XCTAssertEqual(session.requestCount, 0,
+                       "failed admission must not start remote pointer delivery")
+
+        // Local ownership remains usable: a later edge entry is admitted by
+        // the handoff machine and fails safely again instead of staying remote.
+        controller.capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(edgeArmingCount.value, 2,
+                       "subsequent edge acquisition must remain possible")
+        XCTAssertEqual(session.requestCount, 0)
+    }
+
     // MARK: Held-button cleanup (issue #62 code-gate: rejected buttonUp must
     // not strand an already-accepted remote buttonDown)
 
