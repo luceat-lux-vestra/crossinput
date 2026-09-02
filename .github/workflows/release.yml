@@ -15,7 +15,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
@@ -28,6 +28,8 @@ jobs:
   dmg:
     runs-on: macos-15
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - name: Validate release tag input
         shell: bash
@@ -43,8 +45,10 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify checked-out tag identity
+        id: source
         shell: bash
         run: |
           set -euo pipefail
@@ -52,6 +56,16 @@ jobs:
           head_commit="$(git rev-parse HEAD)"
           test "${head_commit}" = "${tag_commit}"
           test -z "$(git status --porcelain)"
+
+          # Tag immutability alone does not prove the source was reviewed. Refuse
+          # publication unless the tagged commit is already reachable from main.
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${head_commit}" origin/main || {
+            echo "release tag ${RELEASE_TAG} points to ${head_commit}, which is not reviewed main history" >&2
+            exit 1
+          }
+
+          echo "commit=${head_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
@@ -73,9 +87,11 @@ jobs:
           (cd dist && shasum -a 256 "Ampersand-${VERSION}.dmg" > "Ampersand-${VERSION}.sha256")
           test -s "${CHECKSUM}"
 
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "dmg=${DMG}" >> "${GITHUB_OUTPUT}"
-          echo "checksum=${CHECKSUM}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "version=${VERSION}"
+            echo "dmg=${DMG}"
+            echo "checksum=${CHECKSUM}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -97,23 +113,47 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          release_view_output="$(gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" 2>&1)"
-          release_view_status=$?
+          lookup="$(gh api --include \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null \
+            | grep -m1 -E '^HTTP/')"
           set -e
 
-          if [[ ${release_view_status} -eq 0 ]]; then
-            gh release upload "${RELEASE_TAG}" \
-              "${DMG}" "${CHECKSUM}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --clobber
-          elif grep -qiE 'release not found|not found' <<<"${release_view_output}"; then
-            gh release create "${RELEASE_TAG}" \
-              "${DMG}" "${CHECKSUM}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "Ampersand ${VERSION}" \
-              --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
-          else
-            printf '%s\n' "${release_view_output}" >&2
-            exit "${release_view_status}"
-          fi
+          case "${lookup}" in
+            HTTP*\ 200*)
+              gh release upload "${RELEASE_TAG}" \
+                "${DMG}" "${CHECKSUM}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --clobber
+              ;;
+            HTTP*\ 404*)
+              gh release create "${RELEASE_TAG}" \
+                "${DMG}" "${CHECKSUM}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --verify-tag \
+                --title "Ampersand ${VERSION}" \
+                --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
+              ;;
+            *)
+              echo "release lookup was inconclusive, refusing to publish: ${lookup}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Verify published release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+          test "$(jq -r '.tag_name' <<<"${release}")" = "${RELEASE_TAG}"
+
+          published_commit="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          test "${published_commit}" = "${SOURCE_COMMIT}"
+
+          assets="$(jq -r '.assets[].name' <<<"${release}")"
+          grep -qx "Ampersand-${VERSION}.dmg" <<<"${assets}"
+          grep -qx "Ampersand-${VERSION}.sha256" <<<"${assets}"

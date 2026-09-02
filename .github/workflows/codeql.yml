@@ -34,6 +34,11 @@ jobs:
           - language: java-kotlin
             build-mode: manual
             os: ubuntu-latest
+          # The ADR-0012 stability analyzer and the repository hardening gate
+          # are Python; both are security-relevant tooling.
+          - language: python
+            build-mode: none
+            os: ubuntu-latest
           - language: swift
             build-mode: autobuild
             os: macos-15
@@ -41,6 +46,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9

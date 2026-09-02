@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "Canonical, machine-checkable repository hardening policy for Ampersand/CrossInput.",
+    "scripts/check-workflow-policy.py enforces this statically in CI and, with --live,",
+    "compares it against the actual GitHub ruleset / security configuration.",
+    "Changing anything here is a deliberate control change and must be reviewed as such."
+  ],
+
+  "required_status_checks": [
+    {
+      "context": "macOS App Build + Test",
+      "workflow": "ci.yml",
+      "job": "macos-app"
+    },
+    {
+      "context": "Android Helper Build + Test",
+      "workflow": "ci.yml",
+      "job": "android-helper"
+    },
+    {
+      "context": "Documentation Validation",
+      "workflow": "ci.yml",
+      "job": "markdown"
+    },
+    {
+      "context": "Evidence & Tooling Validation",
+      "workflow": "ci.yml",
+      "job": "scripts"
+    }
+  ],
+
+  "protected_branch": "main",
+
+  "branch_ruleset": {
+    "enforcement": "active",
+    "allow_bypass_actors": false,
+    "strict_required_status_checks_policy": true,
+    "allowed_merge_methods": ["squash"],
+    "require_extra_approval_for_unattributed_changes": true,
+    "required_rule_types": [
+      "deletion",
+      "non_fast_forward",
+      "required_linear_history",
+      "pull_request",
+      "required_status_checks"
+    ]
+  },
+
+  "tag_ruleset": {
+    "ref_pattern": "refs/tags/v*",
+    "enforcement": "active",
+    "allow_bypass_actors": false,
+    "required_rule_types": ["deletion", "update"]
+  },
+
+  "codeql_authority": "custom-workflow",
+
+  "actions_policy": {
+    "sha_pinning_required": true,
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false
+  },
+
+  "workflows_allowed_write_permissions": {
+    "release.yml": ["contents"],
+    "codeql.yml": ["security-events"],
+    "pr-labeler.yml": ["pull-requests", "issues"],
+    "issue-labeler.yml": ["issues"],
+    "hardening-audit.yml": ["issues"]
+  }
+}
