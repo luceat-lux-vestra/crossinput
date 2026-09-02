@@ -1,270 +1,243 @@
 # CrossInput Architecture
 
-> Status: product scope rebaseline, 2026-08-29. The implementation architecture
-> is retained. This document corrects product positioning and records the
-> pointer-routing behavior already implemented in the current v1 code.
+> Status: **Architecture Leap in progress, 2026-09-03.**
+>
+> [Architecture Leap #101](https://github.com/luceat-lux-vestra/crossinput/issues/101)
+> is the authority for the target architecture and sequencing. This document
+> describes the product invariants, validated current behavior, and target
+> architectural constraints that the Leap must preserve or deliberately
+> supersede. Pre-Leap classes/modules are not architectural commitments.
 
 CrossInput is a **DeX-first, Android-capable macOS input bridge**. Samsung DeX is
-the primary product use case, while the existing remote-target abstraction
-continues to support the built-in phone display and other discovered displays on
-the same connected Android device.
+the primary product use case while the built-in phone display remains a
+supported secondary target on the same connected Android device.
 
-## Current topology
+## Architecture authority
+
+The previous architecture document treated the then-current controller/module
+layout as the retained baseline and listed broad repository redesign as a
+non-goal. That position is superseded by #101.
+
+The current rule is:
+
+- preserve validated user-visible behavior, device/protocol facts, safety
+  invariants, and reproducible evidence;
+- re-audit historical behavior before treating it as a requirement;
+- allow broad internal redesign, replacement, deletion, and module
+  restructuring where it materially improves ownership and correctness;
+- keep every merged step coherent and independently reviewable; and
+- do not preserve an abstraction merely because historical code/tests contain
+  it.
+
+The Leap's native Track hierarchy is the stable target responsibility map:
+
+```text
+#101 Architecture Leap
+├── #114 architecture — target ownership, concurrency, semantic boundaries
+├── #115 host         — macOS capability/capture/suppression/control ownership
+├── #116 remote       — delivery/Android helper/protocol/backend boundaries
+├── #117 app          — composition and presentation ownership
+└── #118 quality      — adversarial verification/physical acceptance/legacy purge
+```
+
+Task-level dependencies inside those Tracks are authoritative for implementation
+order.
+
+## Current validated topology
+
+The production baseline being reworked is approximately:
 
 ```text
 macOS host
-  └─ Host input capture (pointer, keyboard)
-       └─ Screen-edge control handoff
-            └─ Remote session
-                 └─ CXI v1
-                      └─ current transport: ADB/app_process
-                           └─ Android target display
-                                └─ Android input dispatcher
-                                     ├─ desktop sink → UHID system routing
-                                     └─ other target → InputManager explicit routing
+  -> CGEventTap pointer/keyboard capture
+  -> local/remote control handoff
+  -> semantic CXI v1 events
+  -> ADB / app_process transport
+  -> Android helper
+  -> selected Android display
+     -> desktop sink: system-routed UHID preferred
+     -> other target: explicit-display InputManager
 ```
 
-Only one Android device is controlled at a time. Target selection is display
-selection within that device, not multi-device orchestration.
+This topology is **evidence about current behavior**, not a requirement that the
+same controller classes, queue structure, process boundaries, or adapter layout
+survive the Leap.
 
-## Responsibility boundaries
+## Non-negotiable safety invariants
 
-### macOS application
+The target architecture must make these properties explicit and testable:
 
-```text
-Presentation
-├─ MenuBar
-├─ Settings              per-host-display handoff edge
-└─ Diagnostics
+1. local macOS pointer/keyboard control can never be permanently trapped;
+2. stale work from an invalidated Control/Session/Target owner cannot reach a
+   replacement owner;
+3. held remote keys/buttons are cleaned up or safely invalidated on every
+   relevant exit/failure path;
+4. local control restoration never waits for successful remote cleanup;
+5. input payloads, raw coordinates/deltas, key contents, HID reports, clipboard
+   contents, and equivalent sensitive data do not enter normal diagnostics;
+6. Session, Control, Target, capability, capture/suppression, and delivery
+   ownership are explicit and non-overlapping;
+7. Android routing/hidden-API/backend details do not leak into host/domain
+   semantics;
+8. CoreGraphics/AppKit/TCC details do not leak into remote/domain semantics;
+9. capture/event hot paths remain bounded and nonblocking; and
+10. cancellation, replacement, reconnect, failure, and disposal have
+    deterministic stale-work and cleanup semantics.
 
-Application
-├─ SessionController       connection/reconnect orchestration
-├─ ControlHandoffController edge activation and emergency return
-└─ TargetSelectionController refresh/selection policy
+These invariants come from #101 and outrank compatibility with pre-Leap internal
+structure.
 
-Host Input
-├─ PointerCapture
-├─ KeyboardCapture
-└─ EmergencyRelease
+## Product semantics to preserve
 
-Remote
-├─ RemoteSession           CXI request/event session
-├─ RemoteTargetCatalog     normalized target list and selection
-└─ InputSender             semantic pointer/keyboard delivery
+Unless an explicit product decision and evidence supersede them, the Leap must
+preserve:
 
-Transport
-└─ AdbTransport            current ADB process and byte-stream ownership
+- DeX-first operation with selectable Android display targets on one device;
+- macOS → Android pointer and keyboard direction;
+- explicit local emergency return;
+- dynamic display discovery rather than hardcoded display IDs;
+- current CXI v1 compatibility during migration;
+- ADB/`app_process` as the current production transport until a separately
+  approved transport migration exists;
+- semantic pointer/keyboard delivery rather than host code constructing Android
+  backend details;
+- bounded delivery/backpressure behavior;
+- deterministic reconnect/replacement and stale-work rejection; and
+- metadata-only/redacted diagnostics.
 
-Protocol
-└─ CXI v1                  production compatibility wire codec
-```
+## Current device-routing facts
 
-These boundaries are implemented in the current source and remain justified.
-`SessionController` owns `SessionState`, keeps a candidate session private until
-HELLO and capability negotiation succeed, and replaces stale sessions;
-`TargetSelectionController` confirms `SELECT_DISPLAY` before publishing a
-selection and rejects stale responses; `InputSender` returns semantic delivery
-results; and `ControlHandoffController` is the capture/safety composition
-boundary.
+These facts are useful constraints because they were established by real-device
+behavior, even if their implementation owner changes.
 
-The pointer queue remains bounded: adjacent movement and scroll events coalesce
-into delivery batches (ADR-0011), button transitions stay ordered boundaries,
-and saturation sheds a coalescible kind locally rather than turning local
-pressure into a remote failure. Queued semantic input is generation-tagged so a
-replacement session cannot receive stale pointer or keyboard work.
+### Pointer
 
-The menu-bar composition root wires the controllers, while `AppModel` exposes
-their presentation-facing state. Host-display enumeration and persisted edge
-choices remain separate from the Android remote-target list.
+For a Samsung DeX desktop sink, the current AUTO path prefers a system-routed
+UHID mouse. Device evidence showed that explicit InputManager injection could
+deliver events while leaving the visible DeX pointer sprite stationary.
 
-`RemoteTarget` remains justified. DeX is the primary target, but the phone
-screen is already represented and selectable through the same target model.
-Renaming the domain object to a DeX-specific type would remove useful behavior
-without solving a current problem.
+For a non-desktop target such as the built-in phone display, current production
+behavior uses explicit-display InputManager routing.
 
-### Android helper
+A system-routed UHID device must never be described as explicitly targeting an
+arbitrary display ID. Any replacement architecture must keep backend/routing
+claims semantically honest.
 
-```text
-Session
-└─ CXI session and frame dispatch
+### Keyboard
 
-Target discovery
-└─ DisplayDiscovery
-   └─ Android DisplayManager/reflection adapter
-      └─ optional runtime-detected system display IDs
+Current keyboard delivery uses UHID with an InputManager virtual-injection
+fallback. Phone-versus-DeX routing with both displays present remains an
+explicit physical-evidence question (#92); implementation structure is not proof
+of the resulting target behavior.
 
-Input dispatcher
-├─ PointerDispatcher       target-routing policy and failure handling
-│  ├─ UhidPointerInjector (system-routed)
-│  └─ InputManagerPointerInjector (explicit display routing)
-└─ KeyboardBackend
-   ├─ UhidKeyboardInjector
-   └─ InputManagerKeyboardInjector
-```
+## Target ownership model
 
-The helper is the only layer that interprets Android display metadata and
-chooses an injection backend. The macOS side receives a v1-compatible display
-record today, but application code consumes a normalized remote-target model.
-UHID descriptors, HID reports, reflection, hidden Android constants, and backend
-failure policy do not cross the application boundary.
+#101 intentionally requires the Leap to establish the final ownership model
+rather than inheriting the old one. At minimum the approved design must make the
+following concepts explicit:
 
-On Samsung builds where the public `DisplayManager.displays` list omits a
-system-visible DeX virtual display, the helper's discovery adapter may reflect
-`DisplayManagerGlobal.getDisplayIds()` and merge those handles into
-`DISPLAY_LIST`. If that hidden API is unavailable, the public display list
-remains the bounded fallback.
+### Host capability and capture
 
-## Pointer routing policy
+Own macOS permissions/capability state, capture/suppression lifetime, local
+fail-safe restoration, and interaction with external control. Platform APIs
+remain behind host adapters.
 
-The current production AUTO policy is target dependent:
+### Control
 
-1. For a desktop sink candidate such as Samsung DeX, the helper prefers the
-   **system-routed UHID mouse**. UHID flows through Android's native InputReader
-   path, so the visible DeX pointer sprite follows the virtual mouse.
-2. For a non-desktop target such as the built-in phone display, the helper uses
-   **InputManager explicit-display routing** and sets the selected display ID.
-3. If desktop UHID delivery fails, AUTO may fall back to InputManager for the
-   selected display according to `PointerDispatcher` failure policy.
+Own whether CrossInput currently controls local or remote input and the bounded
+transitions between those states. Control must not become an implicit side
+effect of connection callbacks.
 
-A system-routed UHID mouse cannot claim that it targets an arbitrary display ID.
-Its use for DeX is intentional because device evidence showed that explicit
-InputManager injection can deliver events without moving the visible DeX cursor
-sprite. `POINTER_RESULT` still carries semantic delivery results back to macOS,
-so handoff accounting does not trust only a successful pipe write.
+### Session / remote connection
 
-## Keyboard routing
+Own connection, handshake, replacement, request correlation, cancellation,
+reconnect, and invalidation of stale remote work. A failed remote cleanup must
+not block local restoration.
 
-Keyboard delivery uses UHID with an InputManager virtual-injection fallback.
-Unlike pointer selection, the current keyboard backend does not receive the
-selected target display ID. The actual routing behavior when phone and DeX
-screens are both present must therefore be established by device evidence (#92)
-rather than assumed from implementation structure.
+### Target
 
-## Lifecycle separation
+Own discovered remote-target identity, selection, disappearance/reappearance,
+and stale selection rejection separately from connection lifetime.
 
-The three lifecycles are related but not interchangeable:
+### Semantic input and delivery
 
-| Lifecycle | States | Owns |
-|---|---|---|
-| Session | `disconnected`, `connecting`, `ready`, `reconnecting`, `failed` | ADB/helper process, CXI handshake, request correlation, disconnect/reconnect |
-| Control | `disabled`, `local`, `arming(edge)`, `remote`, `returning` | edge-switch acquisition, pointer ownership, edge handoff, emergency release, key/button cleanup |
-| Target | `unavailable`, `available`, `selecting(targetId)`, `selected(targetId)` | discovery snapshot, confirmed selection validity, display disappearance/reappearance |
+Host event capture should produce platform-neutral semantic input before the
+remote/Android boundary. Delivery owns serialization/backpressure/cancellation
+and must not leak Android injection mechanisms back into host semantics.
 
-Session failure must release local input without waiting for a target refresh. A
-A target disappearing invalidates selection without implying that the ADB session
-is dead. A control return does not disconnect the remote session.
+### Android helper and backend policy
 
-The `disabled` control state is an intentional user choice, not a disconnected
-session state. Disabling Edge Switch releases local ownership and held remote
-input while leaving the Session and Target lifecycles ready. Disconnect is an
-application-level orchestration boundary: it disables Control first, then asks
-SessionController to close the helper/session and invalidate its callbacks.
-The menu derives its Enable/Disable and Disconnect actions from these
-application projections rather than maintaining a second UI state. A later
-explicit Connect runs the established reconnect/target-refresh path and
-enables edge switching after a valid target is confirmed.
+The helper/Android boundary owns display metadata, hidden/public Android API
+adaptation, UHID/InputManager mechanisms, and target-dependent backend policy.
+Those details must not become application-domain concepts.
 
-The existing `EdgeSwitchStateMachine` remains the serialized safety mechanism
-for edge hysteresis, watchdogs, stale-transition rejection, and emergency
-return. Connection lifecycle is owned by the application/session layer and must
-not be added to the handoff state model.
+### Application and presentation
 
-`DisplayDiscovery` currently reports display removal as helper diagnostics and
-does not emit a dedicated v1 removal frame. Selected-target invalidation and
-display reappearance propagation remain follow-up work in issue #17.
+Composition/presentation projects authoritative lifecycle/domain state; it does
+not become an accidental owner of infrastructure lifetimes, persistence, or
+concurrency correctness.
+
+The exact classes/modules implementing these responsibilities are intentionally
+not frozen by this document.
+
+## Protocol and transport
+
+CXI and transport remain separate concepts.
+
+CXI v1 is the current compatibility wire protocol. CXI v2 (#93) is a future
+migration target for normalized targets, semantic events, capability
+negotiation, clipboard/data sharing, backend independence, and transport
+independence. A v2 design is not permission to migrate before its go/no-go gate.
+
+ADB/`app_process` is the current/default transport. An alternate local transport
+(#94) requires a concrete product need and separate evidence; do not build a
+speculative plugin framework.
 
 ## Clipboard boundary
 
-Clipboard is not part of input ownership. Planned clipboard synchronization is
-bidirectional even though pointer/keyboard input remains macOS → Android.
+Clipboard/data sharing is not input ownership. Planned text clipboard (#89),
+image clipboard (#90), and file transfer (#91) require their own semantic,
+privacy, lifecycle, size/resource, and loop-suppression contracts.
 
-The clipboard feature should use a dedicated semantic boundary rather than
-being hidden inside `InputSender`. Text synchronization is near-term; image and
-file transfer are separate backlog capabilities. Clipboard contents must never
-be logged.
+Clipboard contents must never enter normal diagnostics. Clipboard implementation
+must fit the approved Leap architecture rather than reusing a pre-Leap class
+solely because it exists.
 
-## Protocol and transport boundaries
+## Verification authority
 
-CXI and transport are separate concepts:
+Automated tests/CI establish deterministic code/protocol/repository properties.
+They do **not** substitute for physical-device evidence when the claim depends on
+macOS + Samsung DeX behavior.
 
-```text
-CrossInput application
-      ↓ semantic CXI
-Transport implementation
-      ↓
-Android helper
-```
+Issue #68 remains the canonical ADR-0012 Level-3 release-stability tracker. Its
+current post-rewrite lineage is **0 / 100 accepted physical handoff/return
+cycles** and therefore incomplete. Leap task acceptance evidence and CI do not
+credit that counter.
 
-ADB/app_process is the current/default transport. `AdbTransport` remains a real
-seam because alternate local transports are an approved future extension point,
-but no plugin framework or second transport is implemented until a concrete
-requirement exists.
-
-CXI v1 remains production. CXI v2 remains a future semantic protocol design for
-normalized targets, capability negotiation, backend independence, clipboard and
-data sharing, and transport independence. It is not a universal protocol
-framework and is not shipped by this rebaseline.
-
-## Dependency rules
-
-- Edge switching calls a remote-session/input-sender boundary; it does not run an ADB command.
-- Session orchestration does not know UHID report descriptors or Android input backend classes.
-- macOS application code does not interpret Android `Display.FLAG_*`, desktop constants, or hidden display IDs. The v1 decoder remains a compatibility adapter.
-- macOS owns semantic events (`PointerMove`, `PointerButton`, `Scroll`, `KeyDown`, and `KeyUp`), not normal-path HID reports.
-- The normal Ampersand pointer path uses `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL`. v1 raw HID handlers remain only for compatibility clients.
-- Android-specific discovery and backend selection stay behind helper adapters.
-- Emergency release is local, bounded, and fail-safe on every failure path.
-- Existing justified abstractions stay; new abstractions require a current requirement or an explicitly accepted future extension point.
-- A future extension point is not permission to implement speculative framework machinery before a second implementation exists.
-
-## Safety invariant
-
-> No CrossInput state may permanently trap the user's local pointer or keyboard control.
-
-The invariant requires local recovery for helper crash, timeout, unexpected
-disconnect, stale callbacks, failed handoff, capture shutdown, and emergency
-return. Held modifiers and buttons are released during relevant remote-to-local
-transitions and helper cleanup. No diagnostic path logs key codes, clipboard
-contents, or input payloads.
-
-## Technology decisions retained
-
-- Swift native macOS menu bar application and native macOS APIs.
-- CGEventTap pointer/keyboard capture and screen-edge handoff.
-- ADB transport with `app_process` helper execution.
-- UHID semantic pointer injection as a system-routed backend for desktop sink candidates.
-- InputManager semantic pointer injection as the explicit-display backend for non-desktop targets and fallback where applicable.
-- macOS → Android one-way pointer/keyboard input for the current scope.
-- CXI v1 compatibility during stabilization.
-
-## Explicit non-goals
-
-- Android → macOS pointer or keyboard input.
-- Using Android as a pointing device for macOS.
-- Simultaneous control of multiple Android devices.
-- Cloud relay/account/server infrastructure.
-- Root or Knox bypass.
-- Broad repository rewrite or a new architecture framework without a concrete defect or requirement.
-
-Windows/Linux hosts, additional target families, and alternate transports are
-future considerations only and must not distort current code structure.
-
-## Verification boundary
-
-Unit/build checks establish protocol compatibility and failure-path behavior.
-They do not replace on-device evidence. A release or completion claim for
-pointer routing, keyboard delivery, display selection, reconnect, or emergency
-recovery requires the real-device evidence required by `AGENTS.md` and
-`docs/testing.md`.
-
-Edge-switch stability is governed by the ADR-0012 release-stability gate: at
-least 100 real physical completed handoff/return cycles on one
-release-candidate lineage, accumulated through natural use or approved physical
-automation and analyzed by `scripts/analyze-handoff-stability.sh`. See
+See [testing](testing.md) and
 [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md).
 
-See [product definition](product.md), [roadmap](roadmap.md),
-[ADR-0013](adr/ADR-0013-product-scope-rebaseline.md),
-[ADR-0009](adr/ADR-0009-architecture-rebaseline.md), and the
-[CXI v2 design](../protocol/v2-design.md). The prior architecture audit remains
-recorded in [the 2026-08-13 research note](research/architecture-rebaseline-2026-08-13.md).
+## Explicit product non-goals
+
+Unless separately approved:
+
+- Android → macOS pointer or keyboard input;
+- Android as a macOS pointing device;
+- simultaneous control of multiple Android devices;
+- cloud relay/account/server infrastructure; and
+- root or Knox bypass.
+
+A broad **internal** redesign is not a non-goal. It is explicitly authorized by
+#101 when decomposed into reviewable work and constrained by the product/safety
+evidence above.
+
+## Historical architecture records
+
+Existing ADRs, research notes, and pre-Leap architecture snapshots remain
+historical evidence. Do not rewrite an old observation merely because the target
+architecture later changed. When an old decision no longer governs current
+implementation, mark or interpret it through its supersession/current-status
+record.
+
+See [roadmap](roadmap.md), [product definition](product.md), the [ADR index](adr/),
+and [CXI v2 design](../protocol/v2-design.md).
