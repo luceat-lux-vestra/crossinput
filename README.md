@@ -1,15 +1,17 @@
-# CrossInput
+# Ampersand
 
 **A DeX-first macOS-to-Android input bridge.**
 
-CrossInput captures pointer and keyboard input on macOS and hands control to a selected Android display when the pointer crosses a configured screen edge. Its primary use case is Samsung DeX: use a Galaxy device as a desktop target while keeping keyboard and pointer control on the Mac.
+Ampersand captures pointer and keyboard input on macOS and hands control to a selected Android display when the pointer crosses a configured screen edge. Its primary use case is Samsung DeX: use a Galaxy device as a desktop target while keeping keyboard and pointer control on the Mac.
 
-Push the pointer back to return to macOS. No root or phone-side app installation is required in the current runtime model; the helper is launched through ADB/app_process after wireless-debugging setup.
+Pointer and keyboard input are intentionally one-way: **macOS → Android**. Push the pointer back to return to macOS. No root or phone-side app installation is required in the current runtime model; the helper is launched through ADB/app_process after wireless-debugging setup.
+
+The user-facing product and macOS application are **Ampersand**. This repository keeps `crossinput` as its repository and technical namespace, while the wire protocol uses the **CXI** prefix.
 
 ```text
-┌─ macOS app (Swift) ───────────┐   ┌─ Android helper (Kotlin) ─┐
-│ pointer + keyboard capture    │   │ display discovery          │
-│ semantic input + edge handoff │   │ pointer/keyboard backends  │
+┌─ Ampersand for macOS (Swift) ─┐   ┌─ Android helper (Kotlin) ─┐
+│ pointer + keyboard capture     │   │ display discovery          │
+│ semantic input + edge handoff  │   │ pointer/keyboard backends  │
 └──────────────┬─────────────────┘   └──────────────┬─────────────┘
                │                                    │
                └──── CXI v1 over ADB/app_process ─►│
@@ -30,8 +32,6 @@ Push the pointer back to return to macOS. No root or phone-side app installation
 ## Current release
 
 `Ampersand-0.1.0.dmg` is the current ad-hoc-signed macOS release artifact. See the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases) and [CHANGELOG.md](CHANGELOG.md).
-
-`Ampersand` is the current application artifact name; the project and repository remain **CrossInput**.
 
 ## Installation
 
@@ -64,7 +64,7 @@ Primary device evidence currently includes Galaxy S10 5G (SM-G977N), Android 12.
 
 ## Scope
 
-CrossInput controls one Android device at a time. Multiple displays on that device are supported through target selection; simultaneous control of multiple Android devices is not currently planned.
+Ampersand controls one Android device at a time. Multiple displays on that device are supported through target selection; simultaneous control of multiple Android devices is not currently planned.
 
 Current non-goals include:
 
@@ -92,7 +92,7 @@ Clipboard is intentionally separate from pointer/keyboard control.
 - Backlog: bidirectional image clipboard synchronization (#90).
 - Backlog: file clipboard / file transfer (#91).
 
-Clipboard contents are never logged.
+Bidirectional clipboard/data sharing does not make pointer or keyboard control bidirectional. Clipboard contents are never logged.
 
 ## Development
 
@@ -125,6 +125,7 @@ Development environment:
 - [ADR-0007 — keyboard delivery](docs/adr/ADR-0007-keyboard-delivery.md)
 - [ADR-0008 — v0.1.0 packaging](docs/adr/ADR-0008-v0.1.0-release-packaging.md)
 - [ADR-0013 — product scope rebaseline](docs/adr/ADR-0013-product-scope-rebaseline.md)
+- [ADR-0014 — product brand and technical naming](docs/adr/ADR-0014-product-brand-and-technical-naming.md)
 
 ## Safety and privacy constraints
 
