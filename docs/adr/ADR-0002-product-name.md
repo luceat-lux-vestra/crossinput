@@ -1,11 +1,13 @@
 # ADR-0002: Product Name / Brand (Ampersand + CrossInput)
 
-> Status: **accepted**
+> Status: **superseded by ADR-0014**
 > Date: 2026-08-03
 
 ## Context
 
 The existing name "DeXCursor" (a) confines the product to DeX (Samsung-only), (b) does not express the essence (a cross-device input bridge), and (c) "InputBridge" conflicts with a commercial product. Since UHID input injection works on regular Android screens too, the name is made device/manufacturer-neutral.
+
+> Historical note: this ADR predates the DeX-first product-scope rebaseline in ADR-0013. Its reference to possible future phone→Mac keyboard/touch extensions is no longer part of the current product direction or naming rationale. See ADR-0014 for the current product-brand and technical-naming contract.
 
 ## Decision
 
@@ -28,8 +30,12 @@ The existing name "DeXCursor" (a) confines the product to DeX (Samsung-only), (b
 
 ## Consequences
 
-- Positive: device/manufacturer-neutral, covers extensions (phone→Mac keyboard/touch), provides a branding element (`&`).
+Historical consequences at the time of this decision:
+
+- Positive: device/manufacturer-neutral and provides a branding element (`&`).
 - Negative: the "DeX" keyword disappears from the name, slightly lowering search discoverability (compensated by mentioning DeX in docs/tagline).
+
+The earlier expectation that the name should cover future phone→Mac keyboard/touch extensions has been superseded by ADR-0013 and ADR-0014.
 
 ## Validation
 
