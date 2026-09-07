@@ -14,6 +14,7 @@ final class ControlHandoffController: @unchecked Sendable {
     var onStateChange: ((ControlState) -> Void)?
 
     private let sender: InputSender
+    private let cursorPresentationLifecycle: MacCursorReferenceLifecycle
     private var transitionGate = TransitionSequenceGate()
     private var currentSuppressionGeneration: UInt64 = 0
     /// Serializes the control enable gate with capture callbacks. A callback
@@ -27,10 +28,12 @@ final class ControlHandoffController: @unchecked Sendable {
 
     init(sender: InputSender,
          capture: InputCapture = InputCapture(),
-         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine()) {
+         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
+         cursorPresentationLifecycle: MacCursorReferenceLifecycle = MacCursorReferenceLifecycle()) {
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
+        self.cursorPresentationLifecycle = cursorPresentationLifecycle
 
         switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
@@ -135,6 +138,11 @@ final class ControlHandoffController: @unchecked Sendable {
             transitionGate.advance(to: switchMachine.latestSequence)
         }
 
+        // Reference cursor presentation is balanced before the normal capture
+        // release whenever the controller owns the transition. If capture has
+        // already failed safe (watchdog/external takeover), this is an
+        // idempotent local restore only.
+        cursorPresentationLifecycle.returnLocal()
         capture.release(reason: .captureStopped)
         sender.waitForDrain()
         sender.releaseRemotelyHeldButtonsAndWait()
@@ -312,6 +320,7 @@ final class ControlHandoffController: @unchecked Sendable {
         case .remoteActive:
             guard isEdgeSwitchEnabled else {
                 sender.cancelPendingPointerEvents()
+                cursorPresentationLifecycle.returnLocal()
                 capture.release(reason: .captureStopped)
                 return
             }
@@ -319,7 +328,18 @@ final class ControlHandoffController: @unchecked Sendable {
             // cleared here so the first confirmed delivery after re-entering
             // arms a fresh marker (issue #68).
             usableSessionLogged = false
+
+            // Deskflow/Synergy reference sequence: establish background cursor
+            // authority and hide/re-associate the host cursor before off-screen
+            // capture begins. CrossInput's suppression/P0 warp model remains
+            // unchanged after this presentation boundary.
+            cursorPresentationLifecycle.enterRemote()
             guard let generation = capture.suppress() else {
+                // The presentation transition happened before suppression
+                // admission. Balance it immediately before forcing the existing
+                // fail-safe return so a failed admission can never strand a
+                // hidden local cursor.
+                cursorPresentationLifecycle.returnLocal()
                 // The state-machine transition happened before cursor
                 // ownership could be admitted. Return through the existing
                 // control fail-safe so listening capture and logical state
@@ -346,6 +366,14 @@ final class ControlHandoffController: @unchecked Sendable {
             }
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
+
+            // Latest Deskflow establishes local/on-screen state before its
+            // show/associate presentation transition, and higher-level return
+            // then performs any cursor warp. EdgeSwitch has already committed
+            // returning->localActive before these callbacks are delivered, so
+            // restoring presentation here preserves that ordering while the
+            // existing InputCapture release remains the owner of geometry.
+            cursorPresentationLifecycle.returnLocal()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
             break
