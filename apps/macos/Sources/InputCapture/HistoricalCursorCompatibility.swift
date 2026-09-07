@@ -140,8 +140,8 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
     private let operations: Operations
     private var ownsRemoteCursor = false
     /// Every successful hide is recorded so current macOS reference-counting
-    /// can be unwound exactly on return. The historical code did not do this,
-    /// because its repeated hide was effectively a no-op on the tested Tahoe build.
+    /// can be unwound exactly on return. Failed show calls remain here and are
+    /// retried by a later local/restore boundary instead of being forgotten.
     private var successfulHideCalls: [CGDirectDisplayID] = []
 
     init(operations: Operations) {
@@ -153,7 +153,6 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
         defer { lock.unlock() }
         guard !ownsRemoteCursor else { return }
         ownsRemoteCursor = true
-        successfulHideCalls.removeAll(keepingCapacity: true)
 
         let backgroundResult = operations.setCursorInBackground(true)
         if let displayID = operations.liveDisplayID() {
@@ -164,7 +163,7 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
         Diagnostics.log(
             "issue96 historical-cursor enter background="
                 + "\(backgroundResult.map { String($0) } ?? "unavailable") "
-                + "hideCalls=\(successfulHideCalls.count)"
+                + "hideDebt=\(successfulHideCalls.count)"
         )
     }
 
@@ -194,26 +193,28 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
     func leaveRemote() {
         lock.lock()
         defer { lock.unlock() }
-        guard ownsRemoteCursor else { return }
+        guard ownsRemoteCursor || !successfulHideCalls.isEmpty else { return }
 
-        let backgroundResult = operations.setCursorInBackground(false)
-        let hideCalls = successfulHideCalls
-        successfulHideCalls.removeAll(keepingCapacity: true)
+        let wasRemote = ownsRemoteCursor
+        let backgroundResult = wasRemote ? operations.setCursorInBackground(false) : nil
         ownsRemoteCursor = false
 
         // Unwind in reverse order so every successful reference-counted hide
         // has exactly one matching show even when current and main are equal.
-        var showFailures = 0
-        for displayID in hideCalls.reversed() {
+        // Keep only failed show debt; the production restore path calls this
+        // again before warping, providing an immediate bounded retry.
+        var failedShows: [CGDirectDisplayID] = []
+        for displayID in successfulHideCalls.reversed() {
             if operations.showCursor(displayID) != .success {
-                showFailures += 1
+                failedShows.append(displayID)
             }
         }
+        successfulHideCalls = Array(failedShows.reversed())
 
         Diagnostics.log(
             "issue96 historical-cursor leave background="
-                + "\(backgroundResult.map { String($0) } ?? "unavailable") "
-                + "showCalls=\(hideCalls.count) showFailures=\(showFailures)"
+                + "\(backgroundResult.map { String($0) } ?? (wasRemote ? "unavailable" : "unchanged")) "
+                + "remainingShowDebt=\(successfulHideCalls.count)"
         )
     }
 
