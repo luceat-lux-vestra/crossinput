@@ -120,6 +120,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     }
 
     private let platformMutation: @Sendable (Kind, CGPoint) -> Void
+    private let ownershipBeganHook: (@Sendable (UInt64) -> Void)?
+    private let ownershipEndedHook: (@Sendable (UInt64) -> Void)?
     fileprivate let coordinationTimeout: TimeInterval
     fileprivate let beforeCommitHook: (@Sendable () -> Void)?
     fileprivate let requestEnqueuedHook: (@Sendable () -> Void)?
@@ -133,25 +135,51 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
 
-    /// Creates the production executor. `CGWarpMouseCursorPosition` is kept
-    /// inside this abstraction so the call has one auditable writer.
+    /// Creates the production executor. `CGWarpMouseCursorPosition` remains
+    /// single-writer-owned while the historical PR #16 cursor side effects are
+    /// attached to the same ownership/mutation boundary.
     internal static func production() -> CursorMutationExecutor {
-        CursorMutationExecutor { _, point in
-            CGWarpMouseCursorPosition(point)
-        }
+        let historicalCursor = HistoricalCursorCompatibility.shared
+        return CursorMutationExecutor(
+            ownershipBeganHook: { _ in
+                historicalCursor.enterRemote()
+            },
+            ownershipEndedHook: { _ in
+                historicalCursor.leaveRemote()
+            },
+            mutation: { kind, point in
+                // If endOwnership had to fail safe while a mutation was
+                // already admitted, restore must still leave the cursor local.
+                if kind == .restore {
+                    historicalCursor.leaveRemote()
+                }
+                CGWarpMouseCursorPosition(point)
+                switch kind {
+                case .hold:
+                    historicalCursor.didHoldWarp(at: point)
+                case .restore:
+                    historicalCursor.didRestoreWarp()
+                }
+            }
+        )
     }
 
     /// Test construction injects the platform mutation and can pause just
-    /// before the serialized ownership commit.
+    /// before the serialized ownership commit. Lifecycle hooks default to nil
+    /// so ordinary executor tests never touch real cursor visibility/private SPI.
     internal init(
         coordinationTimeout: TimeInterval = 0.25,
         beforeCommitHook: (@Sendable () -> Void)? = nil,
         requestEnqueuedHook: (@Sendable () -> Void)? = nil,
+        ownershipBeganHook: (@Sendable (UInt64) -> Void)? = nil,
+        ownershipEndedHook: (@Sendable (UInt64) -> Void)? = nil,
         mutation: @escaping @Sendable (Kind, CGPoint) -> Void
     ) {
         self.coordinationTimeout = coordinationTimeout
         self.beforeCommitHook = beforeCommitHook
         self.requestEnqueuedHook = requestEnqueuedHook
+        self.ownershipBeganHook = ownershipBeganHook
+        self.ownershipEndedHook = ownershipEndedHook
         self.platformMutation = mutation
     }
 
@@ -209,11 +237,16 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
             return (runLoop, source, queued)
         }
         queued.forEach { _ = $0.cancelIfPending() }
+        var endedGeneration: UInt64?
         if ownershipLock.lock(before: Date().addingTimeInterval(coordinationTimeout)) {
+            endedGeneration = activeGeneration
             activeGeneration = nil
             ownershipLock.unlock()
         } else {
             Diagnostics.log("cursor-mutation serialization timeout")
+        }
+        if let endedGeneration {
+            ownershipEndedHook?(endedGeneration)
         }
         if let runLoop, let source {
             CFRunLoopSourceInvalidate(source)
@@ -248,6 +281,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         activeGeneration = generation
         ownershipLock.unlock()
         pendingLock.unlock()
+        ownershipBeganHook?(generation)
         return true
     }
 
@@ -268,12 +302,25 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         guard ownershipLock.lock(
             before: Date().addingTimeInterval(coordinationTimeout)
         ) else {
+            // Cursor presentation must fail local even if the mutation owner
+            // is contended; marking the compatibility layer local prevents an
+            // in-flight hold from re-hiding after this point.
+            ownershipEndedHook?(generation)
             Diagnostics.log("cursor-mutation serialization timeout")
             return false
         }
-        defer { ownershipLock.unlock() }
-        guard activeGeneration == generation else { return true }
-        activeGeneration = nil
+
+        let ended: Bool
+        if activeGeneration == generation {
+            activeGeneration = nil
+            ended = true
+        } else {
+            ended = false
+        }
+        ownershipLock.unlock()
+        if ended {
+            ownershipEndedHook?(generation)
+        }
         return true
     }
 
