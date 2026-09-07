@@ -37,7 +37,11 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
                 setCursorInBackground: { spi.setCursorInBackground($0) },
                 hideCursor: { CGDisplayHideCursor($0) },
                 showCursor: { CGDisplayShowCursor($0) },
-                cursorIsVisible: { CGCursorIsVisible() != 0 },
+                // CGCursorIsVisible is present in the runtime but marked
+                // unavailable in the modern SDK. Resolve it dynamically just
+                // like the historical CGS symbols; if it disappears entirely,
+                // fail safe by skipping opportunistic per-warp re-hide.
+                cursorIsVisible: { spi.cursorIsVisible() ?? false },
                 associateCursor: { spi.associateCursor() }
             )
         }
@@ -64,13 +68,32 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
             UInt32, UInt32, CFString, CFTypeRef
         ) -> Int32
         private typealias AssociateFn = @convention(c) (Int32) -> Void
+        private typealias CursorIsVisibleFn = @convention(c) () -> Int32
 
         private let handle: UnsafeMutableRawPointer?
+        private let cursorVisibilityHandle: UnsafeMutableRawPointer?
         private let mainConnectionID: MainConnectionIDFn?
         private let setConnectionProperty: SetConnectionPropertyFn?
         private let associate: AssociateFn?
+        private let cursorVisibility: CursorIsVisibleFn?
 
         init() {
+            // CGCursorIsVisible still exists in CoreGraphics on the tested
+            // runtime, but the macOS 26 SDK marks it unavailable at compile
+            // time. Keep this handle separate so symbol availability is a
+            // runtime capability rather than a compile-time dependency.
+            let visibilityHandle = dlopen(
+                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                RTLD_LAZY | RTLD_LOCAL
+            )
+            cursorVisibilityHandle = visibilityHandle
+            if let visibilityHandle,
+               let symbol = dlsym(visibilityHandle, "CGCursorIsVisible") {
+                cursorVisibility = unsafeBitCast(symbol, to: CursorIsVisibleFn.self)
+            } else {
+                cursorVisibility = nil
+            }
+
             var loaded = dlopen(
                 "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
                 RTLD_LAZY | RTLD_LOCAL
@@ -87,6 +110,10 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
                 mainConnectionID = nil
                 setConnectionProperty = nil
                 associate = nil
+                Diagnostics.log(
+                    "issue96 historical-cursor symbols conn=false setProp=false associate=false "
+                        + "cursorVisible=\(cursorVisibility != nil)"
+                )
                 return
             }
 
@@ -110,12 +137,14 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
 
             Diagnostics.log(
                 "issue96 historical-cursor symbols conn=\(mainConnectionID != nil) "
-                    + "setProp=\(setConnectionProperty != nil) associate=\(associate != nil)"
+                    + "setProp=\(setConnectionProperty != nil) associate=\(associate != nil) "
+                    + "cursorVisible=\(cursorVisibility != nil)"
             )
         }
 
         deinit {
             if let handle { dlclose(handle) }
+            if let cursorVisibilityHandle { dlclose(cursorVisibilityHandle) }
         }
 
         func setCursorInBackground(_ enabled: Bool) -> Int32? {
@@ -127,6 +156,10 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
                 "SetsCursorInBackground" as CFString,
                 enabled ? kCFBooleanTrue : kCFBooleanFalse
             )
+        }
+
+        func cursorIsVisible() -> Bool? {
+            cursorVisibility.map { $0() != 0 }
         }
 
         func associateCursor() {
