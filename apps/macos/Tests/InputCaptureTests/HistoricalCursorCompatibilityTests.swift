@@ -83,15 +83,18 @@ final class HistoricalCursorCompatibilityTests: XCTestCase {
         compatibility.didHoldWarp(at: .zero)
         XCTAssertEqual(compatibility.successfulHideCountForTesting, 3)
 
-        compatibility.didRestoreWarp()
+        // Historical return ordering: show/background false first, then the
+        // restore warp, then association. InputCapture posts its existing
+        // synthetic HID mouseMoved after the executor returns.
         compatibility.leaveRemote()
+        compatibility.didRestoreWarp()
 
         XCTAssertEqual(
             recorder.events,
             [
-                "background:true", "hide:7", "hide:1",
-                "hide:7", "associate",
-                "background:false", "show:7", "show:1", "show:7"
+                "background:true", "hide:7", "hide:1", "hide:7",
+                "background:false", "show:7", "show:1", "show:7",
+                "associate"
             ]
         )
         XCTAssertFalse(compatibility.ownsRemoteCursorForTesting)
