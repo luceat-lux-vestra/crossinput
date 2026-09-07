@@ -169,7 +169,7 @@ final class MacCursorReferenceLifecycle: @unchecked Sendable {
         }
         Diagnostics.log(
             "issue96 cursor-reference-lifecycle op=show display=\(displayID) "
-                + "background=\(backgroundResult.map(String.init) ?? "unavailable") "
+                + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
                 + "cursor=\(showResult.rawValue) associate=\(associateResult.rawValue)"
         )
     }
