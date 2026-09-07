@@ -3,6 +3,35 @@ import InputCapture
 import EdgeSwitch
 import Diagnostics
 import Delivery
+import Darwin
+
+private enum MacCursorBackgroundSPI {
+    private typealias CGSDefaultConnectionFn = @convention(c) () -> Int32
+    private typealias CGSSetConnectionPropertyFn = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
+
+    static func enable() {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY) else {
+            Diagnostics.log("cursor background SPI unavailable: SkyLight dlopen failed")
+            return
+        }
+        guard let defaultConnectionSymbol = dlsym(handle, "_CGSDefaultConnection"),
+              let setPropertySymbol = dlsym(handle, "CGSSetConnectionProperty") else {
+            Diagnostics.log("cursor background SPI unavailable: symbol resolution failed")
+            return
+        }
+
+        let defaultConnection = unsafeBitCast(defaultConnectionSymbol, to: CGSDefaultConnectionFn.self)
+        let setConnectionProperty = unsafeBitCast(setPropertySymbol, to: CGSSetConnectionPropertyFn.self)
+        let connection = defaultConnection()
+        let result = setConnectionProperty(
+            connection,
+            connection,
+            "SetsCursorInBackground" as CFString,
+            kCFBooleanTrue
+        )
+        Diagnostics.log("cursor background SPI enabled result=\(result)")
+    }
+}
 
 /// Thin composition boundary between capture and the control-handoff machine.
 /// It owns pointer safety and movement accounting, but has no session or ADB
@@ -28,6 +57,7 @@ final class ControlHandoffController: @unchecked Sendable {
     init(sender: InputSender,
          capture: InputCapture = InputCapture(),
          switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine()) {
+        MacCursorBackgroundSPI.enable()
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
