@@ -7,6 +7,61 @@ import EdgeSwitch
 import AppSettings
 import Diagnostics
 import Delivery
+import Darwin
+
+/// Issue #96 diagnostic candidate: mirror the long-lived Deskflow/Synergy
+/// connection property that allows cursor updates while the app is backgrounded.
+///
+/// This is intentionally process-scoped and one-way for the lifetime of the app:
+/// reference implementations set `SetsCursorInBackground` to true from both
+/// cursor show/hide paths rather than toggling it as a visibility flag. Failure
+/// to resolve or apply the private SPI is best-effort and must never block input.
+private enum MacCursorBackgroundCompatibility {
+    private typealias ConnectionFn = @convention(c) () -> Int32
+    private typealias SetConnectionPropertyFn = @convention(c) (
+        Int32, Int32, CFString, CFTypeRef
+    ) -> Int32
+
+    static func enable() {
+        guard let handle = dlopen(
+            "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+            RTLD_LAZY | RTLD_LOCAL
+        ) else {
+            Diagnostics.log("issue96 cursor-background-spi result=unavailable reason=dlopen")
+            return
+        }
+
+        let connection: ConnectionFn
+        let connectionSymbol: String
+        if let symbol = dlsym(handle, "_CGSDefaultConnection") {
+            connection = unsafeBitCast(symbol, to: ConnectionFn.self)
+            connectionSymbol = "_CGSDefaultConnection"
+        } else if let symbol = dlsym(handle, "CGSMainConnectionID") {
+            // Compatibility fallback for the symbol used by CrossInput PR #16.
+            connection = unsafeBitCast(symbol, to: ConnectionFn.self)
+            connectionSymbol = "CGSMainConnectionID"
+        } else {
+            Diagnostics.log("issue96 cursor-background-spi result=unavailable reason=connection-symbol")
+            return
+        }
+
+        guard let setterSymbol = dlsym(handle, "CGSSetConnectionProperty") else {
+            Diagnostics.log("issue96 cursor-background-spi result=unavailable reason=setter-symbol")
+            return
+        }
+        let setter = unsafeBitCast(setterSymbol, to: SetConnectionPropertyFn.self)
+        let cid = connection()
+        let result = setter(
+            cid,
+            cid,
+            "SetsCursorInBackground" as CFString,
+            kCFBooleanTrue
+        )
+        Diagnostics.log(
+            "issue96 cursor-background-spi result=\(result) connection=\(connectionSymbol) cid=\(cid)"
+        )
+    }
+}
 
 @main
 struct Ampersand: App {
@@ -14,6 +69,7 @@ struct Ampersand: App {
 
     init() {
         NSApplication.shared.setActivationPolicy(.accessory)
+        MacCursorBackgroundCompatibility.enable()
     }
 
     var body: some Scene {
