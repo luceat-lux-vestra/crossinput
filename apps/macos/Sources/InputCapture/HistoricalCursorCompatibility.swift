@@ -1,64 +1,29 @@
-import CoreGraphics
 import Darwin
 import Foundation
 import Diagnostics
 
-/// Issue #96 historical CrossInput cursor semantics, reconstructed from
-/// `17e130b5f041dcb62a5ad447ac08f5515903c579`.
+/// Issue #96 compatibility probe reconstructed from CrossInput PR #16 while
+/// preserving the explicit cursor-visibility removal made by #87.
 ///
-/// The historical implementation combined four behaviors:
+/// Historical behaviors retained here are limited to state side effects that
+/// do not hide or show the macOS cursor:
 /// - `CGSMainConnectionID` + `SetsCursorInBackground(true/false)` around remote ownership;
-/// - display cursor hide/show on both the current display and main display;
-/// - a best-effort re-hide after a hold warp;
 /// - `CGAssociateMouseAndMouseCursorPosition(1)` immediately after a restore warp.
 ///
-/// The old code called `CGDisplayHideCursor` on every suppressed mouse move.
-/// On current macOS that API is observably reference-counted, so blindly
-/// repeating it can strand the cursor hidden. This compatibility layer keeps
-/// the historical re-hide intent but records every successful hide and balances
-/// it with an exact show on return. No AppKit/private cursor recovery is added.
+/// Invariant: this type must never call `CGDisplayHideCursor`,
+/// `CGDisplayShowCursor`, or otherwise manage cursor visibility. macOS owns
+/// native cursor presentation, matching commit 406e6bdd / issue #87.
 internal final class HistoricalCursorCompatibility: @unchecked Sendable {
     internal struct Operations: @unchecked Sendable {
-        var liveDisplayID: @Sendable () -> CGDirectDisplayID?
-        var displayIDAtPoint: @Sendable (CGPoint) -> CGDirectDisplayID?
-        var mainDisplayID: @Sendable () -> CGDirectDisplayID
         var setCursorInBackground: @Sendable (Bool) -> Int32?
-        var hideCursor: @Sendable (CGDirectDisplayID) -> CGError
-        var showCursor: @Sendable (CGDirectDisplayID) -> CGError
-        var cursorIsVisible: @Sendable () -> Bool
         var associateCursor: @Sendable () -> Void
 
         static func production() -> Operations {
             let spi = HistoricalPrivateCursorSPI()
             return Operations(
-                liveDisplayID: Self.resolveLiveDisplayID,
-                displayIDAtPoint: Self.resolveDisplayID(at:),
-                mainDisplayID: { CGMainDisplayID() },
                 setCursorInBackground: { spi.setCursorInBackground($0) },
-                hideCursor: { CGDisplayHideCursor($0) },
-                showCursor: { CGDisplayShowCursor($0) },
-                // CGCursorIsVisible is present in the runtime but marked
-                // unavailable in the modern SDK. Resolve it dynamically just
-                // like the historical CGS symbols; if it disappears entirely,
-                // fail safe by skipping opportunistic per-warp re-hide.
-                cursorIsVisible: { spi.cursorIsVisible() ?? false },
                 associateCursor: { spi.associateCursor() }
             )
-        }
-
-        private static func resolveLiveDisplayID() -> CGDirectDisplayID? {
-            guard let event = CGEvent(source: nil) else { return nil }
-            return resolveDisplayID(at: event.location)
-        }
-
-        private static func resolveDisplayID(at point: CGPoint) -> CGDirectDisplayID? {
-            var displayID = CGDirectDisplayID()
-            var count: UInt32 = 0
-            guard CGGetDisplaysWithPoint(point, 1, &displayID, &count) == .success,
-                  count == 1 else {
-                return nil
-            }
-            return displayID
         }
     }
 
@@ -68,83 +33,64 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
             UInt32, UInt32, CFString, CFTypeRef
         ) -> Int32
         private typealias AssociateFn = @convention(c) (Int32) -> Void
-        private typealias CursorIsVisibleFn = @convention(c) () -> Int32
 
-        private let handle: UnsafeMutableRawPointer?
-        private let cursorVisibilityHandle: UnsafeMutableRawPointer?
+        private let skyLightHandle: UnsafeMutableRawPointer?
+        private let coreGraphicsHandle: UnsafeMutableRawPointer?
         private let mainConnectionID: MainConnectionIDFn?
         private let setConnectionProperty: SetConnectionPropertyFn?
         private let associate: AssociateFn?
-        private let cursorVisibility: CursorIsVisibleFn?
 
         init() {
-            // CGCursorIsVisible still exists in CoreGraphics on the tested
-            // runtime, but the macOS 26 SDK marks it unavailable at compile
-            // time. Keep this handle separate so symbol availability is a
-            // runtime capability rather than a compile-time dependency.
-            let visibilityHandle = dlopen(
-                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
-                RTLD_LAZY | RTLD_LOCAL
-            )
-            cursorVisibilityHandle = visibilityHandle
-            if let visibilityHandle,
-               let symbol = dlsym(visibilityHandle, "CGCursorIsVisible") {
-                cursorVisibility = unsafeBitCast(symbol, to: CursorIsVisibleFn.self)
-            } else {
-                cursorVisibility = nil
-            }
-
-            var loaded = dlopen(
+            var skyLight = dlopen(
                 "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
                 RTLD_LAZY | RTLD_LOCAL
             )
-            if loaded == nil {
-                loaded = dlopen(
+            if skyLight == nil {
+                skyLight = dlopen(
                     "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
                     RTLD_LAZY | RTLD_LOCAL
                 )
             }
-            handle = loaded
+            skyLightHandle = skyLight
 
-            guard let loaded else {
-                mainConnectionID = nil
-                setConnectionProperty = nil
-                associate = nil
-                Diagnostics.log(
-                    "issue96 historical-cursor symbols conn=false setProp=false associate=false "
-                        + "cursorVisible=\(cursorVisibility != nil)"
-                )
-                return
-            }
-
-            if let symbol = dlsym(loaded, "CGSMainConnectionID") {
+            if let skyLight,
+               let symbol = dlsym(skyLight, "CGSMainConnectionID") {
                 mainConnectionID = unsafeBitCast(symbol, to: MainConnectionIDFn.self)
             } else {
                 mainConnectionID = nil
             }
 
-            if let symbol = dlsym(loaded, "CGSSetConnectionProperty") {
+            if let skyLight,
+               let symbol = dlsym(skyLight, "CGSSetConnectionProperty") {
                 setConnectionProperty = unsafeBitCast(symbol, to: SetConnectionPropertyFn.self)
             } else {
                 setConnectionProperty = nil
             }
 
-            if let symbol = dlsym(loaded, "CGAssociateMouseAndMouseCursorPosition") {
+            let coreGraphics = dlopen(
+                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                RTLD_LAZY | RTLD_LOCAL
+            )
+            coreGraphicsHandle = coreGraphics
+            if let coreGraphics,
+               let symbol = dlsym(coreGraphics, "CGAssociateMouseAndMouseCursorPosition") {
+                associate = unsafeBitCast(symbol, to: AssociateFn.self)
+            } else if let skyLight,
+                      let symbol = dlsym(skyLight, "CGAssociateMouseAndMouseCursorPosition") {
                 associate = unsafeBitCast(symbol, to: AssociateFn.self)
             } else {
                 associate = nil
             }
 
             Diagnostics.log(
-                "issue96 historical-cursor symbols conn=\(mainConnectionID != nil) "
-                    + "setProp=\(setConnectionProperty != nil) associate=\(associate != nil) "
-                    + "cursorVisible=\(cursorVisibility != nil)"
+                "issue96 historical-state symbols conn=\(mainConnectionID != nil) "
+                    + "setProp=\(setConnectionProperty != nil) associate=\(associate != nil)"
             )
         }
 
         deinit {
-            if let handle { dlclose(handle) }
-            if let cursorVisibilityHandle { dlclose(cursorVisibilityHandle) }
+            if let coreGraphicsHandle { dlclose(coreGraphicsHandle) }
+            if let skyLightHandle { dlclose(skyLightHandle) }
         }
 
         func setCursorInBackground(_ enabled: Bool) -> Int32? {
@@ -158,10 +104,6 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
             )
         }
 
-        func cursorIsVisible() -> Bool? {
-            cursorVisibility.map { $0() != 0 }
-        }
-
         func associateCursor() {
             associate?(1)
         }
@@ -171,11 +113,7 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
 
     private let lock = NSLock()
     private let operations: Operations
-    private var ownsRemoteCursor = false
-    /// Every successful hide is recorded so current macOS reference-counting
-    /// can be unwound exactly on return. Failed show calls remain here and are
-    /// retried by a later local/restore boundary instead of being forgotten.
-    private var successfulHideCalls: [CGDirectDisplayID] = []
+    private var ownsRemoteCursorState = false
 
     init(operations: Operations) {
         self.operations = operations
@@ -184,84 +122,38 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
     func enterRemote() {
         lock.lock()
         defer { lock.unlock() }
-        guard !ownsRemoteCursor else { return }
-        ownsRemoteCursor = true
-
-        let backgroundResult = operations.setCursorInBackground(true)
-        if let displayID = operations.liveDisplayID() {
-            hideAndRecord(displayID)
-        }
-        hideAndRecord(operations.mainDisplayID())
-
+        guard !ownsRemoteCursorState else { return }
+        ownsRemoteCursorState = true
+        let result = operations.setCursorInBackground(true)
         Diagnostics.log(
-            "issue96 historical-cursor enter background="
-                + "\(backgroundResult.map { String($0) } ?? "unavailable") "
-                + "hideDebt=\(successfulHideCalls.count)"
+            "issue96 historical-state enter background="
+                + "\(result.map { String($0) } ?? \"unavailable\")"
         )
-    }
-
-    /// Historical PR #16 re-issued hide after every hold warp because macOS
-    /// could make the cursor visible again. Avoid increasing the hide count
-    /// while the cursor is already hidden; if it is visible, preserve that
-    /// historical re-hide behavior and record the resulting debt.
-    func didHoldWarp(at point: CGPoint) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard ownsRemoteCursor, operations.cursorIsVisible(),
-              let displayID = operations.displayIDAtPoint(point) else {
-            return
-        }
-        hideAndRecord(displayID)
-    }
-
-    /// Called after a restore warp and before InputCapture posts its existing
-    /// synthetic HID mouseMoved event, matching PR #16 ordering.
-    func didRestoreWarp() {
-        lock.withLock {
-            operations.associateCursor()
-            Diagnostics.log("issue96 historical-cursor associate-after-restore")
-        }
     }
 
     func leaveRemote() {
         lock.lock()
         defer { lock.unlock() }
-        guard ownsRemoteCursor || !successfulHideCalls.isEmpty else { return }
-
-        let wasRemote = ownsRemoteCursor
-        let backgroundResult = wasRemote ? operations.setCursorInBackground(false) : nil
-        ownsRemoteCursor = false
-
-        // Unwind in reverse order so every successful reference-counted hide
-        // has exactly one matching show even when current and main are equal.
-        // Keep only failed show debt; the production restore path calls this
-        // again before warping, providing an immediate bounded retry.
-        var failedShows: [CGDirectDisplayID] = []
-        for displayID in successfulHideCalls.reversed() {
-            if operations.showCursor(displayID) != .success {
-                failedShows.append(displayID)
-            }
-        }
-        successfulHideCalls = Array(failedShows.reversed())
-
+        guard ownsRemoteCursorState else { return }
+        ownsRemoteCursorState = false
+        let result = operations.setCursorInBackground(false)
         Diagnostics.log(
-            "issue96 historical-cursor leave background="
-                + "\(backgroundResult.map { String($0) } ?? (wasRemote ? "unavailable" : "unchanged")) "
-                + "remainingShowDebt=\(successfulHideCalls.count)"
+            "issue96 historical-state leave background="
+                + "\(result.map { String($0) } ?? \"unavailable\")"
         )
     }
 
-    private func hideAndRecord(_ displayID: CGDirectDisplayID) {
-        if operations.hideCursor(displayID) == .success {
-            successfulHideCalls.append(displayID)
+    /// Called after a restore warp and before InputCapture posts its existing
+    /// synthetic HID mouseMoved event, matching PR #16 ordering without any
+    /// cursor hide/show side effect.
+    func didRestoreWarp() {
+        lock.withLock {
+            operations.associateCursor()
+            Diagnostics.log("issue96 historical-state associate-after-restore")
         }
     }
 
-    var successfulHideCountForTesting: Int {
-        lock.withLock { successfulHideCalls.count }
-    }
-
-    var ownsRemoteCursorForTesting: Bool {
-        lock.withLock { ownsRemoteCursor }
+    var ownsRemoteCursorStateForTesting: Bool {
+        lock.withLock { ownsRemoteCursorState }
     }
 }
