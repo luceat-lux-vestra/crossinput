@@ -1,3 +1,4 @@
+import CoreGraphics
 import Darwin
 import Foundation
 import Diagnostics
@@ -142,6 +143,11 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
                 + "\(result.map { String($0) } ?? \"unavailable\")"
         )
     }
+
+    /// PR #16 re-hid the cursor after every hold warp. Issue #87 explicitly
+    /// removed that visibility management, so the hook remains intentionally
+    /// empty while the executor contract stays unchanged for this probe.
+    func didHoldWarp(at _: CGPoint) {}
 
     /// Called after a restore warp and before InputCapture posts its existing
     /// synthetic HID mouseMoved event, matching PR #16 ordering without any
