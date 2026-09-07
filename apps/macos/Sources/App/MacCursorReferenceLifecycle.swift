@@ -29,7 +29,7 @@ final class MacCursorReferenceLifecycle: @unchecked Sendable {
                 setCursorInBackground: { spi.setCursorInBackground() },
                 hideCursor: { CGDisplayHideCursor($0) },
                 showCursor: { CGDisplayShowCursor($0) },
-                associateCursor: { CGAssociateMouseAndMouseCursorPosition(true) }
+                associateCursor: { CGAssociateMouseAndMouseCursorPosition(1) }
             )
         }
 
