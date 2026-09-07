@@ -6,6 +6,7 @@ private final class HistoricalCursorRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var eventsStorage: [String] = []
     private var visibleStorage = false
+    private var showFailureBudgetStorage: [CGDirectDisplayID: Int] = [:]
     var liveDisplay: CGDirectDisplayID? = 7
     var pointDisplay: CGDirectDisplayID? = 7
     var mainDisplay: CGDirectDisplayID = 1
@@ -21,6 +22,19 @@ private final class HistoricalCursorRecorder: @unchecked Sendable {
     var visible: Bool {
         get { lock.withLock { visibleStorage } }
         set { lock.withLock { visibleStorage = newValue } }
+    }
+
+    func failNextShows(displayID: CGDirectDisplayID, count: Int) {
+        lock.withLock { showFailureBudgetStorage[displayID] = count }
+    }
+
+    func showResult(for displayID: CGDirectDisplayID) -> CGError {
+        lock.withLock {
+            let remaining = showFailureBudgetStorage[displayID] ?? 0
+            guard remaining > 0 else { return .success }
+            showFailureBudgetStorage[displayID] = remaining - 1
+            return .failure
+        }
     }
 }
 
@@ -42,7 +56,7 @@ final class HistoricalCursorCompatibilityTests: XCTestCase {
             },
             showCursor: { displayID in
                 recorder.record("show:\(displayID)")
-                return .success
+                return recorder.showResult(for: displayID)
             },
             cursorIsVisible: { recorder.visible },
             associateCursor: {
@@ -125,5 +139,29 @@ final class HistoricalCursorCompatibilityTests: XCTestCase {
             recorder.events,
             ["background:true", "hide:7", "hide:1", "background:false", "show:1"]
         )
+        XCTAssertEqual(compatibility.successfulHideCountForTesting, 0)
+    }
+
+    func testFailedShowDebtIsRetainedAndRetriedWithoutRetogglingBackground() {
+        let recorder = HistoricalCursorRecorder()
+        recorder.failNextShows(displayID: 1, count: 1)
+        let compatibility = makeCompatibility(recorder: recorder)
+
+        compatibility.enterRemote()
+        compatibility.leaveRemote()
+        XCTAssertFalse(compatibility.ownsRemoteCursorForTesting)
+        XCTAssertEqual(compatibility.successfulHideCountForTesting, 1)
+
+        compatibility.leaveRemote()
+
+        XCTAssertEqual(
+            recorder.events,
+            [
+                "background:true", "hide:7", "hide:1",
+                "background:false", "show:1", "show:7",
+                "show:1"
+            ]
+        )
+        XCTAssertEqual(compatibility.successfulHideCountForTesting, 0)
     }
 }
