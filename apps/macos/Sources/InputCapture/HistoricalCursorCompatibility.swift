@@ -37,7 +37,7 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
                 setCursorInBackground: { spi.setCursorInBackground($0) },
                 hideCursor: { CGDisplayHideCursor($0) },
                 showCursor: { CGDisplayShowCursor($0) },
-                cursorIsVisible: { CGCursorIsVisible() },
+                cursorIsVisible: { CGCursorIsVisible() != 0 },
                 associateCursor: { spi.associateCursor() }
             )
         }
