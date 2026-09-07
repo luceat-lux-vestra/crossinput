@@ -126,10 +126,8 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
         guard !ownsRemoteCursorState else { return }
         ownsRemoteCursorState = true
         let result = operations.setCursorInBackground(true)
-        Diagnostics.log(
-            "issue96 historical-state enter background="
-                + "\(result.map { String($0) } ?? \"unavailable\")"
-        )
+        let resultText = result.map(String.init) ?? "unavailable"
+        Diagnostics.log("issue96 historical-state enter background=\(resultText)")
     }
 
     func leaveRemote() {
@@ -138,10 +136,8 @@ internal final class HistoricalCursorCompatibility: @unchecked Sendable {
         guard ownsRemoteCursorState else { return }
         ownsRemoteCursorState = false
         let result = operations.setCursorInBackground(false)
-        Diagnostics.log(
-            "issue96 historical-state leave background="
-                + "\(result.map { String($0) } ?? \"unavailable\")"
-        )
+        let resultText = result.map(String.init) ?? "unavailable"
+        Diagnostics.log("issue96 historical-state leave background=\(resultText)")
     }
 
     /// PR #16 re-hid the cursor after every hold warp. Issue #87 explicitly
