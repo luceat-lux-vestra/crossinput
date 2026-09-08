@@ -8,6 +8,12 @@ import Diagnostics
 /// The event tap's CFRunLoop is the designated writer. Requests from other
 /// threads are queued onto that run loop and waited on for a bounded interval;
 /// they never execute the platform mutation on the caller thread.
+///
+/// Issue #96 ownership rule: a suppression generation may physically park the
+/// macOS pointer at most once. Later `.hold` requests are logical no-ops, so
+/// steady remote movement is consumed/forwarded without repeated Quartz warps.
+/// Restore remains the existing InputCapture-owned return behavior; this class
+/// does not reinterpret its coordinate or synthetic-move contract.
 internal final class CursorMutationExecutor: @unchecked Sendable {
     internal enum Kind: String, Sendable {
         case hold
@@ -17,28 +23,28 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private final class Request: @unchecked Sendable {
         let kind: Kind
         let generation: UInt64
+        let point: CGPoint
         let precondition: @Sendable () -> Bool
-        let mutation: @Sendable () -> Void
 
         private let stateLock = NSLock()
         private let completion = DispatchSemaphore(value: 0)
         private var cancelled = false
         /// Set only after ownership has been acquired and the request has
         /// passed the final cancellation/current-generation check. Once set,
-        /// the platform mutation is irrevocably admitted.
+        /// the executor-side decision is irrevocably admitted.
         private var admitted = false
         private var result: Bool?
 
         init(
             kind: Kind,
             generation: UInt64,
-            precondition: @escaping @Sendable () -> Bool,
-            mutation: @escaping @Sendable () -> Void
+            point: CGPoint,
+            precondition: @escaping @Sendable () -> Bool
         ) {
             self.kind = kind
             self.generation = generation
+            self.point = point
             self.precondition = precondition
-            self.mutation = mutation
         }
 
         func run(on executor: CursorMutationExecutor) {
@@ -76,9 +82,9 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         /// Waits for ownership without holding the request state lock, so a
         /// timed-out caller can cancel a dequeued request. Once ownership is
         /// held, the final state check and admission mark are atomic relative
-        /// to cancellation. The executor's lock remains held while the
-        /// platform mutation runs, so ownership invalidation cannot be
-        /// observed as complete before an admitted mutation is finished.
+        /// to cancellation. The executor's ownership lock remains held while
+        /// the platform mutation decision runs, so ownership invalidation
+        /// cannot complete before an admitted physical mutation is finished.
         func beginCommit(using executor: CursorMutationExecutor) -> Bool {
             guard stateLock.withLock({ result == nil && !cancelled && !self.admitted }) else {
                 return false
@@ -106,7 +112,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
                 }
                 return false
             }
-            mutation()
+            executor.execute(self)
             return true
         }
 
@@ -132,6 +138,10 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var source: CFRunLoopSource?
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
+    /// Guarded by ownershipLock. Reset on every admitted ownership generation.
+    /// Once true, later `.hold` requests in the same generation are accepted
+    /// as logical no-ops and never reach the platform mutation.
+    private var activeGenerationHasParked = false
 
     /// Creates the production executor. `CGWarpMouseCursorPosition` is kept
     /// inside this abstraction so the call has one auditable writer.
@@ -211,6 +221,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         queued.forEach { _ = $0.cancelIfPending() }
         if ownershipLock.lock(before: Date().addingTimeInterval(coordinationTimeout)) {
             activeGeneration = nil
+            latestGeneration = nil
+            activeGenerationHasParked = false
             ownershipLock.unlock()
         } else {
             Diagnostics.log("cursor-mutation serialization timeout")
@@ -246,6 +258,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         }
         latestGeneration = generation
         activeGeneration = generation
+        activeGenerationHasParked = false
         ownershipLock.unlock()
         pendingLock.unlock()
         return true
@@ -274,6 +287,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         defer { ownershipLock.unlock() }
         guard activeGeneration == generation else { return true }
         activeGeneration = nil
+        activeGenerationHasParked = false
         return true
     }
 
@@ -287,10 +301,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         let request = Request(
             kind: kind,
             generation: generation,
-            precondition: precondition,
-            mutation: { [platformMutation] in
-                platformMutation(kind, point)
-            }
+            point: point,
+            precondition: precondition
         )
         let isOwner = pendingLock.withLock {
             ownerThreadID == Self.currentThreadID()
@@ -350,6 +362,24 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
 
     private func commit(_ request: Request) -> Bool {
         request.beginCommit(using: self)
+    }
+
+    /// Called only while ownershipLock is held and only after the request has
+    /// passed the current-generation gate.
+    private func execute(_ request: Request) {
+        switch request.kind {
+        case .hold:
+            // First suppressed movement parks once. Every later movement event
+            // is still consumed and forwarded by InputCapture, but no further
+            // Quartz warp is allowed in this ownership generation (#96).
+            guard !activeGenerationHasParked else { return }
+            activeGenerationHasParked = true
+            platformMutation(.hold, request.point)
+        case .restore:
+            // Preserve P0 return semantics exactly. InputCapture owns the
+            // restore coordinate and its existing synthetic-move follow-up.
+            platformMutation(.restore, request.point)
+        }
     }
 
     private func isCurrent(kind: Kind, generation: UInt64) -> Bool {
