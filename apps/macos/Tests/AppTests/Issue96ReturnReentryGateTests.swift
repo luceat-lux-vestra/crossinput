@@ -31,7 +31,18 @@ private final class Issue96LiveSession: SessionConnection, @unchecked Sendable {
     func request(_ type: MessageType,
                  payload: Data,
                  timeout: TimeInterval?) async throws -> CxiFrame {
-        throw Issue96TestError.unexpectedRequest
+        guard type == .pointerMoveRel else {
+            throw Issue96TestError.unexpectedRequest
+        }
+        return CxiFrame(
+            type: .pointerResult,
+            requestId: 1,
+            payload: Messages.pointerResult(
+                status: .delivered,
+                deliveredDx: 0,
+                deliveredDy: 0
+            )
+        )
     }
 
     func send(_ frame: CxiFrame) throws {}
@@ -103,19 +114,15 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         return predicate()
     }
 
-    func testReturnTransitionBlocksImmediateEdgeReacquireUntilCooldownExpires() async {
-        let clock = Issue96Clock()
+    private func makeController(
+        clock: Issue96Clock
+    ) -> (ControlHandoffController, InputSender, InputCapture, EdgeSwitchStateMachine, Issue96CursorOwner) {
         let executor = CursorMutationExecutor(mutation: { _, _ in })
         let cursorOwner = Issue96CursorOwner(executor: executor)
         let capture = InputCapture(
             pointerRestoreOverride: {},
             cursorMutationExecutor: executor
         )
-        defer {
-            capture.stop()
-            cursorOwner.stop()
-        }
-
         let reference = SessionReference()
         reference.set(Issue96LiveSession())
         let sender = InputSender(session: reference)
@@ -126,23 +133,36 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
             switchMachine: machine,
             monotonicNow: { clock.now }
         )
+        return (controller, sender, capture, machine, cursorOwner)
+    }
 
+    private func enterRemote(
+        capture: InputCapture,
+        machine: EdgeSwitchStateMachine
+    ) async {
         machine.activate()
         machine.flushCallbacks()
         await Task.yield()
         XCTAssertEqual(machine.state, .localActive)
 
-        // Establish one real remote ownership epoch through the same capture
-        // edge callback the production event tap uses.
         capture.onScreenEdge?(.left)
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .remoteActive)
         XCTAssertTrue(await eventually { capture.isSuppressed })
+    }
 
-        // Returning transitions are emitted synchronously by the state machine,
-        // while controller application and capture release are queued. The
-        // ownership gate must be armed at transition emission, before either a
-        // synthetic return move or a fast physical move can reacquire the edge.
+    func testEmergencyReturnBlocksImmediateEdgeReacquireUntilCooldownExpires() async {
+        let clock = Issue96Clock()
+        let (controller, _, capture, machine, cursorOwner) = makeController(clock: clock)
+        defer {
+            capture.stop()
+            cursorOwner.stop()
+        }
+
+        await enterRemote(capture: capture, machine: machine)
+
+        // The controller arms before forceReturn, and apply(state:) arms again
+        // before capture.release() as a last-resort ordering invariant.
         controller.emergencyReturn()
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .localActive)
@@ -163,6 +183,48 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .remoteActive,
                        "edge acquisition must recover after the bounded guard expires")
+        XCTAssertTrue(await eventually { capture.isSuppressed })
+
+        controller.emergencyReturn()
+        machine.flushCallbacks()
+        _ = await eventually { !capture.isSuppressed }
+    }
+
+    func testBoundaryCrossedReturnBlocksImmediateEdgeReacquire() async {
+        let clock = Issue96Clock()
+        let (controller, sender, capture, machine, cursorOwner) = makeController(clock: clock)
+        defer {
+            capture.stop()
+            cursorOwner.stop()
+        }
+
+        await enterRemote(capture: capture, machine: machine)
+
+        // A fresh capture starts at suppression generation 1. Exercise the
+        // generation-tagged production callback: the first return-directed
+        // movement is normalized by issue #37, the second crosses the default
+        // 60-point return hysteresis. The helper reports the movement delivered
+        // but clamped at its bound; requested intent still owns return credit.
+        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 1, dy: 0)), 1)
+        sender.waitForDrain()
+        await Task.yield()
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 100, dy: 0)), 1)
+        sender.waitForDrain()
+        XCTAssertTrue(await eventually { machine.state == .localActive })
+        machine.flushCallbacks()
+        XCTAssertTrue(await eventually { !capture.isSuppressed })
+
+        capture.onScreenEdge?(.left)
+        XCTAssertEqual(machine.state, .localActive,
+                       "normal boundary return must not immediately reacquire the same edge")
+        XCTAssertFalse(capture.isSuppressed)
+
+        clock.advance(0.501)
+        capture.onScreenEdge?(.left)
+        machine.flushCallbacks()
+        XCTAssertEqual(machine.state, .remoteActive)
         XCTAssertTrue(await eventually { capture.isSuppressed })
 
         controller.emergencyReturn()
