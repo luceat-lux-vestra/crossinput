@@ -27,11 +27,10 @@ final class ControlHandoffController: @unchecked Sendable {
     /// Monotonic clock used for the return re-entry guard. Injectable so the
     /// boundary can be proved without sleeping in deterministic tests.
     private let monotonicNow: @Sendable () -> TimeInterval
-    /// Controller-level ownership gate: once the state machine begins returning
-    /// to macOS, no edge callback may reacquire remote control during this
-    /// interval. InputCapture has its own edge cooldown/leave-zone gate; this
-    /// second gate closes the orchestration window before capture.release()
-    /// posts or admits any return-path event (issue #96 physical evidence).
+    /// Controller-level ownership gate: once return begins, no edge callback
+    /// may reacquire remote control during this interval. InputCapture keeps
+    /// its existing cooldown/leave-zone gate; this closes the orchestration
+    /// boundary before local suppression is released (issue #96 evidence).
     private var edgeReentryBlockedUntil: TimeInterval = 0
     private static let edgeReentryCooldown: TimeInterval = 0.5
 
@@ -47,14 +46,6 @@ final class ControlHandoffController: @unchecked Sendable {
         self.monotonicNow = monotonicNow
 
         switchMachine.onStateChange = { [weak self] transition in
-            // Arm before hopping to MainActor. In the normal boundary-return
-            // path the machine is already localActive by the time the queued
-            // MainActor transition applies; capture.release() may then post a
-            // synthetic move. The acquisition gate must therefore exist before
-            // local suppression is released, not after the synthetic event.
-            if transition.to == .returning {
-                self?.armEdgeReentryGate()
-            }
             Task { @MainActor in
                 guard let self, self.transitionGate.shouldApply(transition) else { return }
                 guard transition.to != .remoteActive || self.isEdgeSwitchEnabled else { return }
@@ -100,6 +91,11 @@ final class ControlHandoffController: @unchecked Sendable {
         capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
                 guard let self, generation == self.currentSuppressionGeneration else { return }
+                // Capture-initiated releases (watchdog, external control, etc.)
+                // have already made local input observable. The machine is
+                // still remoteActive, so arm before forceReturn can publish
+                // localActive and make edge acquisition meaningful again.
+                self.armEdgeReentryGate()
                 self.switchMachine.forceReturn(reason: self.transitionReason(for: reason))
             }
         }
@@ -166,11 +162,13 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     func emergencyReturn() {
+        armEdgeReentryGate()
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
+        armEdgeReentryGate()
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
@@ -273,6 +271,7 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func handleButtonSafetyRejection(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
+        armEdgeReentryGate()
         sender.cancelPendingPointerEvents()
         // A rejected button transition means remote button state can no longer
         // be trusted: release whatever was previously accepted by the helper
@@ -297,11 +296,18 @@ final class ControlHandoffController: @unchecked Sendable {
                                        requestedDy: CGFloat(requestedDy),
                                        deliveredDx: CGFloat(deliveredDx),
                                        deliveredDy: CGFloat(deliveredDy))
+            if switchMachine.state == .localActive {
+                // pointerMoved performs its state mutation synchronously while
+                // capture is still suppressed. Arm before queued transition
+                // callbacks can release local suppression.
+                armEdgeReentryGate()
+            }
         case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
             switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
                                        requestedDy: CGFloat(requestedDy),
                                        deliveredDx: CGFloat(deliveredDx),
                                        deliveredDy: CGFloat(deliveredDy))
+            armEdgeReentryGate()
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:
@@ -313,6 +319,7 @@ final class ControlHandoffController: @unchecked Sendable {
             // A helper-side failure is a control-oriented availability loss;
             // the state machine does not need to know whether ADB, UHID, or
             // InputManager was the underlying cause.
+            armEdgeReentryGate()
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
@@ -368,7 +375,9 @@ final class ControlHandoffController: @unchecked Sendable {
                 // The state-machine transition happened before cursor
                 // ownership could be admitted. Return through the existing
                 // control fail-safe so listening capture and logical state
-                // cannot diverge.
+                // cannot diverge. Capture is already local, so gate before
+                // publishing localActive again.
+                armEdgeReentryGate()
                 switchMachine.forceReturn(reason: .remoteUnavailable)
                 return
             }
@@ -385,6 +394,14 @@ final class ControlHandoffController: @unchecked Sendable {
             // effort and session-generation-scoped; external-control takeovers
             // arrive here via the same transition after InputCapture's
             // synchronous onPointerStateReset.
+            if capture.isSuppressed {
+                // Critical ordering: while capture is still suppressing, edge
+                // callbacks cannot be emitted. Arm the controller gate before
+                // release makes local input observable or posts a synthetic
+                // return move. This is the last-resort ordering invariant even
+                // if queued returning/localActive callbacks are reordered.
+                armEdgeReentryGate()
+            }
             lifecycleLock.withLock {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
