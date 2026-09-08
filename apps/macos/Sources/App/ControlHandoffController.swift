@@ -91,10 +91,12 @@ final class ControlHandoffController: @unchecked Sendable {
         capture.onSuppressionReleased = { [weak self] reason, generation in
             Task { @MainActor in
                 guard let self, generation == self.currentSuppressionGeneration else { return }
-                // Capture-initiated releases (watchdog, external control, etc.)
-                // have already made local input observable. The machine is
-                // still remoteActive, so arm before forceReturn can publish
-                // localActive and make edge acquisition meaningful again.
+                // Controller-initiated returns move the state machine local
+                // before InputCapture publishes this callback. Do not extend
+                // the return gate again from that delayed callback. Only a
+                // capture-initiated release (watchdog/takeover/etc.) still
+                // leaves the machine owning the remote epoch here.
+                guard self.isRemoteOwnedState else { return }
                 self.armEdgeReentryGate()
                 self.switchMachine.forceReturn(reason: self.transitionReason(for: reason))
             }
@@ -162,13 +164,13 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     func emergencyReturn() {
-        armEdgeReentryGate()
+        if isRemoteOwnedState { armEdgeReentryGate() }
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
-        armEdgeReentryGate()
+        if isRemoteOwnedState { armEdgeReentryGate() }
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
@@ -180,6 +182,15 @@ final class ControlHandoffController: @unchecked Sendable {
     var isEdgeSwitchEnabled: Bool {
         lifecycleLock.withLock {
             edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
+        }
+    }
+
+    private var isRemoteOwnedState: Bool {
+        switch switchMachine.state {
+        case .edgeArmed, .remoteActive:
+            return true
+        case .disabled, .localActive, .returning:
+            return false
         }
     }
 
@@ -271,7 +282,7 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func handleButtonSafetyRejection(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
-        armEdgeReentryGate()
+        if isRemoteOwnedState { armEdgeReentryGate() }
         sender.cancelPendingPointerEvents()
         // A rejected button transition means remote button state can no longer
         // be trusted: release whatever was previously accepted by the helper
@@ -372,12 +383,10 @@ final class ControlHandoffController: @unchecked Sendable {
             // arms a fresh marker (issue #68).
             usableSessionLogged = false
             guard let generation = capture.suppress() else {
-                // The state-machine transition happened before cursor
-                // ownership could be admitted. Return through the existing
-                // control fail-safe so listening capture and logical state
-                // cannot diverge. Capture is already local, so gate before
-                // publishing localActive again.
-                armEdgeReentryGate()
+                // Suppression never became observable, so no return-path
+                // pointer mutation or synthetic move occurred. Preserve the
+                // existing immediate-retry contract instead of inventing a
+                // cooldown for an epoch that never acquired cursor ownership.
                 switchMachine.forceReturn(reason: .remoteUnavailable)
                 return
             }
