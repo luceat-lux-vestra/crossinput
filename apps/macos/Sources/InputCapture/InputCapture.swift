@@ -482,8 +482,17 @@ public final class InputCapture: @unchecked Sendable {
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 beforeSuppressedEventEmission?()
                 emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)), generation: suppressedGeneration)
-                holdPointerAtEdge(generation: suppressedGeneration)
-                return nil // consume: pointer held at the edge
+                guard let hold = holdPointerAtEdge(generation: suppressedGeneration) else {
+                    // Preserve P0 fail-closed behavior if the current display,
+                    // configured edge, or suppression generation cannot prove a
+                    // valid hold. Raw host movement must never leak to macOS.
+                    return nil
+                }
+                normalizeSuppressedHostMovement(event, at: hold)
+                // Active CGEvent taps may return the possibly modified incoming
+                // event. Keep macOS' native movement stream coherent while the
+                // raw deltas remain owned by the remote target.
+                return Unmanaged.passUnretained(event)
             }
             detectEdge()
             return Unmanaged.passUnretained(event)
@@ -709,15 +718,15 @@ public final class InputCapture: @unchecked Sendable {
     /// display while suppressed (CGWarpMouseCursorPosition posts no events,
     /// so there is no feedback loop). Keeps the cursor visually at the edge
     /// instead of drifting with the deltas forwarded to Android.
-    private func holdPointerAtEdge(generation: UInt64) {
+    private func holdPointerAtEdge(generation: UInt64) -> CGPoint? {
         guard let display = currentEventDisplay, let displayID = currentDisplayID,
-              let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return }
+              let edge = stateLock.withLock({ androidEdgeByDisplay[displayID] }) else { return nil }
         let hold = DisplayEdgeResolver.pointerPosition(
             for: edge,
             in: display.frame,
             at: currentPosition,
             threshold: edgeThreshold)
-        _ = cursorMutationExecutor.perform(
+        let held = cursorMutationExecutor.perform(
             kind: .hold,
             generation: generation,
             point: hold,
@@ -728,6 +737,20 @@ public final class InputCapture: @unchecked Sendable {
                 }
             }
         )
+        return held ? hold : nil
+    }
+
+    /// Reuses the incoming physical movement event as a coherent macOS hover
+    /// sample after the raw deltas have been forwarded remotely. The cursor is
+    /// already physically pinned at `hold`; rewriting location and deltas keeps
+    /// downstream AppKit/WindowServer movement state alive without allowing
+    /// local pointer drift. Drag events are deliberately lowered to mouseMoved
+    /// so suppressed remote dragging cannot acquire local drag semantics.
+    private func normalizeSuppressedHostMovement(_ event: CGEvent, at hold: CGPoint) {
+        CGEventSetType(event, .mouseMoved)
+        CGEventSetLocation(event, hold)
+        event.setIntegerValueField(.mouseEventDeltaX, value: 0)
+        event.setIntegerValueField(.mouseEventDeltaY, value: 0)
     }
 
     /// Physically returns the pointer to the crossing edge point the user
