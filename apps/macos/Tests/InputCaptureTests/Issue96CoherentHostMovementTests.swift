@@ -165,7 +165,7 @@ final class Issue96CoherentHostMovementTests: XCTestCase {
         XCTAssertEqual(fixture.observation.mutations.count, 1)
         XCTAssertEqual(fixture.observation.mutations.first?.kind, "hold")
         XCTAssertEqual(fixture.observation.mutations.first?.point, expectedHold)
-        XCTAssertEqual(CGEventGetType(event), .mouseMoved)
+        XCTAssertEqual(event.type, .mouseMoved)
         XCTAssertEqual(event.location, expectedHold)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaX), 0)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaY), 0)
@@ -190,7 +190,7 @@ final class Issue96CoherentHostMovementTests: XCTestCase {
 
         XCTAssertTrue(returnedEvent(result, is: event))
         XCTAssertEqual(fixture.observation.pointerKinds, [.move(dx: -8, dy: 19)])
-        XCTAssertEqual(CGEventGetType(event), .mouseMoved,
+        XCTAssertEqual(event.type, .mouseMoved,
                        "remote drag movement must never preserve local drag semantics")
         XCTAssertEqual(event.location, expectedHold)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaX), 0)
@@ -270,7 +270,7 @@ final class Issue96CoherentHostMovementTests: XCTestCase {
         let result = fixture.capture.handleForTesting(type: .mouseMoved, event: event)
 
         XCTAssertTrue(returnedEvent(result, is: event))
-        XCTAssertEqual(CGEventGetType(event), .mouseMoved)
+        XCTAssertEqual(event.type, .mouseMoved)
         XCTAssertEqual(event.location, rawPoint)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaX), 7)
         XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaY), -2)
