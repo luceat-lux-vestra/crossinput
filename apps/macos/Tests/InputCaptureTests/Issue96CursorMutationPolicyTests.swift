@@ -86,7 +86,7 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
         owners.append(InputCaptureTestOwner(executor: executor))
     }
 
-    func testRepeatedHoldRequestsPhysicallyParkOnceAndRestoreToFirstAnchor() {
+    func testRepeatedHoldRequestsPhysicallyParkOnceAndRestoreKeepsP0RequestedPoint() {
         let observation = Issue96MutationObservation()
         let executor = makeExecutor(observation: observation)
         own(executor)
@@ -94,7 +94,7 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
         let first = CGPoint(x: 100, y: 200)
         let second = CGPoint(x: 100, y: 260)
         let third = CGPoint(x: 100, y: 320)
-        let mutableLastEventRestoreRequest = CGPoint(x: 100, y: 999)
+        let restoreRequest = CGPoint(x: 100, y: 999)
 
         XCTAssertTrue(executor.beginOwnership(generation: 1))
         XCTAssertTrue(executor.perform(kind: .hold, generation: 1, point: first))
@@ -106,15 +106,11 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
         XCTAssertEqual(observation.points, [first])
 
         XCTAssertTrue(executor.endOwnership(generation: 1))
-        XCTAssertTrue(executor.perform(
-            kind: .restore,
-            generation: 1,
-            point: mutableLastEventRestoreRequest
-        ))
+        XCTAssertTrue(executor.perform(kind: .restore, generation: 1, point: restoreRequest))
 
         XCTAssertEqual(observation.kinds, [.hold, .restore])
-        XCTAssertEqual(observation.points, [first, first],
-                       "return must use the first generation-owned park point, not mutable last-event position")
+        XCTAssertEqual(observation.points, [first, restoreRequest],
+                       "#96 candidate must not silently change the P0 restore coordinate contract")
     }
 
     func testInputCaptureStillConsumesAndForwardsEveryMoveWhileWarpCountStaysOne() {
@@ -154,40 +150,42 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
         XCTAssertEqual(mutationObservation.kinds, [.hold],
                        "three suppressed moves must produce exactly one physical edge park")
 
-        let expectedFirstAnchor = DisplayEdgeResolver.pointerPosition(
+        let expectedFirstPark = DisplayEdgeResolver.pointerPosition(
             for: .left,
             in: frame,
             at: points[0],
             threshold: 2
         )
-        XCTAssertEqual(mutationObservation.points, [expectedFirstAnchor])
+        XCTAssertEqual(mutationObservation.points, [expectedFirstPark])
     }
 
-    func testNewGenerationGetsIndependentSingleParkAnchor() {
+    func testNewGenerationGetsIndependentSinglePhysicalParkBudget() {
         let observation = Issue96MutationObservation()
         let executor = makeExecutor(observation: observation)
         own(executor)
 
-        let firstGenerationAnchor = CGPoint(x: 10, y: 20)
-        let secondGenerationAnchor = CGPoint(x: 30, y: 40)
+        let firstGenerationPark = CGPoint(x: 10, y: 20)
+        let firstGenerationRestore = CGPoint(x: 12, y: 22)
+        let secondGenerationPark = CGPoint(x: 30, y: 40)
+        let secondGenerationRestore = CGPoint(x: 32, y: 42)
 
         XCTAssertTrue(executor.beginOwnership(generation: 1))
-        XCTAssertTrue(executor.perform(kind: .hold, generation: 1, point: firstGenerationAnchor))
+        XCTAssertTrue(executor.perform(kind: .hold, generation: 1, point: firstGenerationPark))
         XCTAssertTrue(executor.perform(kind: .hold, generation: 1, point: CGPoint(x: 11, y: 21)))
         XCTAssertTrue(executor.endOwnership(generation: 1))
-        XCTAssertTrue(executor.perform(kind: .restore, generation: 1, point: .zero))
+        XCTAssertTrue(executor.perform(kind: .restore, generation: 1, point: firstGenerationRestore))
 
         XCTAssertTrue(executor.beginOwnership(generation: 2))
-        XCTAssertTrue(executor.perform(kind: .hold, generation: 2, point: secondGenerationAnchor))
+        XCTAssertTrue(executor.perform(kind: .hold, generation: 2, point: secondGenerationPark))
         XCTAssertTrue(executor.perform(kind: .hold, generation: 2, point: CGPoint(x: 31, y: 41)))
         XCTAssertTrue(executor.endOwnership(generation: 2))
-        XCTAssertTrue(executor.perform(kind: .restore, generation: 2, point: .zero))
+        XCTAssertTrue(executor.perform(kind: .restore, generation: 2, point: secondGenerationRestore))
 
         XCTAssertEqual(observation.kinds, [.hold, .restore, .hold, .restore])
         XCTAssertEqual(
             observation.points,
-            [firstGenerationAnchor, firstGenerationAnchor,
-             secondGenerationAnchor, secondGenerationAnchor]
+            [firstGenerationPark, firstGenerationRestore,
+             secondGenerationPark, secondGenerationRestore]
         )
     }
 
@@ -205,19 +203,18 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
         XCTAssertEqual(observation.points, [fallback])
     }
 
-    func testDuplicateRestoreCannotMutatePointerTwice() {
+    func testHoldAfterOwnershipEndsCannotConsumeAnotherPhysicalParkBudget() {
         let observation = Issue96MutationObservation()
         let executor = makeExecutor(observation: observation)
         own(executor)
 
-        let anchor = CGPoint(x: 50, y: 60)
+        let park = CGPoint(x: 50, y: 60)
         XCTAssertTrue(executor.beginOwnership(generation: 9))
-        XCTAssertTrue(executor.perform(kind: .hold, generation: 9, point: anchor))
+        XCTAssertTrue(executor.perform(kind: .hold, generation: 9, point: park))
         XCTAssertTrue(executor.endOwnership(generation: 9))
-        XCTAssertTrue(executor.perform(kind: .restore, generation: 9, point: .zero))
-        XCTAssertFalse(executor.perform(kind: .restore, generation: 9, point: CGPoint(x: 1, y: 1)))
+        XCTAssertFalse(executor.perform(kind: .hold, generation: 9, point: CGPoint(x: 70, y: 80)))
 
-        XCTAssertEqual(observation.kinds, [.hold, .restore])
-        XCTAssertEqual(observation.points, [anchor, anchor])
+        XCTAssertEqual(observation.kinds, [.hold])
+        XCTAssertEqual(observation.points, [park])
     }
 }
