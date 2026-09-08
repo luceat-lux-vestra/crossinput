@@ -747,8 +747,8 @@ public final class InputCapture: @unchecked Sendable {
     /// local pointer drift. Drag events are deliberately lowered to mouseMoved
     /// so suppressed remote dragging cannot acquire local drag semantics.
     private func normalizeSuppressedHostMovement(_ event: CGEvent, at hold: CGPoint) {
-        CGEventSetType(event, .mouseMoved)
-        CGEventSetLocation(event, hold)
+        event.type = .mouseMoved
+        event.location = hold
         event.setIntegerValueField(.mouseEventDeltaX, value: 0)
         event.setIntegerValueField(.mouseEventDeltaY, value: 0)
     }
