@@ -24,15 +24,37 @@ final class ControlHandoffController: @unchecked Sendable {
     private var lifecycleStarted = false
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
+    /// Monotonic clock used for the return re-entry guard. Injectable so the
+    /// boundary can be proved without sleeping in deterministic tests.
+    private let monotonicNow: @Sendable () -> TimeInterval
+    /// Controller-level ownership gate: once the state machine begins returning
+    /// to macOS, no edge callback may reacquire remote control during this
+    /// interval. InputCapture has its own edge cooldown/leave-zone gate; this
+    /// second gate closes the orchestration window before capture.release()
+    /// posts or admits any return-path event (issue #96 physical evidence).
+    private var edgeReentryBlockedUntil: TimeInterval = 0
+    private static let edgeReentryCooldown: TimeInterval = 0.5
 
     init(sender: InputSender,
          capture: InputCapture = InputCapture(),
-         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine()) {
+         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
+         monotonicNow: @escaping @Sendable () -> TimeInterval = {
+             ProcessInfo.processInfo.systemUptime
+         }) {
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
+        self.monotonicNow = monotonicNow
 
         switchMachine.onStateChange = { [weak self] transition in
+            // Arm before hopping to MainActor. In the normal boundary-return
+            // path the machine is already localActive by the time the queued
+            // MainActor transition applies; capture.release() may then post a
+            // synthetic move. The acquisition gate must therefore exist before
+            // local suppression is released, not after the synthetic event.
+            if transition.to == .returning {
+                self?.armEdgeReentryGate()
+            }
             Task { @MainActor in
                 guard let self, self.transitionGate.shouldApply(transition) else { return }
                 guard transition.to != .remoteActive || self.isEdgeSwitchEnabled else { return }
@@ -45,8 +67,10 @@ final class ControlHandoffController: @unchecked Sendable {
             // A dead session must never re-arm handoff. After a fail-safe
             // return the pointer can rest on the configured edge; entering
             // remoteActive with no live transport trapped the user until the
-            // watchdog fired (issue #50).
-            guard let self, self.isEdgeSwitchEnabled, self.sender.hasLiveConnection else { return }
+            // watchdog fired (issue #50). A return that has already begun also
+            // owns a short controller-level no-reacquire interval so a return
+            // event cannot create a fresh suppression generation (issue #96).
+            guard let self, self.canAcquireEdgeSwitch, self.sender.hasLiveConnection else { return }
             self.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
@@ -160,6 +184,27 @@ final class ControlHandoffController: @unchecked Sendable {
             edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
         }
     }
+
+    /// Edge acquisition is stricter than the public enabled flag: during the
+    /// bounded return window the old local-return epoch still owns the edge,
+    /// so even a live session cannot create a new remote generation.
+    private var canAcquireEdgeSwitch: Bool {
+        let now = monotonicNow()
+        return lifecycleLock.withLock {
+            let enabled = edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
+            return enabled && now >= edgeReentryBlockedUntil
+        }
+    }
+
+    private func armEdgeReentryGate() {
+        let blockedUntil = monotonicNow() + Self.edgeReentryCooldown
+        lifecycleLock.withLock {
+            // A repeated return notification may extend the guard but must
+            // never shorten an already-active guard.
+            edgeReentryBlockedUntil = max(edgeReentryBlockedUntil, blockedUntil)
+        }
+    }
+
     /// Production capture→sender wiring: one captured event, one admission
     /// decision, and — only when the event became a new batch owner — one
     /// delivery completion routed to handoff accounting on the main actor.
