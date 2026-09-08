@@ -8,6 +8,12 @@ import Diagnostics
 /// The event tap's CFRunLoop is the designated writer. Requests from other
 /// threads are queued onto that run loop and waited on for a bounded interval;
 /// they never execute the platform mutation on the caller thread.
+///
+/// Issue #96 ownership rule: a suppression generation may physically park the
+/// macOS pointer at most once. Later `.hold` requests are logical no-ops. The
+/// first admitted park point becomes that generation's immutable restore anchor,
+/// so movement events observed while remote ownership is active cannot move the
+/// local return point or create repeated Quartz warps.
 internal final class CursorMutationExecutor: @unchecked Sendable {
     internal enum Kind: String, Sendable {
         case hold
@@ -17,28 +23,28 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private final class Request: @unchecked Sendable {
         let kind: Kind
         let generation: UInt64
+        let point: CGPoint
         let precondition: @Sendable () -> Bool
-        let mutation: @Sendable () -> Void
 
         private let stateLock = NSLock()
         private let completion = DispatchSemaphore(value: 0)
         private var cancelled = false
         /// Set only after ownership has been acquired and the request has
         /// passed the final cancellation/current-generation check. Once set,
-        /// the platform mutation is irrevocably admitted.
+        /// the executor-side decision is irrevocably admitted.
         private var admitted = false
         private var result: Bool?
 
         init(
             kind: Kind,
             generation: UInt64,
-            precondition: @escaping @Sendable () -> Bool,
-            mutation: @escaping @Sendable () -> Void
+            point: CGPoint,
+            precondition: @escaping @Sendable () -> Bool
         ) {
             self.kind = kind
             self.generation = generation
+            self.point = point
             self.precondition = precondition
-            self.mutation = mutation
         }
 
         func run(on executor: CursorMutationExecutor) {
@@ -76,9 +82,9 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         /// Waits for ownership without holding the request state lock, so a
         /// timed-out caller can cancel a dequeued request. Once ownership is
         /// held, the final state check and admission mark are atomic relative
-        /// to cancellation. The executor's lock remains held while the
-        /// platform mutation runs, so ownership invalidation cannot be
-        /// observed as complete before an admitted mutation is finished.
+        /// to cancellation. The executor's ownership lock remains held while
+        /// the platform mutation decision runs, so ownership invalidation
+        /// cannot complete before an admitted physical mutation is finished.
         func beginCommit(using executor: CursorMutationExecutor) -> Bool {
             guard stateLock.withLock({ result == nil && !cancelled && !self.admitted }) else {
                 return false
@@ -106,7 +112,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
                 }
                 return false
             }
-            mutation()
+            executor.execute(self)
             return true
         }
 
@@ -132,6 +138,14 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var source: CFRunLoopSource?
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
+    /// First physical edge park admitted for the active generation. Guarded by
+    /// ownershipLock and immutable for the rest of that generation.
+    private var activeAnchor: CGPoint?
+    /// Frozen return anchor retained after ownership ends. A new generation
+    /// invalidates it before any new suppression becomes observable.
+    private var latestAnchor: (generation: UInt64, point: CGPoint)?
+    /// Prevents duplicate restore mutations for one completed generation.
+    private var restoredGeneration: UInt64?
 
     /// Creates the production executor. `CGWarpMouseCursorPosition` is kept
     /// inside this abstraction so the call has one auditable writer.
@@ -211,6 +225,10 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         queued.forEach { _ = $0.cancelIfPending() }
         if ownershipLock.lock(before: Date().addingTimeInterval(coordinationTimeout)) {
             activeGeneration = nil
+            latestGeneration = nil
+            activeAnchor = nil
+            latestAnchor = nil
+            restoredGeneration = nil
             ownershipLock.unlock()
         } else {
             Diagnostics.log("cursor-mutation serialization timeout")
@@ -246,6 +264,9 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         }
         latestGeneration = generation
         activeGeneration = generation
+        activeAnchor = nil
+        latestAnchor = nil
+        restoredGeneration = nil
         ownershipLock.unlock()
         pendingLock.unlock()
         return true
@@ -262,7 +283,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     /// Invalidates an ownership epoch before `InputCapture` releases local
     /// suppression. If an already-admitted platform call is in progress, the
     /// bounded wait lets it finish; the caller then fails safe without a
-    /// caller-thread warp.
+    /// caller-thread warp. The first physical park, if any, is frozen as the
+    /// only restore anchor for this generation.
     @discardableResult
     func endOwnership(generation: UInt64) -> Bool {
         guard ownershipLock.lock(
@@ -273,6 +295,12 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         }
         defer { ownershipLock.unlock() }
         guard activeGeneration == generation else { return true }
+        if let activeAnchor {
+            latestAnchor = (generation: generation, point: activeAnchor)
+        } else {
+            latestAnchor = nil
+        }
+        activeAnchor = nil
         activeGeneration = nil
         return true
     }
@@ -287,10 +315,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         let request = Request(
             kind: kind,
             generation: generation,
-            precondition: precondition,
-            mutation: { [platformMutation] in
-                platformMutation(kind, point)
-            }
+            point: point,
+            precondition: precondition
         )
         let isOwner = pendingLock.withLock {
             ownerThreadID == Self.currentThreadID()
@@ -352,12 +378,40 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         request.beginCommit(using: self)
     }
 
+    /// Called only while ownershipLock is held and only after the request has
+    /// passed the current-generation gate.
+    private func execute(_ request: Request) {
+        switch request.kind {
+        case .hold:
+            // The first hold physically parks the pointer and becomes the
+            // immutable return anchor. Every later movement event in the same
+            // generation is still consumed/forwarded by InputCapture, but it
+            // must not generate another Quartz warp (#96).
+            guard activeAnchor == nil else { return }
+            activeAnchor = request.point
+            platformMutation(.hold, request.point)
+        case .restore:
+            let restorePoint: CGPoint
+            if let latestAnchor, latestAnchor.generation == request.generation {
+                restorePoint = latestAnchor.point
+            } else {
+                // Preserve the pre-existing fail-safe behavior when suppression
+                // ended before any physical park could be established.
+                restorePoint = request.point
+            }
+            restoredGeneration = request.generation
+            platformMutation(.restore, restorePoint)
+        }
+    }
+
     private func isCurrent(kind: Kind, generation: UInt64) -> Bool {
         switch kind {
         case .hold:
             return activeGeneration == generation
         case .restore:
-            return activeGeneration == nil && latestGeneration == generation
+            return activeGeneration == nil
+                && latestGeneration == generation
+                && restoredGeneration != generation
         }
     }
 
