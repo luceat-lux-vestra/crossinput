@@ -26,6 +26,13 @@ private final class Issue96LiveSession: SessionConnection, @unchecked Sendable {
     var onEvent: (@Sendable (CxiFrame) -> Void)?
     var onDisconnect: (@Sendable () -> Void)?
 
+    private let lock = NSLock()
+    private var pointerMoveRequestsStorage = 0
+
+    var pointerMoveRequests: Int {
+        lock.withLock { pointerMoveRequestsStorage }
+    }
+
     func connect() async throws {}
 
     func request(_ type: MessageType,
@@ -34,6 +41,7 @@ private final class Issue96LiveSession: SessionConnection, @unchecked Sendable {
         guard type == .pointerMoveRel else {
             throw Issue96TestError.unexpectedRequest
         }
+        lock.withLock { pointerMoveRequestsStorage += 1 }
         return CxiFrame(
             type: .pointerResult,
             requestId: 1,
@@ -116,7 +124,7 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
     private func makeController(
         clock: Issue96Clock
-    ) -> (ControlHandoffController, InputSender, InputCapture, EdgeSwitchStateMachine, Issue96CursorOwner) {
+    ) -> (ControlHandoffController, InputSender, InputCapture, EdgeSwitchStateMachine, Issue96CursorOwner, Issue96LiveSession) {
         let executor = CursorMutationExecutor(mutation: { _, _ in })
         let cursorOwner = Issue96CursorOwner(executor: executor)
         let capture = InputCapture(
@@ -124,7 +132,8 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
             cursorMutationExecutor: executor
         )
         let reference = SessionReference()
-        reference.set(Issue96LiveSession())
+        let session = Issue96LiveSession()
+        reference.set(session)
         let sender = InputSender(session: reference)
         let machine = EdgeSwitchStateMachine()
         let controller = ControlHandoffController(
@@ -133,7 +142,7 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
             switchMachine: machine,
             monotonicNow: { clock.now }
         )
-        return (controller, sender, capture, machine, cursorOwner)
+        return (controller, sender, capture, machine, cursorOwner, session)
     }
 
     private func enterRemote(
@@ -154,7 +163,7 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
     func testEmergencyReturnBlocksImmediateEdgeReacquireUntilCooldownExpires() async {
         let clock = Issue96Clock()
-        let (controller, _, capture, machine, cursorOwner) = makeController(clock: clock)
+        let (controller, _, capture, machine, cursorOwner, _) = makeController(clock: clock)
         defer {
             capture.stop()
             cursorOwner.stop()
@@ -195,7 +204,7 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
     func testBoundaryCrossedReturnBlocksImmediateEdgeReacquire() async {
         let clock = Issue96Clock()
-        let (controller, sender, capture, machine, cursorOwner) = makeController(clock: clock)
+        let (controller, sender, capture, machine, cursorOwner, session) = makeController(clock: clock)
         defer {
             capture.stop()
             cursorOwner.stop()
@@ -203,18 +212,22 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
         await enterRemote(capture: capture, machine: machine)
 
-        // A fresh capture starts at suppression generation 1. Exercise the
-        // generation-tagged production callback: the first return-directed
-        // movement is normalized by issue #37, the second crosses the default
-        // 60-point return hysteresis. The helper reports the movement delivered
-        // but clamped at its bound; requested intent still owns return credit.
-        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 1, dy: 0)), 1)
+        // Match the established left-edge issue #45 contract exactly: the
+        // first blocked +300 movement spends the issue #37 first-move exemption;
+        // the next +61 movement crosses the 60-point return hysteresis. Wait for
+        // each helper request so this test does not race controller generation
+        // admission or MainActor delivery accounting.
+        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 300, dy: 0)), 1)
         sender.waitForDrain()
+        let firstRequestDelivered = await eventually { session.pointerMoveRequests >= 1 }
+        XCTAssertTrue(firstRequestDelivered)
         await Task.yield()
         XCTAssertEqual(machine.state, .remoteActive)
 
-        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 100, dy: 0)), 1)
+        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 61, dy: 0)), 1)
         sender.waitForDrain()
+        let secondRequestDelivered = await eventually { session.pointerMoveRequests >= 2 }
+        XCTAssertTrue(secondRequestDelivered)
         let returnedToLocal = await eventually { machine.state == .localActive }
         XCTAssertTrue(returnedToLocal)
         machine.flushCallbacks()
