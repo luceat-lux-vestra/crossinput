@@ -154,6 +154,19 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
             switchMachine: machine,
             monotonicNow: { clock.now }
         )
+
+        // This deterministic unit fixture intentionally does not call
+        // controller.enable(), because enable() installs a real system event
+        // tap. Production generation/stale-callback safety is already covered
+        // by SuppressionLifecycleTests and InputSenderTests. Route the actual
+        // InputCapture event path through the controller's existing pre-
+        // lifecycle untagged admission seam so this suite isolates the return
+        // gate ordering contract instead of weakening production admission.
+        let untaggedPointerAdmission = capture.onPointerEvent
+        capture.onPointerEventWithGeneration = { event, _ in
+            untaggedPointerAdmission?(event)
+        }
+
         return (controller, sender, capture, machine, cursorOwner, session)
     }
 
@@ -224,10 +237,9 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
         await enterRemote(capture: capture, machine: machine)
 
-        // Drive the actual InputCapture event path so the event carries the
-        // generation captured by production code instead of guessing a test
-        // generation. A zero-delta probe proves controller admission is fully
-        // installed without consuming issue #37's first-movement exemption.
+        // Drive the actual InputCapture event path. A zero-delta probe proves
+        // the controller admission/delivery fixture is live without consuming
+        // issue #37's first-movement exemption.
         let readinessEvent = makeMouseMove(dx: 0, dy: 0)
         XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: readinessEvent))
         sender.waitForDrain()
