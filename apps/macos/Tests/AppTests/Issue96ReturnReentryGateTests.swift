@@ -148,7 +148,8 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         capture.onScreenEdge?(.left)
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .remoteActive)
-        XCTAssertTrue(await eventually { capture.isSuppressed })
+        let becameSuppressed = await eventually { capture.isSuppressed }
+        XCTAssertTrue(becameSuppressed)
     }
 
     func testEmergencyReturnBlocksImmediateEdgeReacquireUntilCooldownExpires() async {
@@ -166,7 +167,8 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         controller.emergencyReturn()
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .localActive)
-        XCTAssertTrue(await eventually { !capture.isSuppressed })
+        let becameLocal = await eventually { !capture.isSuppressed }
+        XCTAssertTrue(becameLocal)
 
         capture.onScreenEdge?(.left)
         XCTAssertEqual(machine.state, .localActive,
@@ -183,7 +185,8 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .remoteActive,
                        "edge acquisition must recover after the bounded guard expires")
-        XCTAssertTrue(await eventually { capture.isSuppressed })
+        let reacquiredSuppression = await eventually { capture.isSuppressed }
+        XCTAssertTrue(reacquiredSuppression)
 
         controller.emergencyReturn()
         machine.flushCallbacks()
@@ -212,9 +215,11 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
         capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 100, dy: 0)), 1)
         sender.waitForDrain()
-        XCTAssertTrue(await eventually { machine.state == .localActive })
+        let returnedToLocal = await eventually { machine.state == .localActive }
+        XCTAssertTrue(returnedToLocal)
         machine.flushCallbacks()
-        XCTAssertTrue(await eventually { !capture.isSuppressed })
+        let releasedSuppression = await eventually { !capture.isSuppressed }
+        XCTAssertTrue(releasedSuppression)
 
         capture.onScreenEdge?(.left)
         XCTAssertEqual(machine.state, .localActive,
@@ -225,7 +230,8 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         capture.onScreenEdge?(.left)
         machine.flushCallbacks()
         XCTAssertEqual(machine.state, .remoteActive)
-        XCTAssertTrue(await eventually { capture.isSuppressed })
+        let reacquiredSuppression = await eventually { capture.isSuppressed }
+        XCTAssertTrue(reacquiredSuppression)
 
         controller.emergencyReturn()
         machine.flushCallbacks()
