@@ -122,6 +122,18 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
         return predicate()
     }
 
+    private func makeMouseMove(dx: Int64, dy: Int64) -> CGEvent {
+        let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        event.setIntegerValueField(.mouseEventDeltaX, value: dx)
+        event.setIntegerValueField(.mouseEventDeltaY, value: dy)
+        return event
+    }
+
     private func makeController(
         clock: Issue96Clock
     ) -> (ControlHandoffController, InputSender, InputCapture, EdgeSwitchStateMachine, Issue96CursorOwner, Issue96LiveSession) {
@@ -212,21 +224,32 @@ final class Issue96ReturnReentryGateTests: XCTestCase {
 
         await enterRemote(capture: capture, machine: machine)
 
-        // Match the established left-edge issue #45 contract exactly: the
-        // first blocked +300 movement spends the issue #37 first-move exemption;
-        // the next +61 movement crosses the 60-point return hysteresis. Wait for
-        // each helper request so this test does not race controller generation
-        // admission or MainActor delivery accounting.
-        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 300, dy: 0)), 1)
+        // Drive the actual InputCapture event path so the event carries the
+        // generation captured by production code instead of guessing a test
+        // generation. A zero-delta probe proves controller admission is fully
+        // installed without consuming issue #37's first-movement exemption.
+        let readinessEvent = makeMouseMove(dx: 0, dy: 0)
+        XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: readinessEvent))
         sender.waitForDrain()
-        let firstRequestDelivered = await eventually { session.pointerMoveRequests >= 1 }
-        XCTAssertTrue(firstRequestDelivered)
-        await Task.yield()
+        let ownershipReady = await eventually { session.pointerMoveRequests >= 1 }
+        XCTAssertTrue(ownershipReady)
         XCTAssertEqual(machine.state, .remoteActive)
 
-        capture.onPointerEventWithGeneration?(PointerEvent(.move(dx: 61, dy: 0)), 1)
+        // Match the established left-edge issue #45 contract exactly: the
+        // first non-zero blocked +300 movement spends the issue #37 first-move
+        // exemption; the next +61 movement crosses the 60-point return
+        // hysteresis. The helper reports both movements delivered but clamped.
+        let firstMove = makeMouseMove(dx: 300, dy: 0)
+        XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: firstMove))
         sender.waitForDrain()
-        let secondRequestDelivered = await eventually { session.pointerMoveRequests >= 2 }
+        let firstRequestDelivered = await eventually { session.pointerMoveRequests >= 2 }
+        XCTAssertTrue(firstRequestDelivered)
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        let returnMove = makeMouseMove(dx: 61, dy: 0)
+        XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: returnMove))
+        sender.waitForDrain()
+        let secondRequestDelivered = await eventually { session.pointerMoveRequests >= 3 }
         XCTAssertTrue(secondRequestDelivered)
         let returnedToLocal = await eventually { machine.state == .localActive }
         XCTAssertTrue(returnedToLocal)
