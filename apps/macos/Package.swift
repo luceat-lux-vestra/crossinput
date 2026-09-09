@@ -12,13 +12,15 @@ let package = Package(
         .library(name: "Delivery", targets: ["Delivery"]),
         .executable(name: "cxi-smoke", targets: ["SmokeMain"]),
         .executable(name: "cxi-stress", targets: ["CxiStress"]),
-        .executable(name: "cursor-presentation-repro", targets: ["CursorPresentationRepro"])
+        .executable(name: "cursor-presentation-repro", targets: ["CursorPresentationRepro"]),
+        .executable(name: "issue96-workspace-trace", targets: ["Issue96WorkspaceTrace"])
     ],
     targets: [
         .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics", "Delivery"]),
         .executableTarget(name: "CxiStress", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics", "Delivery"], path: "Tools/CxiStress"),
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
         .executableTarget(name: "CursorPresentationRepro", dependencies: [], path: "Tools/CursorPresentationRepro"),
+        .executableTarget(name: "Issue96WorkspaceTrace", dependencies: [], path: "Tools/Issue96WorkspaceTrace"),
         .target(name: "Delivery", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics"]),
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
