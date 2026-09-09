@@ -31,22 +31,38 @@ final class WorkspaceTraceLogger {
     func log(_ event: String, application: NSRunningApplication? = nil) {
         let monotonic = DispatchTime.now().uptimeNanoseconds
         let frontmost = NSWorkspace.shared.frontmostApplication
-        let fields = [
-            "observer_pid": String(ProcessInfo.processInfo.processIdentifier),
-            "observed_pid": application.map { String($0.processIdentifier) } ?? "none",
-            "observed_bundle": application?.bundleIdentifier ?? "none",
-            "observed_name": application?.localizedName ?? "none",
-            "observed_active": application.map { $0.isActive ? "true" : "false" } ?? "none",
-            "frontmost_pid": frontmost.map { String($0.processIdentifier) } ?? "none",
-            "frontmost_bundle": frontmost?.bundleIdentifier ?? "none",
-            "frontmost_name": frontmost?.localizedName ?? "none"
-        ]
+
+        var fields: [String: String] = [:]
+        fields["observer_pid"] = String(ProcessInfo.processInfo.processIdentifier)
+
+        if let application {
+            fields["observed_pid"] = String(application.processIdentifier)
+            fields["observed_bundle"] = application.bundleIdentifier ?? "none"
+            fields["observed_name"] = application.localizedName ?? "none"
+            fields["observed_active"] = application.isActive ? "true" : "false"
+        } else {
+            fields["observed_pid"] = "none"
+            fields["observed_bundle"] = "none"
+            fields["observed_name"] = "none"
+            fields["observed_active"] = "none"
+        }
+
+        if let frontmost {
+            fields["frontmost_pid"] = String(frontmost.processIdentifier)
+            fields["frontmost_bundle"] = frontmost.bundleIdentifier ?? "none"
+            fields["frontmost_name"] = frontmost.localizedName ?? "none"
+        } else {
+            fields["frontmost_pid"] = "none"
+            fields["frontmost_bundle"] = "none"
+            fields["frontmost_name"] = "none"
+        }
+
         let stableFields = fields
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\(Self.token($0.value))" }
             .joined(separator: " ")
         let line = "ISSUE96_WORKSPACE monotonic_ns=\(monotonic) event=\(event) \(stableFields)\n"
-        guard let data = line.data(using: .utf8) else { return }
+        guard let data = line.data(using: String.Encoding.utf8) else { return }
         fileHandle?.write(data)
     }
 
