@@ -4,7 +4,7 @@ Status: INVESTIGATION ONLY
 
 ## Objective
 
-Distinguish whether recovery from the BROKEN native directional-cursor state is caused by application/window activation itself or requires a real mouse-down on the affected target display.
+Distinguish whether a keyboard-driven target-application activation path can recover the BROKEN native directional-cursor state without a target-display mouse-down, or whether a real mouse-down on the affected target display is required.
 
 This protocol adds no cursor API, input injection, event monitor, focus workaround, or production behavior. It is a human-observed decision tree over the existing standalone reproducer / issue-96 instrumentation.
 
@@ -33,16 +33,16 @@ Do not run a four-surface matrix by repeatedly destroying and recreating the cur
 4. Hover the native directional-cursor probe and visually confirm BROKEN.
 5. If the cursor is not definitely BROKEN, stop. Do not classify the recovery path from a contaminated start state.
 
-### Test 1 — activation without target-display mouse-down
+### Test 1 — keyboard activation with zero target-display mouse-down
 
-With the pointer already back on the affected target display, activate the target-display repro/test application using keyboard-only application switching (for example Command-Tab). Do **not** click the affected target display.
+With the pointer already back on the affected target display, switch to the target-display repro/test application using keyboard-only application switching (for example Command-Tab). Do **not** click the affected target display.
 
 Then hover the native directional-cursor probe and record the visual result.
 
-- `HEALTHY` => classify `ACTIVATION_ONLY_SUFFICIENT` and stop.
-- `BROKEN` => application activation alone is insufficient; continue to Test 2 without recreating the BROKEN state.
+- `HEALTHY` => classify `KEYBOARD_ACTIVATION_PATH_SUFFICIENT` and stop.
+- `BROKEN` => the keyboard activation path was insufficient to recover presentation; continue to Test 2 without recreating the BROKEN state.
 
-The important invariant is zero target-display mouse-down between the BROKEN observation and this result.
+The important invariant is zero target-display mouse-down between the BROKEN observation and this result. A HEALTHY result proves that a target-display mouse-down is not necessary, but does not by itself distinguish application activation from another side effect of the keyboard-switching path.
 
 ### Test 2 — mouse-down in an already-active target window
 
@@ -53,7 +53,7 @@ Perform exactly one real click inside the already-active target application wind
 - `HEALTHY` => classify `REAL_MOUSEDOWN_REQUIRED_AFTER_ACTIVATION` and stop.
 - `BROKEN` => the previously observed generic app/window-click recovery is not reproduced in this controlled ordering; continue only to the secondary discrimination below.
 
-This ordering deliberately separates application activation from the real mouse-down because both normally happen together during an ordinary click on an inactive window.
+This ordering deliberately separates the keyboard-driven activation path from the real mouse-down because both activation and mouse-down normally occur together during an ordinary click on an inactive window.
 
 ## Secondary discrimination — only if Test 2 stays BROKEN
 
@@ -94,8 +94,8 @@ Stop after the first recovery-producing action. Once HEALTHY is restored, later 
 
 | Observation | Strongest supported conclusion |
 | --- | --- |
-| Keyboard-only target-app activation recovers | A real mouse-down is not necessary; application/window activation or activation-driven cursor invalidation is sufficient. |
-| Keyboard activation stays BROKEN; click in the now-active target window recovers | Application activation is insufficient; a real target-display mouse-down (or processing tied to that mouse-down) is required. |
+| Keyboard-only target-app switching recovers | A target-display real mouse-down is not necessary. The keyboard activation path, or another side effect of that path, is sufficient. |
+| Keyboard switching stays BROKEN; click in the now-active target window recovers | The keyboard activation path is insufficient; a real target-display mouse-down (or processing tied to that mouse-down) is required in this ordering. |
 | Active-window click stays BROKEN; Finder desktop click recovers | Recovery is not a generic app-window mouse-down; Finder/display activation or desktop handling is involved. |
 | Desktop stays BROKEN; menu-bar click recovers | The recovery boundary is narrower and may involve system UI / menu-bar cursor invalidation. |
 | Known menu-bar control also stays BROKEN | Run is inconsistent/contaminated; re-establish a known HEALTHY baseline before drawing conclusions. |
