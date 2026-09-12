@@ -14,6 +14,13 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         case restore
     }
 
+    /// Pure production routing plan used to keep the repeated hold path off
+    /// `CGWarpMouseCursorPosition` without changing ownership/admission logic.
+    internal enum ProductionMutation: Equatable {
+        case displayLocal(displayID: CGDirectDisplayID, point: CGPoint)
+        case globalWarp(point: CGPoint)
+    }
+
     private final class Request: @unchecked Sendable {
         let kind: Kind
         let generation: UInt64
@@ -133,12 +140,64 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
 
-    /// Creates the production executor. `CGWarpMouseCursorPosition` is kept
-    /// inside this abstraction so the call has one auditable writer.
+    /// Creates the production executor. Repeated `.hold` mutations use the
+    /// display-local public API; the one-shot `.restore` path keeps the P0
+    /// global warp. Both still execute through this single designated writer.
     internal static func production() -> CursorMutationExecutor {
-        CursorMutationExecutor { _, point in
-            CGWarpMouseCursorPosition(point)
+        CursorMutationExecutor { kind, point in
+            guard let mutation = Self.productionMutation(
+                kind: kind,
+                globalPoint: point,
+                displayResolver: Self.displayContainingPoint
+            ) else {
+                Diagnostics.log("cursor-mutation hold display resolution failed")
+                return
+            }
+
+            switch mutation {
+            case let .displayLocal(displayID, localPoint):
+                if CGDisplayMoveCursorToPoint(displayID, localPoint) != .success {
+                    Diagnostics.log("cursor-mutation display-local hold failed")
+                }
+            case let .globalWarp(globalPoint):
+                CGWarpMouseCursorPosition(globalPoint)
+            }
         }
+    }
+
+    /// Builds the public-API mutation plan without performing any cursor side
+    /// effect. Tests inject display geometry so multi-display conversion and
+    /// the no-fallback rule remain independently reviewable.
+    internal static func productionMutation(
+        kind: Kind,
+        globalPoint: CGPoint,
+        displayResolver: (CGPoint) -> (CGDirectDisplayID, CGRect)?
+    ) -> ProductionMutation? {
+        switch kind {
+        case .restore:
+            return .globalWarp(point: globalPoint)
+        case .hold:
+            guard let (displayID, frame) = displayResolver(globalPoint) else {
+                return nil
+            }
+            return .displayLocal(
+                displayID: displayID,
+                point: CGPoint(
+                    x: globalPoint.x - frame.minX,
+                    y: globalPoint.y - frame.minY
+                )
+            )
+        }
+    }
+
+    private static func displayContainingPoint(_ point: CGPoint) -> (CGDirectDisplayID, CGRect)? {
+        var displayID = CGDirectDisplayID()
+        var displayCount: UInt32 = 0
+        guard CGGetDisplaysWithPoint(point, 1, &displayID, &displayCount) == .success,
+              displayCount == 1 else {
+            return nil
+        }
+        return (displayID, CGDisplayBounds(displayID))
     }
 
     /// Test construction injects the platform mutation and can pause just
