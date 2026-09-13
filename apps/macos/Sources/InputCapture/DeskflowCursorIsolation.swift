@@ -6,37 +6,20 @@ import Diagnostics
 /// Issue #96 visible-cursor discriminator derived from Deskflow's macOS cursor
 /// ownership path, with cursor visibility mutation deliberately removed.
 ///
-/// Remote entry keeps the private/background and relative-input ownership steps:
-///
-///     SetsCursorInBackground(true)
-///     CGAssociateMouseAndMouseCursorPosition(true)
-///     CGSetLocalEventsSuppressionInterval(0.0001)
-///     CGAssociateMouseAndMouseCursorPosition(false)
-///
-/// Local return keeps the matching ownership reset before P0 performs its
-/// existing one-shot edge restore:
-///
-///     SetsCursorInBackground(true)
-///     CGAssociateMouseAndMouseCursorPosition(true)
-///     CGAssociateMouseAndMouseCursorPosition(true)
-///     CGSetLocalEventsSuppressionInterval(0.0)
-///
-/// No hide/show API is called. The native cursor remains observable so Issue
-/// #96 directional/resize presentation can be classified directly.
-///
-/// `CGSetLocalEventsSuppressionInterval` is unavailable to Swift in current
-/// SDKs even though Deskflow still calls the legacy symbol from C++. The
-/// investigation therefore resolves that exact CoreGraphics symbol via dlsym.
+/// Unlike the persistent Deskflow property, CrossInput balances the private
+/// background-cursor authority per remote epoch. Historical CrossInput PR #16
+/// used the same true-on-entry / false-on-return contract, and leaving the
+/// property enabled can confound native cursor recovery observations.
 internal final class DeskflowCursorIsolation: @unchecked Sendable {
     internal struct Operations: @unchecked Sendable {
-        let setCursorInBackground: @Sendable () -> Int32?
+        let setCursorInBackground: @Sendable (Bool) -> Int32?
         let associate: @Sendable (Bool) -> CGError
         let setSuppressionInterval: @Sendable (Double) -> Int32?
 
         static func production() -> Operations {
             let spi = CursorCompatibilitySPI()
             return Operations(
-                setCursorInBackground: { spi.setCursorInBackground() },
+                setCursorInBackground: { spi.setCursorInBackground($0) },
                 associate: { associated in
                     CGAssociateMouseAndMouseCursorPosition(associated ? 1 : 0)
                 },
@@ -46,7 +29,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
 
         static func noOp() -> Operations {
             Operations(
-                setCursorInBackground: { 0 },
+                setCursorInBackground: { _ in 0 },
                 associate: { _ in .success },
                 setSuppressionInterval: { _ in 0 }
             )
@@ -108,17 +91,19 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             if let coreGraphicsHandle { dlclose(coreGraphicsHandle) }
         }
 
-        func setCursorInBackground() -> Int32? {
+        func setCursorInBackground(_ enabled: Bool) -> Int32? {
             guard let connection, let setter else { return nil }
             let cid = connection()
+            let value: CFBoolean = enabled ? kCFBooleanTrue : kCFBooleanFalse
             let result = setter(
                 cid,
                 cid,
                 "SetsCursorInBackground" as CFString,
-                kCFBooleanTrue
+                value
             )
             Diagnostics.log(
-                "issue96 deskflow-visible-cursor-spi result=\(result) connection=_CGSDefaultConnection"
+                "issue96 deskflow-visible-cursor-spi enabled=\(enabled) result=\(result) "
+                    + "connection=_CGSDefaultConnection"
             )
             return result
         }
@@ -137,6 +122,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
     private let operations: Operations
     private var activeGeneration: UInt64?
     private var isDisassociated = false
+    private var backgroundAuthorityEnabled = false
 
     internal static func production() -> DeskflowCursorIsolation {
         DeskflowCursorIsolation(operations: .production())
@@ -155,17 +141,19 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard activeGeneration == nil, !isDisassociated else {
+        guard activeGeneration == nil, !isDisassociated, !backgroundAuthorityEnabled else {
             Diagnostics.log("deskflow-visible-cursor begin rejected outstanding-debt")
             return false
         }
-        guard operations.setCursorInBackground() == 0 else {
+        guard operations.setCursorInBackground(true) == 0 else {
             Diagnostics.log("deskflow-visible-cursor begin rejected background-spi")
             return false
         }
+        backgroundAuthorityEnabled = true
 
         let preDisassociateAssociate = operations.associate(true)
         guard preDisassociateAssociate == .success else {
+            _ = resetBackgroundAuthorityLocked()
             Diagnostics.log(
                 "deskflow-visible-cursor pre-disassociate-associate failed "
                     + "result=\(preDisassociateAssociate.rawValue)"
@@ -175,6 +163,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
 
         guard operations.setSuppressionInterval(0.0001) == 0 else {
             _ = operations.setSuppressionInterval(0.0)
+            _ = resetBackgroundAuthorityLocked()
             Diagnostics.log("deskflow-visible-cursor suppression-interval admission failed")
             return false
         }
@@ -183,6 +172,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         guard disassociateResult == .success else {
             _ = operations.associate(true)
             _ = operations.setSuppressionInterval(0.0)
+            _ = resetBackgroundAuthorityLocked()
             Diagnostics.log(
                 "deskflow-visible-cursor disassociate failed result=\(disassociateResult.rawValue)"
             )
@@ -206,42 +196,40 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             return false
         }
 
-        let backgroundResult = operations.setCursorInBackground()
-        let showAssociateResult = operations.associate(true)
-        if showAssociateResult == .success {
+        let firstAssociateResult = operations.associate(true)
+        let secondAssociateResult = operations.associate(true)
+        if firstAssociateResult == .success || secondAssociateResult == .success {
             isDisassociated = false
         }
-        let enterAssociateResult = operations.associate(true)
         let suppressionResetResult = operations.setSuppressionInterval(0.0)
+        let backgroundResetResult = resetBackgroundAuthorityLocked()
 
         guard !isDisassociated,
-              showAssociateResult == .success,
-              enterAssociateResult == .success,
-              suppressionResetResult == 0 else {
+              !backgroundAuthorityEnabled,
+              firstAssociateResult == .success,
+              secondAssociateResult == .success,
+              suppressionResetResult == 0,
+              backgroundResetResult == 0 else {
             Diagnostics.log(
                 "deskflow-visible-cursor cleanup failed generation=\(generation) "
-                    + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
-                    + "show-associate=\(showAssociateResult.rawValue) "
-                    + "enter-associate=\(enterAssociateResult.rawValue) "
-                    + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable")"
+                    + "associate1=\(firstAssociateResult.rawValue) "
+                    + "associate2=\(secondAssociateResult.rawValue) "
+                    + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable") "
+                    + "background-reset=\(backgroundResetResult.map { String($0) } ?? "unavailable")"
             )
             return false
         }
 
         self.activeGeneration = nil
-        Diagnostics.log(
-            "deskflow-visible-cursor ended generation=\(generation) "
-                + "background=\(backgroundResult.map { String($0) } ?? "unavailable")"
-        )
+        Diagnostics.log("deskflow-visible-cursor ended generation=\(generation) background=false")
         return true
     }
 
     internal func forceReset() {
         lock.lock()
         defer { lock.unlock() }
-        guard activeGeneration != nil || isDisassociated else { return }
+        guard activeGeneration != nil || isDisassociated || backgroundAuthorityEnabled else { return }
 
-        let backgroundResult = operations.setCursorInBackground()
         var associateResult = CGError.success
         if isDisassociated {
             associateResult = operations.associate(true)
@@ -250,16 +238,28 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             }
         }
         let suppressionResetResult = operations.setSuppressionInterval(0.0)
+        let backgroundResetResult = resetBackgroundAuthorityLocked()
 
-        if !isDisassociated, suppressionResetResult == 0 {
+        if !isDisassociated,
+           !backgroundAuthorityEnabled,
+           suppressionResetResult == 0 {
             activeGeneration = nil
         }
         Diagnostics.log(
             "deskflow-visible-cursor force-reset "
-                + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
                 + "associate=\(associateResult.rawValue) "
-                + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable")"
+                + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable") "
+                + "background-reset=\(backgroundResetResult.map { String($0) } ?? "unavailable")"
         )
+    }
+
+    private func resetBackgroundAuthorityLocked() -> Int32? {
+        guard backgroundAuthorityEnabled else { return 0 }
+        let result = operations.setCursorInBackground(false)
+        if result == 0 {
+            backgroundAuthorityEnabled = false
+        }
+        return result
     }
 
     internal var activeGenerationForTesting: UInt64? {
@@ -268,5 +268,9 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
 
     internal var isDisassociatedForTesting: Bool {
         lock.withLock { isDisassociated }
+    }
+
+    internal var backgroundAuthorityEnabledForTesting: Bool {
+        lock.withLock { backgroundAuthorityEnabled }
     }
 }
