@@ -55,14 +55,17 @@ The target architecture has six authoritative lifecycles:
 6. Delivery
 
 Each lifecycle has one owner. Cross-owner coordination uses immutable
-handles/leases, explicit semantic outcomes, and explicit barriers rather than a
-universal generation counter or cross-layer epoch choreography.
+handles/leases, one-way validity, explicit semantic outcomes, and explicit
+barriers rather than a universal generation counter or cross-layer epoch
+choreography.
 
 The critical decisions are:
 
 - immutable per-connection `SessionHandle` identity;
 - confirmed Session-scoped `TargetLease` identity;
 - one `ControlLease` per remote-ownership period;
+- a prepared/active/closing local activation guard so acquisition vs invalidation
+  has a deterministic linearization point;
 - synchronous idempotent local return independent of actor/Android scheduling;
 - one bounded synchronous `InputIngress` on the CGEventTap boundary;
 - suppression decisions coupled to ingress admission results;
@@ -71,8 +74,10 @@ The critical decisions are:
 - no blocking semaphore bridge;
 - explicit semantic outcomes for persistent key/button transitions;
 - non-abandonment of already-issued persistent transitions;
-- a **remote-close fence** that blocks new Control acquisition until the old
-  Control's remote state is clean;
+- a **remote-close fence armed synchronously at local return** so actor scheduling
+  cannot permit premature reacquisition;
+- retirement of all previously issued stateful lane work before that fence is
+  considered clean;
 - terminal old-target cleanup before helper-global route mutation;
 - a **Session recovery cleanliness fence** before a dirty replacement Session
   may become control-capable;
@@ -122,7 +127,7 @@ These lifecycles must not collapse into one global application state machine or
 one global generation. Remote cleanliness and remote-close readiness are
 **gating conditions** on these lifecycles, not extra mutable owners.
 
-## 2. Immutable handles and leases
+## 2. Immutable handles and one-way validity
 
 A concrete connection is represented by an immutable **SessionHandle**:
 
@@ -148,6 +153,11 @@ design.
 references and identity are immutable; validity moves only toward
 closure/invalidation. Typed IDs may exist for diagnostics/tests, but correctness
 must not depend on comparing unrelated raw counters.
+
+Session, Target, host capability/capture readiness, and Control activation must
+expose enough one-way local validity state that a concurrent invalidation can
+prevent or immediately tear down a prepared/active Control without waiting for
+an actor round trip.
 
 ## 3. Target selection is remote state
 
@@ -181,26 +191,33 @@ routing, and phone-vs-DeX keyboard routing remains a physical-evidence question
 
 ## 4. One ControlLease owns one remote-ownership period
 
-Entering remote control creates one **ControlLease**:
+Entering remote control prepares one **ControlLease** with a small local
+activation guard:
 
 ```text
-open -> closed
+prepared -> active -> closing -> closed
+     \----------------> closing
 ```
 
-It binds:
+The guard is local/thread-safe; it is not a remote lifecycle or a global epoch.
+It exists so acquisition and invalidation have one deterministic winner.
+
+A ControlLease binds:
 
 - exact SessionHandle;
 - exact TargetLease;
 - one host SuppressionLease;
-- one synchronous InputIngress; and
-- one asynchronous DeliveryWorker/closing context.
+- one synchronous InputIngress;
+- one asynchronous DeliveryWorker/closing context; and
+- one pre-created remote-close fence/return handle that can be armed
+  synchronously without actor scheduling.
 
 No input callback may infer remote authority from a global boolean or mutable
 "current session" reference. It must possess the current lease-bound ingress.
 Late callbacks holding an old ingress can only observe closed/rejected admission;
 they can never become valid for a replacement ControlLease.
 
-### Fail-closed acquisition
+### Fail-closed acquisition and its linearization point
 
 Acquisition order is part of the safety contract:
 
@@ -208,28 +225,41 @@ Acquisition order is part of the safety contract:
 2. snapshot exact SessionHandle + TargetLease;
 3. verify the Session/Target context is control-capable — no dirty Session
    recovery requirement and no predecessor remote-close fence pending;
-4. create InputIngress + DeliveryWorker bound to those exact resources;
-5. prepare ControlLease + synchronous local-return handle;
-6. atomically install the SuppressionLease + exact ingress into the host
-   suppression boundary; and
-7. only then publish Control as remote-owned.
+4. create the **prepared** ControlLease, InputIngress, DeliveryWorker, local-return
+   handle, and close fence bound to those exact resources;
+5. register/establish one-way invalidation linkage so capability/capture,
+   Session, or Target invalidation can synchronously move the prepared/active
+   ControlLease toward `closing` before async reconciliation;
+6. immediately before host suppression installation, revalidate all captured
+   local validity/readiness tokens;
+7. atomically install SuppressionLease + exact ingress **only if** the
+   ControlLease can linearize `prepared -> active`; and
+8. only then publish/projection-update remote ownership.
 
-If any step fails, synchronously release any installed suppression/ingress and
-close/cancel partial resources. Remain local.
+The `prepared -> active` transition plus host suppression installation is the
+local acquisition linearization point. It must be one bounded local critical
+section or an equivalent CAS/rollback protocol with the same proof.
 
-No fallible remote operation belongs after host suppression installation. Any
-presentation/actor projection that follows installation is not the authority for
-host safety; the prepared local-return handle is already valid.
+Concurrent invalidation is resolved fail-closed:
 
-The host suppression boundary must never consume local input without already
-having a bounded ingress and synchronous local-return path.
+- if invalidation wins first and moves the lease out of `prepared`, installation
+  fails and no host event is suppressed;
+- if activation wins first, the same invalidation immediately invokes the
+  synchronous local-return path and releases suppression; and
+- no fallible remote operation belongs after host suppression installation.
+
+If any setup step fails, synchronously release any installed suppression/ingress
+and close/cancel partial resources. Remain local.
+
+Any presentation/actor projection after activation is not the authority for host
+safety. The prepared return handle and one-way validity are already effective.
 
 ## 5. Synchronous local-return gate
 
-Actor scheduling is **not** part of pointer safety.
+Actor scheduling is **not** part of pointer safety or remote reacquisition safety.
 
-Every open ControlLease exposes one idempotent thread-safe local-return gate.
-Triggers include:
+Every prepared/active ControlLease exposes one idempotent thread-safe local-return
+gate. Triggers include:
 
 - normal boundary return;
 - watchdog;
@@ -245,15 +275,22 @@ Triggers include:
 
 The first caller wins. The bounded local sequence is:
 
-1. atomically mark ControlLease closed for ordinary remote authority;
+1. atomically move the ControlLease to `closing` and **arm/publish its predecessor
+   remote-close fence synchronously**, thereby closing remote-control eligibility
+   before any actor reconciliation;
 2. close InputIngress immediately;
 3. synchronously release/clear HostSuppressionController's active
    SuppressionLease and current-ingress slot; and
 4. schedule — without waiting — ControlCoordinator reconciliation,
-   DeliveryWorker remote-close work, diagnostics, and Session trust decisions.
+   DeliveryWorker close-fence resolution, diagnostics, and Session trust
+   decisions.
 
 Steps 1-3 are the local safety boundary. They contain no transport write, actor
 `await`, main-thread dispatch, helper response, or remote cleanup.
+
+The actor/coordinator may project or reconcile the already-armed fence, but it
+must never be responsible for creating the first exclusion against replacement
+Control acquisition.
 
 Lock ordering must be explicit. No arbitrary callback may execute while the tiny
 safety-state lock is held. Deinitialization is defense in depth, not the primary
@@ -283,16 +320,29 @@ release, the triggering event passes through unchanged.
 Local safety completes at the synchronous local-return gate. Remote state may
 still need reconciliation afterward.
 
-Every closing Control therefore owns a bounded **remote-close fence**. The fence
-covers, in order:
+Every closing Control owns a bounded **remote-close fence**. The fence cannot
+complete until:
 
-1. all persistent transitions already issued before ingress closure;
-2. semantic outcome reconciliation for those transitions;
-3. the final confirmed-held ledger for the closing Control; and
-4. terminal cleanup/release of that known persistent state under the old
-   routing/backend context.
+1. every previously issued stateful lane command from that Control has retired at
+   the RemoteCommandLane boundary so none can execute after a replacement
+   Control's first command;
+2. every already-issued persistent transition has a semantic outcome or bounded
+   ambiguity classification;
+3. the closing context has its final confirmed-held ledger; and
+4. terminal cleanup/release of that known persistent state has completed under
+   the old routing/backend context or cleanliness has been classified
+   untrustworthy.
 
-While this fence is pending:
+Queued ordinary work that was not issued may be cancelled/sheared off according
+to event-class policy.
+
+For additive motion/scroll, semantic uncertainty does not automatically imply a
+dirty persistent state, but the lane must still prove an ordering boundary: no
+late old additive command may overtake or execute after replacement-Control
+commands. If the transport/lane cannot prove that property after timeout, the
+Session is not trustworthy for immediate reuse.
+
+While the fence is pending:
 
 - host control is already local;
 - no ordinary input may enter the old Control;
@@ -303,8 +353,8 @@ While this fence is pending:
   rather than allowing immediate re-entry.
 
 This prevents normal return followed by immediate edge re-entry from overlapping
-old cleanup with a new DeliveryWorker. It is also the primitive used by target
-change and disconnect/recovery.
+old delivery/cleanup with a new DeliveryWorker. It is also the primitive used by
+target change and disconnect/recovery.
 
 The user never waits synchronously for this fence. If it takes time, CrossInput
 remains local until remote control is safe again.
@@ -344,14 +394,9 @@ The accepted #96 disposition remains authoritative:
 Replace internally queued/callback-sequenced handoff orchestration with a pure
 **HandoffPolicy**.
 
-Inputs are facts such as:
-
-- enabled/disabled;
-- edge entered / entry edge;
-- requested/accepted remote movement acknowledgement; and
-- explicit normal/failure return reason.
-
-Outputs are acquire/remain/return decisions.
+Inputs are facts such as enabled state, edge entry, entry edge,
+requested/accepted remote movement acknowledgement, and return reason. Outputs
+are acquire/remain/return decisions.
 
 HandoffPolicy owns no transport, event tap, task, queue, lock, diagnostics, or
 callback sequencing. ControlCoordinator serializes policy application.
@@ -364,19 +409,19 @@ Validated #45/#37 behavior remains unless deliberately superseded:
 - first post-entry movement cannot instantly trigger return; and
 - hysteresis prevents accidental edge wobble.
 
-A policy decision to acquire remote control is still subject to the capability,
-Session/Target readiness, and predecessor remote-close gates described here.
+A policy decision to acquire remains subject to capability, Session/Target
+readiness, the activation CAS, and predecessor remote-close exclusion.
 
 ## 9. InputIngress and suppression admission
 
-CGEventTap callbacks cannot `await`. Each open ControlLease owns one small
+CGEventTap callbacks cannot `await`. Each active ControlLease owns one small
 lock-protected **InputIngress** that:
 
 - performs O(1) or otherwise strictly bounded synchronous admission;
 - performs no transport I/O;
 - performs no remote await/semaphore wait;
 - returns an immediate admission result; and
-- becomes permanently closed when Control ends.
+- becomes permanently closed when Control begins closing.
 
 One ordered semantic lane covers pointer and keyboard input.
 
@@ -399,14 +444,19 @@ mechanism.
 - successful admission may consume the corresponding host event;
 - intentionally shed additive motion/scroll may be consumed only under the
   explicit bounded-overload policy while Control remains valid; and
-- rejected **non-droppable** key/button/repeat input is not consumed. It invokes
-  synchronous local return and the triggering host event passes through
+- rejected **non-droppable key/button state transitions** are not consumed. They
+  invoke synchronous local return and the triggering host event passes through
   unchanged where CGEventTap semantics permit.
 
-A full/closing ingress cannot silently turn a non-droppable event into host-side
-loss.
+Key-repeat rejection triggers local return under the default strict policy. The
+exact treatment of the triggering repeat event is non-persistent policy to be
+fixed by #106; it must not be mistaken for a held-state transition or create an
+unmatched local persistent state.
 
-## 10. DeliveryWorker owns persistent outcome accounting
+A full/closing ingress cannot silently turn a persistent transition into
+host-side loss.
+
+## 10. DeliveryWorker owns outcome accounting
 
 Each ControlLease owns one **DeliveryWorker**. It is never rebound to another
 Session, Target, or Control.
@@ -420,7 +470,7 @@ Responsibilities:
 - provide movement acknowledgement facts to HandoffPolicy;
 - maintain the host-side ledger of **confirmed** remote held inputs;
 - classify applied/not-applied/ambiguous outcomes; and
-- own the closing remote-close fence after local return.
+- own/resolve the closing remote-close fence after local return.
 
 `requestBlocking()` and semaphore-based async-to-sync bridges are removed.
 
@@ -504,22 +554,22 @@ helper-global route/input state.
 
 ## 12. Target A -> B uses the remote-close fence
 
-A target change must not let old-target persistent state leak across
-`SELECT_DISPLAY`.
+A target change must not let old-target state leak across `SELECT_DISPLAY`.
 
 Safe sequence:
 
-1. invoke Control A synchronous local return;
+1. invoke Control A synchronous local return, which synchronously arms A's
+   remote-close fence;
 2. close ordinary A ingress;
 3. cancel queued ordinary A work not yet issued;
-4. through Control A's remote-close fence, resolve every already-issued
-   persistent transition;
-5. if any issued transition becomes ambiguous, invalidate A's Session and enter
-   Session recovery instead of selecting B on it;
-6. while TargetLease A and route A remain valid, perform terminal cleanup for
+4. retire all already-issued stateful A lane work at the ordered lane boundary;
+5. resolve every already-issued persistent transition;
+6. if a persistent transition is ambiguous, or additive timeout cannot preserve
+   lane ordering, invalidate the Session and enter recovery instead of selecting
+   B on it;
+7. while TargetLease A and route A remain valid, perform terminal cleanup for
    the now-known confirmed held state;
-7. wait only under a bounded **async** cleanup policy for the remote-close fence;
-8. if clean, invalidate TargetLease A;
+8. if the remote-close fence completes clean, invalidate TargetLease A;
 9. enqueue ordered `SELECT_DISPLAY(B)` on the same RemoteCommandLane;
 10. publish TargetLease B only after helper confirmation; and
 11. only then permit Control B.
@@ -529,8 +579,7 @@ prevents a trustworthy old-target state, do not reuse that Session as clean.
 Enter the Session recovery fence.
 
 TargetLease A remains valid long enough for privileged terminal cleanup, but no
-new ordinary A input is admitted. Additive motion/scroll may be discarded when
-no persistent state becomes ambiguous.
+new ordinary A input is admitted.
 
 ## 13. Session recovery requires remote-state cleanliness proof
 
@@ -688,24 +737,31 @@ moving to B inside a dirty Session.
 
 ### Control
 
-Host ownership returns immediately:
+Host ownership and local activation guard:
+
+```text
+prepared -> active -> closing -> closed
+     \----------------> closing
+```
+
+Host-facing presentation may project:
 
 ```text
 disabled -> local
 local    -> remote(ControlLease)
 remote   -> local
 local    -> disabled
-remote   -> disabled   // synchronous local return first
+remote   -> disabled
 ```
 
 Remote eligibility is separately fenced:
 
 ```text
 controlEligible
-  -> remote(ControlLease)
-  -> remoteClosePending(old Control)
-  -> controlEligible                  // clean close
-  -> sessionRecoveryRequired          // ambiguous close
+  -> active(ControlLease)
+  -> remoteClosePending(old Control)    // armed synchronously by return gate
+  -> controlEligible                    // clean close
+  -> sessionRecoveryRequired            // ambiguous close
 ```
 
 `remoteClosePending` never traps host control. It only blocks new remote
@@ -720,23 +776,24 @@ open -> closing(remote-close fence) -> closed
 ```
 
 Ordinary ingress closes immediately on local return. The closing context exists
-only to resolve already-issued persistent outcomes and terminal cleanup. It is
-never rebound to new input.
+only to retire prior stateful work, resolve persistent outcomes, and perform
+terminal cleanup. It is never rebound to new input.
 
 ## Failure-domain matrix
 
 | Failure | Immediate host action | Remote consequence |
 | --- | --- | --- |
-| missing/revoked capability | local/blocked | healthy Session/Target may remain; close fence still resolves prior persistent state |
-| event-tap/capture failure | local/blocked | healthy Session/Target may remain only after prior Control close proves clean |
+| missing/revoked capability | local/blocked | healthy Session/Target may remain; close fence still resolves prior state |
+| event-tap/capture failure | local/blocked | healthy Session/Target may remain only after predecessor close proves clean |
+| invalidation racing acquisition | stay/return local | prepared activation loses CAS or active lease is synchronously closed |
 | ordinary boundary return | local immediately | new Control blocked until remote-close fence proves clean |
-| non-droppable admission saturation | local; triggering event not consumed | close fence classifies prior issued persistent state |
-| additive motion/scroll timeout | local if required | Session may remain reusable if lane/protocol remains trustworthy and close proves clean |
-| proven-not-applied key/button | local/fail-safe | ledger unchanged for that transition; close prior confirmed holds; reuse only if clean |
-| ambiguous key/button | local immediately | Session recovery if close cannot prove neutral state |
-| target change/disappearance | local immediately | target switch only after clean old close; otherwise Session recovery |
-| helper/transport disconnect | local immediately | invalidate Session/Target; recovery fence if persistent state may be dirty |
-| external-control takeover | local; triggering event unchanged | close fence still resolves prior remote state |
+| non-droppable admission saturation | local; triggering transition not consumed | close fence classifies prior issued state |
+| additive motion/scroll timeout | local if required | reuse only if lane ordering remains trustworthy and close proves clean |
+| explicit proven-not-applied key/button result | local/fail-safe | ledger unchanged for transition; clean prior confirmed holds before reuse |
+| ambiguous key/button result | local immediately | Session recovery if close cannot prove neutral state |
+| target change/disappearance | local immediately | switch only after clean old close; otherwise Session recovery |
+| transport/helper disconnect | local immediately | invalidate Session/Target; recovery fence if persistent state may be dirty |
+| external-control takeover | local; triggering event unchanged | predecessor remote-close still runs |
 
 Lower-domain failures must not be reclassified as unrelated lifecycle failures
 merely to reuse an existing API.
@@ -805,11 +862,13 @@ Forbidden:
 
 ### ControlCoordinator
 
-Intended as a Swift actor or equivalent explicit serial executor. Owns Control
-lifecycle, remote-control eligibility, predecessor remote-close gating, and pure
-HandoffPolicy serialization.
+Intended as a Swift actor or equivalent explicit serial executor for high-level
+Control lifecycle and pure HandoffPolicy serialization.
 
-Local host return never waits for this actor.
+It also owns the **logical** remote-control eligibility state, but the local
+activation/close guard exposed to acquisition and the synchronous return handle
+must arm exclusion without waiting for actor scheduling. Actor state reconciles
+that already-linearized local fact; it does not create it.
 
 ### SessionManager / concrete Session
 
@@ -820,8 +879,8 @@ correlation, disconnect state, and RemoteCommandLane.
 ### DeliveryWorker
 
 One async worker/closing context per ControlLease. It drains only that ingress,
-talks only to the captured Session/routing context, and owns that Control's
-remote-close fence.
+talks only to the captured Session/routing context, and owns resolution of that
+Control's remote-close fence.
 
 ### Blocking rule
 
@@ -836,10 +895,13 @@ Cancellation semantics depend on the remote commit point:
 - queued ordinary work not issued may be dropped/cancelled according to event
   class;
 - ingress closure prevents new work;
-- already-issued persistent transitions retain old correlation/outcome ownership
-  until resolved or classified ambiguous;
+- already-issued stateful work must retire at the ordered lane boundary before
+  predecessor close is considered complete;
+- already-issued persistent transitions additionally retain old correlation/
+  semantic-outcome ownership until resolved or classified ambiguous;
 - terminal cleanup is privileged closing work;
-- a pending remote-close fence blocks replacement Control acquisition; and
+- a synchronously armed remote-close fence blocks replacement Control
+  acquisition; and
 - Session invalidation/replacement cannot convert unresolved persistent state
   into a clean new Session without the recovery fence.
 
@@ -854,10 +916,11 @@ Mac control returns without Android, actor, or main-thread scheduling.
 HostSuppressionController watchdog/emergency release.
 
 ### I2 — No Cross-Control Delivery
-Work admitted for Control A cannot reach Control B.
+Work admitted for Control A cannot execute as Control B work or overtake B's
+stateful lane commands.
 
 **Enforced by:** permanently closed per-Control InputIngress + per-Control
-DeliveryWorker/closing context.
+DeliveryWorker + predecessor remote-close lane-retirement barrier.
 
 ### I3 — No Cross-Session Retargeting
 Work holding Session A cannot redirect into Session B.
@@ -873,7 +936,8 @@ terminal cleanup, and ordered selection barrier.
 ### I5 — One Suppression Owner
 At most one valid SuppressionLease consumes host input.
 
-**Enforced by:** HostSuppressionController single-owner slot + idempotent release.
+**Enforced by:** HostSuppressionController single-owner slot + activation CAS +
+idempotent release.
 
 ### I6 — Bounded Capture Work
 CGEventTap remains bounded/nonblocking.
@@ -881,13 +945,14 @@ CGEventTap remains bounded/nonblocking.
 **Enforced by:** synchronous bounded InputIngress; no remote/main/actor wait.
 
 ### I7 — Persistent Transitions Are Never Silently Lost
-Key/button transitions are ordered and semantically classified.
+Key/button state transitions are ordered and semantically classified.
 
 **Enforced by:** one ordered lane, non-droppable admission, admission-bound
 suppression, explicit semantic outcomes, and non-abandonment after wire commit.
 
 ### I8 — Cleanup Never Blocks Local Return
-Remote close/cleanup begins only after local safety release and remains bounded.
+Remote close/cleanup begins only after local exclusion is established and local
+suppression is released; it remains bounded asynchronously.
 
 **Enforced by:** synchronous local-return ordering + async remote-close fence.
 
@@ -909,12 +974,19 @@ Selected Target ownership does not imply explicit backend display routing.
 **Enforced by:** typed routing scope + physical-evidence-backed backend claims.
 
 ### I12 — Control Reacquisition Cannot Cross a Dirty Close
-A replacement Control cannot start while the predecessor Control still has
-issued persistent outcomes or terminal cleanup pending.
+A replacement Control cannot start while the predecessor still has issued
+stateful work, persistent outcomes, or terminal cleanup pending.
 
-**Enforced by:** ControlCoordinator remote-control eligibility + per-Control
-remote-close fence. Clean completion re-enables acquisition; ambiguity enters
-Session recovery.
+**Enforced by:** synchronously armed predecessor close guard + ControlCoordinator
+remote-control eligibility + per-Control remote-close fence.
+
+### I13 — Acquisition Races Fail Closed
+Capability/capture, Session, or Target invalidation racing Control acquisition
+cannot leave suppression active under an invalid prepared owner.
+
+**Enforced by:** one-way validity linkage + final revalidation + bounded
+`prepared -> active`/suppression-install linearization + synchronous return if
+invalidation loses that race.
 
 ## Deterministic proof/test strategy
 
@@ -925,17 +997,18 @@ macOS/Samsung behavior.
 | Invariant | Deterministic proof strategy |
 | --- | --- |
 | I1 | race watchdog/emergency/failure callers; delay ControlCoordinator indefinitely; assert ingress closes and suppression releases exactly once |
-| I2 | retain stale ingress/worker from Control A, acquire B only after A close, then attempt late A admission/delivery; assert B is unreachable |
+| I2 | keep old additive/stateful work in flight, return A, request B, and assert B cannot activate until old lane work retires; late A work never executes after B commands |
 | I3 | queue work on Session A, replace with B, then complete/cancel A responses; assert no command/result reaches B state |
 | I4 | model A -> B with queued additive work, issued persistent work, late result, close fence, cleanup, and selection; assert selection cannot pass unresolved A state |
 | I5 | concurrent acquire/release attempts; assert exactly one active SuppressionLease and first-winner release |
 | I6 | source-level prohibition checks + bounded-ingress stress/benchmark; no semaphore/remote await on event callback path |
-| I7 | queue saturation must return rejected non-droppable input locally; exercise applied/notApplied/ambiguous outcomes, late positive results, and reordering attempts |
+| I7 | queue saturation must return rejected persistent transition locally; exercise applied/notApplied/ambiguous outcomes, late positive results, and reordering attempts |
 | I8 | make cleanup/helper never respond; assert host return completes before cleanup timeout and remote-close terminates to recovery boundedly |
 | I9 | make Session A persistent state ambiguous, connect candidate B, withhold reset/cleanup proof; assert B cannot publish a usable TargetLease or acquire Control |
 | I10 | inject sentinel pointer/key/HID/clipboard payloads into error paths; assert diagnostics contain metadata only |
 | I11 | type/unit tests prevent session-routed backends from claiming arbitrary TargetLease routing; physical evidence gates device claims |
-| I12 | return local while persistent result/cleanup is pending, immediately request reacquisition, and assert no new Control/ingress exists until clean close; ambiguity must enter Session recovery |
+| I12 | return local while old stateful/persistent work is pending, delay actor reconciliation, immediately request reacquisition, and assert the synchronously armed close guard rejects it until clean; ambiguity enters Session recovery |
+| I13 | inject capability/Session/Target invalidation at every acquisition phase, especially after final validation but before/during suppression installation; assert invalidation-first prevents activation and activation-first synchronously returns local |
 
 Issue-level adversarial tests must additionally cover capability loss without
 Session failure, event-tap failure, external takeover, target disappearance,
@@ -952,7 +1025,7 @@ timeouts.
 | `RemoteSession` | concrete async session + ordered RemoteCommandLane |
 | `requestBlocking()` | **delete** |
 | `TargetSelectionController` | Target owner + TargetLease + close/cleanup/select barriers |
-| `ControlHandoffController` | replace with ControlCoordinator + ControlLease + remote-close eligibility |
+| `ControlHandoffController` | replace with ControlCoordinator + ControlLease + local activation/close guard |
 | `EdgeSwitchStateMachine` internal queue/sequences | pure HandoffPolicy |
 | `TransitionSequenceGate` | **delete** |
 | monolithic `InputCapture` | split capability/event-tap/translation/edge/suppression ownership |
@@ -1000,8 +1073,17 @@ Rejected. It combines unrelated lifecycles and weakens the CGEventTap/local
 fail-safe boundary.
 
 ### Actors everywhere
-Rejected. CGEventTap admission is synchronous by nature; a small bounded lock is
-more honest there.
+Rejected. CGEventTap admission and local-return exclusion are synchronous by
+nature; a small bounded local guard is more honest there.
+
+### Let the actor arm remote-close exclusion
+Rejected. Actor scheduling/reentrancy could let an acquire request race ahead of
+return reconciliation. The exclusion is armed synchronously by the return gate;
+the actor only reconciles it.
+
+### Check Session/Target only once before acquisition
+Rejected. Invalidation can race the check. Prepared/active Control needs one-way
+validity linkage and a local activation linearization point.
 
 ### One global generation
 Rejected. Session, Target, and Control are intentionally independent resources.
@@ -1011,8 +1093,12 @@ Rejected. They make cross-class persistent ordering emergent rather than owned.
 
 ### Allow immediate re-entry after local return
 Rejected. Local suppression may be safely released before remote state is clean;
-that must not authorize a new DeliveryWorker to overlap predecessor outcome/
-cleanup work.
+that must not authorize a new DeliveryWorker to overlap predecessor work.
+
+### Ignore old additive work at close because it is non-persistent
+Rejected. It may be safe to discard queued additive work, but already-issued
+stateful work still needs an ordered retirement boundary so it cannot execute
+after replacement-Control commands.
 
 ### Fire-and-forget keyboard plus helper teardown
 Rejected. A live Session may still reject/drop an individual key transition.
@@ -1038,10 +1124,12 @@ Positive:
 
 - stale work is isolated primarily by resource ownership;
 - old Session work cannot redirect into a replacement;
+- acquisition/invalidation has a deterministic local winner;
 - local pointer safety is independent of Android and actor scheduling;
-- suppression admission cannot silently swallow rejected non-droppable input;
-- normal return cannot race immediate re-entry across dirty remote state;
-- target changes reconcile old persistent state before route mutation;
+- remote reacquisition exclusion is also independent of actor scheduling;
+- suppression admission cannot silently swallow rejected persistent transitions;
+- normal return cannot race immediate re-entry across old stateful work;
+- target changes reconcile old state before route mutation;
 - dirty Session replacement cannot bypass unresolved held state;
 - persistent state becomes outcome-based rather than write-based;
 - one ordered lane simplifies state ordering and cleanup;
@@ -1055,6 +1143,8 @@ Cost:
 - structure-coupled tests must be replaced;
 - temporary migration adapters may be needed;
 - remote re-entry can be briefly unavailable while bounded close/cleanup resolves;
+- acquisition needs a small thread-safe activation/close guard in addition to
+  high-level actor coordination;
 - #141 adds additive CXI v1 protocol work;
 - #107 must prove/repair backend cleanup and recovery semantics;
 - runtime slices require repeated exact-head physical verification; and
@@ -1069,6 +1159,7 @@ Before accepting this ADR:
   model rather than merely restating it;
 - no contradictory current architecture/agent rule remains;
 - every major mutable lifecycle has one authoritative owner;
+- acquisition/return linearization is explicit;
 - blocking/cancellation semantics are explicit;
 - every cross-owner ordering relation is explicit;
 - named invariants have enforcement points and deterministic proof strategy; and
@@ -1078,25 +1169,28 @@ Review must trace at least:
 
 1. normal handoff and return;
 2. Control acquisition failure halfway through setup;
-3. local return while ControlCoordinator is delayed;
-4. target A -> B with ordinary input queued/in-flight;
-5. target A -> B with issued/confirmed held key/button;
-6. target disappearance before reconciliation/cleanup completes;
-7. Session replacement with queued/in-flight delivery, including dirty-state
+3. Session/Target/capability invalidation racing acquisition before/during
+   suppression installation;
+4. local return while ControlCoordinator is delayed;
+5. target A -> B with ordinary input queued/in-flight;
+6. target A -> B with issued/confirmed held key/button;
+7. target disappearance before reconciliation/cleanup completes;
+8. Session replacement with queued/in-flight delivery, including dirty-state
    recovery before replacement becomes control-capable;
-8. capability revocation with healthy Session;
-9. event-tap failure;
-10. non-droppable InputIngress saturation + triggering-event pass-through;
-11. helper-side keyboard rejection while Session stays alive;
-12. key/button timeout after send;
-13. late positive persistent result after Control closes;
-14. immediate remote re-entry attempt while predecessor close fence is pending;
-15. additive movement timeout;
-16. external-control takeover;
-17. watchdog/emergency return;
-18. helper/backend cleanup including InputManager pointer state;
-19. stale response after replacement; and
-20. diagnostics payload isolation.
+9. capability revocation with healthy Session;
+10. event-tap failure;
+11. non-droppable InputIngress saturation + triggering-transition pass-through;
+12. helper-side keyboard rejection while Session stays alive;
+13. key/button timeout after send;
+14. late positive persistent result after Control closes;
+15. immediate remote re-entry attempt while predecessor close fence is pending
+   and actor reconciliation is deliberately delayed;
+16. already-issued additive work at return, including additive timeout;
+17. external-control takeover;
+18. watchdog/emergency return;
+19. helper/backend cleanup including InputManager pointer state;
+20. stale response after replacement; and
+21. diagnostics payload isolation.
 
 This PR is docs-only. It creates no new runtime claim, so new physical testing is
 not required for the ADR itself. Each implementation slice supplies exact-head
