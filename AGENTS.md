@@ -15,11 +15,11 @@ CrossInput is **DeX-first, Android-capable**.
 - ADB/app_process is the current/default transport.
 - Alternate local transports and CXI v2 are approved future extension points, not permission to implement speculative frameworks.
 
-Existing justified abstractions stay unless a concrete defect or requirement justifies changing them. New abstractions require a current requirement or an explicitly accepted extension with a concrete use case.
+Preserve validated product behavior, device/protocol facts, safety invariants, and reproducible evidence. Existing internal abstractions are not compatibility requirements. Under Architecture Leap #101 / ADR-0016, an abstraction may be replaced or deleted when the approved ownership/concurrency design makes that the safer and clearer implementation. New abstractions still require a concrete responsibility and must not broaden product scope speculatively.
 
 ## Absolute prohibitions (Hard rules)
 
-1. **Never trap the pointer** — code that holds the macOS pointer is not allowed on any path. Exception: test-only scripts explicitly approved by the user.
+1. **Never leave the pointer trapped** — intentional host confinement is allowed only while one valid remote-control SuppressionLease is active under the accepted #96 P0 contract. It must always have an idempotent local release, watchdog, and emergency return; Session/Target/delivery/capability failure must fail toward local control without waiting for Android.
 2. **No "verified complete" claim without on-device logs** — success cannot be claimed from emulator/local tests alone. Requires real-device ADB logs + screen confirmation for device-dependent behavior.
 3. **No hardcoded display ID 2** — display IDs differ per device/settings. The helper discovers all displays via `DisplayManager` and selection uses the target model.
 4. **No logging of keystrokes / clipboard / input payloads** — key codes, clipboard contents, and HID report payloads are never logged. In debugging, log metadata only (type, length, direction).
@@ -31,7 +31,7 @@ Existing justified abstractions stay unless a concrete defect or requirement jus
 10. **English for all repository artifacts** — commits, PR titles/descriptions, issues, docs, and code comments are written in English. Korean is only allowed in chat with the user. New documents must be written in English; existing Korean documents are migrated to English as they are updated.
 11. **Do not conflate bidirectional clipboard with bidirectional input** — clipboard may synchronize both ways; Android → macOS pointer/keyboard is a separate product decision and is currently a non-goal.
 12. **Do not broaden the product through refactoring** — Windows/Linux hosts, simultaneous multi-Android control, new target families, alternate transports, or CXI v2 implementation require explicit scope approval and must not be smuggled into cleanup work.
-13. **Do not rewrite working architecture for purity** — Session, Control, Target, transport, target normalization, and Android backend seams remain unless a demonstrated problem requires a targeted change.
+13. **Do not preserve architecture merely to minimize the diff** — Architecture Leap #101 and ADR-0016 authorize broad internal redesign when it materially improves ownership, lifecycle correctness, concurrency safety, or testability. Preserve validated behavior and evidence, not pre-Leap class/module shape. Decompose large migrations into coherent reviewable slices; never use “rewrite freedom” to mix unrelated product/protocol/transport changes.
 
 ## Device-specific routing rules
 
@@ -59,7 +59,7 @@ Existing justified abstractions stay unless a concrete defect or requirement jus
 
 1. Read the relevant product, architecture, ADR, protocol, and testing docs before working.
 2. Create or identify a GitHub issue before implementation (labels required: `type/*`, `area/*`, `priority/*`) and record progress in the issue.
-3. Keep implementation changes bounded to the issue. Do not mix product/protocol/transport migrations into unrelated fixes.
+3. Keep changes bounded to the issue's responsibility and accepted architecture. “Bounded” means one independently reviewable purpose, not preserving old files/classes or artificially minimizing the diff. Do not mix product/protocol/transport migrations into unrelated fixes.
 4. After code changes: build + lint + related tests.
 5. Record verification results in `docs/research/` or in issues/PRs.
 6. PRs must reference the issue and must not be merged without the required verification record.

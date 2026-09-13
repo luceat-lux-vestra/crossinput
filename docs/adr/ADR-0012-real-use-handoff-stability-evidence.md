@@ -3,7 +3,15 @@
 **Status:** Accepted
 **Date:** 2026-08-25
 **Issue:** #64
-**Related:** AGENTS.md (Verification criteria), docs/testing.md (Verification levels), ADR-0009, ADR-0011
+**Related:** AGENTS.md (Verification criteria), docs/testing.md (Verification levels), ADR-0009, ADR-0011, ADR-0016
+
+> **Architecture Leap note (2026-09-13):** this ADR remains the authority for
+> physical Level-3 evidence. Its reset rules are responsibility/behavior based,
+> not tied to pre-Leap class names. Historical names such as `InputCapture`,
+> `InputSender`, and `ControlHandoffController` identify the old implementation
+> of those responsibilities only. Replacing those classes under ADR-0016 does
+> not avoid an evidence-window reset when the production behavior that can affect
+> handoff/return safety changes.
 
 ## Context
 
@@ -58,8 +66,8 @@ feature/release gate (Level 3), not a per-PR merge gate.
 
 One physical cycle requires a real physical target:
 
-```
-local -> successful physical remoteActive entry -> usable remote session
+```text
+local -> successful physical remote-active entry -> usable remote session
       -> return/local recovery
 ```
 
@@ -76,18 +84,23 @@ reads `.git` at runtime. Logs mixing candidates cannot produce a PASS.
 
 ### Failure taxonomy
 
-Diagnostics must allow classifying every observed anomaly into:
+Diagnostics must allow classifying every observed anomaly into semantic
+categories that survive architecture changes:
 
-- normal return
-- external takeover
-- emergency return
+- normal return;
+- external takeover;
+- emergency return;
 - genuine transport/session failure (ADB disconnect, helper crash, app
-  disable)
-- `remoteUnavailable` force-return
-- watchdog recovery
-- queue shed / scroll coalescing pressure events
-- cancelled-delivery burst
-- held-button cleanup attempted/succeeded/failed
+  disable);
+- explicit fail-safe return because remote input/control is unavailable;
+- watchdog recovery;
+- bounded-admission / additive-coalescing pressure events;
+- cancelled/retired remote work caused by lifecycle closure/replacement;
+- held-input cleanup attempted/succeeded/failed/ambiguous; and
+- Session/remote-state recovery required because cleanliness cannot be proved.
+
+Concrete diagnostic event names may change during the Leap, but the analyzer
+must preserve equivalent semantic classification.
 
 Exactly-classified environmental events (ADB disconnect, helper crash,
 external takeover, emergency shortcut) are recorded but do not count as
@@ -101,39 +114,56 @@ human adjudication before any stability claim.
 ### Privacy boundaries
 
 Raw input is never logged (AGENTS.md hard rule 4). Evidence consists of
-metadata only: transition reasons, counts, timings, sequence numbers,
-candidate identity.
+metadata only: transition reasons, counts, timings, sequence/ownership identity
+metadata, candidate identity, and cleanup/recovery classification. Raw pointer
+coordinates/deltas, key codes/typed contents, HID reports, and clipboard
+contents remain prohibited.
 
 ### Evidence sufficiency
 
 A stability verdict requires, per candidate window:
 
-- `completed physical cycles >= 100`
-- pointer trap = 0
-- known stuck-button incident = 0
-- unexplained `remoteUnavailable` = 0
-- healthy-session watchdog recovery = 0
-- unclassified control failure = 0
-- every other observed event classified into the taxonomy above
+- `completed physical cycles >= 100`;
+- pointer trap = 0;
+- known stuck-key/button incident = 0;
+- unexplained fail-safe remote-unavailable return = 0;
+- healthy-session watchdog recovery = 0;
+- unclassified control failure = 0; and
+- every other observed event classified into the taxonomy above.
 
 An offline analyzer (e.g. `scripts/analyze-handoff-stability.sh`) emits these
 counters and a fail-closed `STABILITY_GATE` verdict from sanitized diag logs.
 
 ## Evidence-window reset rules
 
-Accumulated cycle credit belongs to a candidate lineage. Start a **new**
-window when a production change lands in:
+Accumulated cycle credit belongs to one release-candidate lineage. Start a
+**new** evidence window whenever a production change can materially affect any
+of these behaviors/responsibilities, regardless of the concrete class/file name:
 
-- `InputCapture`
-- `InputSender`
-- `ControlHandoffController`
-- edge-switch state machine
-- session lifecycle management
-- helper pointer routing
-- CXI protocol semantics relevant to handoff
+- host capability, event capture, suppression, confinement, emergency/watchdog
+  release, or external-control takeover;
+- local/remote Control ownership, acquisition/return linearization, edge/handoff
+  policy, or remote-control eligibility;
+- InputIngress/admission, backpressure/coalescing policy, ordered delivery, or
+  stateful command ordering;
+- persistent key/button outcome accounting, remote-close fencing, held-input
+  cleanup, or ambiguity/recovery classification;
+- Session lifecycle, replacement/reconnect, Target selection/routing barriers,
+  or remote-state cleanliness/recovery;
+- helper pointer/keyboard routing, backend selection/failover, backend cleanup or
+  reset semantics; or
+- CXI protocol/capability/result semantics relevant to handoff, persistent input,
+  target routing, cleanup, or recovery.
 
-Do **not** reset for changes with no effect on handoff semantics (docs,
-comments, CI config, README fixes, unrelated subsystems).
+Historical examples of reset-sensitive implementations include `InputCapture`,
+`InputSender`, `ControlHandoffController`, `EdgeSwitchStateMachine`, Session /
+Target controllers, and helper pointer routing. Their replacement under
+Architecture Leap does not narrow this policy.
+
+Do **not** reset for changes with no effect on handoff/return semantics (docs,
+comments, CI configuration, README fixes, unrelated subsystems). When impact is
+uncertain, strict evidence policy treats UNKNOWN as reset-sensitive until the
+change is proven behavior-neutral.
 
 ## Alternatives Rejected
 
@@ -153,17 +183,21 @@ comments, CI config, README fixes, unrelated subsystems).
   10+" rule): kept only where a threshold has a stated rationale (e.g.
   reproducing an intermittent defect); otherwise replaced by targeted
   acceptance scoped to what the change could affect.
+- **Reset rules keyed to source class names** — rejected after Architecture Leap
+  #101. A class rename/replacement must not preserve stale physical-cycle credit
+  when the same safety-critical production behavior changed.
 
 ## Consequences
 
 - Bug-fix PRs (#63-style) merge on targeted physical acceptance; feature
   stabilization tracks the aggregate.
 - Users are never asked to mechanically repeat a handoff 100 times.
-- Requires runtime candidate identity in logs and eventually an offline
-  analyzer script; until those exist, Level-3 verdicts are made by hand from
-  sanitized diag excerpts.
-- Stability tracking issue must record the active candidate window and reset
-  events.
+- Architecture Leap runtime slices that materially change the responsibilities
+  above reset the Level-3 candidate window even when they delete/rename all old
+  implementation types.
+- Requires runtime candidate identity and diagnostics sufficient to map new
+  architecture events back to the semantic failure taxonomy.
+- Stability tracking issue records the active candidate window and reset events.
 
 ## Validation
 
@@ -171,6 +205,8 @@ comments, CI config, README fixes, unrelated subsystems).
   (Verification levels, Physical handoff cycle definition).
 - Applied to PR #63: acceptance reduced to targeted #62 physical checks; the
   100-cycle section moved to this release-level gate.
+- ADR-0016 keeps this physical-evidence policy authoritative while replacing the
+  implementation ownership model.
 
 ## Revisit Conditions
 
@@ -181,3 +217,6 @@ comments, CI config, README fixes, unrelated subsystems).
   extend diagnostic metadata rather than loosening the fail-closed rule.
 - If wireless ADB latency produces legitimate timeouts during accumulation,
   handle timeout tuning as a separate measured issue, not inside this gate.
+- If a future architecture introduces a new responsibility that can affect
+  handoff/return safety, add that responsibility category to the reset policy;
+  do not key the policy to a particular source filename.

@@ -1,12 +1,14 @@
 # ADR-0009: Rebaseline CrossInput as a Host-to-Remote Input Bridge
 
-> Status: **accepted; product-positioning statements superseded by ADR-0013**
+> Status: **accepted historically; product-positioning statements superseded by ADR-0013; internal ownership/concurrency/migration contract superseded by ADR-0016**
 > Date: 2026-08-10
 >
-> ADR-0013 supersedes this ADR only where it defines Samsung DeX as incidental
-> to the product. The architecture decisions on lifecycle separation,
-> transport/backend boundaries, normalized targets, and behavior-preserving
-> migration remain accepted.
+> ADR-0013 supersedes this ADR where it defines Samsung DeX as incidental to the
+> product. ADR-0016 supersedes this ADR's pre-Leap implementation-preservation,
+> lifecycle-coordination, and behavior-preserving migration contract. The
+> validated one-way product topology, CXI v1 compatibility requirement, backend
+> isolation principle, and device-routing evidence remain historical/current
+> constraints where later ADRs have not superseded them.
 
 ## Context
 
@@ -21,16 +23,22 @@ The next feature work should not destabilize the verified v0.1.x paths. The
 rebaseline therefore needs to clarify responsibility boundaries while
 preserving behavior and CXI v1 compatibility.
 
+> **Historical note:** the preservation-first migration strategy described in
+> this ADR was appropriate for the 2026-08 rebaseline. Architecture Leap #101
+> later found that the remaining cross-layer generation/queue/ownership model
+> itself had become a change axis. ADR-0016 is authoritative for the Leap target
+> architecture.
+
 ## Decision
 
 1. CrossInput's core domain is an input bridge, not Samsung DeX. **Superseded for product positioning by ADR-0013; retained as historical context for the architecture rebaseline.**
 2. The current supported topology is one-way macOS → Android.
 3. DeX is one kind of Android remote target/use case. **Superseded for product positioning by ADR-0013, which makes DeX the primary use case while retaining other selectable displays.**
 4. Transport and input backends are isolated from application/domain logic.
-5. Session lifecycle, control-handoff lifecycle, and target lifecycle are separate concepts and must not grow into one state machine.
-6. CXI should move toward platform-neutral semantic input and opaque target identifiers in a future v2; v1 remains the compatibility wire now.
-7. The verified ADB/app_process, UHID, and InputManager implementations remain in place.
-8. Migration is behavior-preserving and limited to real change axes: transport, input backend, remote target, control lifecycle, and session lifecycle.
+5. Session lifecycle, control-handoff lifecycle, and target lifecycle are separate concepts and must not grow into one state machine. **Retained; ADR-0016 defines the replacement ownership model.**
+6. CXI should move toward platform-neutral semantic input and opaque target identifiers in a future v2; v1 remains the compatibility wire now. **Retained; ADR-0016/#103 move platform-neutral semantics in front of the existing v1 remote adapter without requiring v2.**
+7. The verified ADB/app_process, UHID, and InputManager implementations remain in place. **Retained as current production mechanisms, not as a requirement to preserve their surrounding pre-Leap class/module structure.**
+8. Migration is behavior-preserving and limited to real change axes: transport, input backend, remote target, control lifecycle, and session lifecycle. **Superseded for Architecture Leap implementation strategy by ADR-0016. Validated behavior/evidence remains the compatibility baseline; internal architecture may be broadly replaced.**
 
 ## Boundary contract
 
@@ -48,12 +56,17 @@ descriptors. macOS application code must not interpret Android display flags or
 own HID report construction. The helper owns Android-specific normalization and
 backend choice.
 
+> **Current interpretation:** the dependency-direction intent above remains
+> valid. ADR-0016 replaces the concrete pre-Leap orchestration with immutable
+> Session/Target/Control lease ownership, a bounded synchronous capture ingress,
+> and an ordered remote command lane.
+
 ## Alternatives considered
 
 - **Keep DeX as the core domain**: rejected at the time because phone-screen control and future Android targets already existed. ADR-0013 later refined this into a DeX-first, Android-capable product position without making the architecture DeX-only.
-- **Rewrite the repository around Clean Architecture or an event bus**: rejected because it adds structure without a current change axis and raises the risk of breaking pointer safety.
-- **Replace CXI v1 during the refactor**: rejected because protocol migration and behavior-preserving architecture work have different risk profiles.
-- **Abstract every class behind a protocol/interface**: rejected; only the transport, target normalization, handoff, and injection backend seams are justified by current or evidenced change.
+- **Rewrite the repository around Clean Architecture or an event bus**: rejected because it adds structure without a current change axis and raises the risk of breaking pointer safety. **This remains a rejection of architecture-by-fashion. ADR-0016 does authorize broad replacement because concrete ownership/concurrency defects now provide the change axis; it does not introduce a generic Clean Architecture/event-bus framework.**
+- **Replace CXI v1 during the refactor**: rejected because protocol migration and behavior-preserving architecture work have different risk profiles. **Retained.**
+- **Abstract every class behind a protocol/interface**: rejected; only the transport, target normalization, handoff, and injection backend seams are justified by current or evidenced change. **Retained in spirit: ADR-0016 adds only concrete lifecycle/resource boundaries required by the Leap.**
 
 ## Consequences
 
@@ -71,7 +84,9 @@ Negative:
 
 ## Implementation status
 
-The rebaseline boundaries are implemented in the current v1 code:
+The following describes the **pre-Leap implementation produced by this ADR**.
+It is retained as historical evidence, not as a target-shape requirement after
+ADR-0016:
 
 - `SessionController` is the single owner of `SessionState` transitions and stale `RemoteSession` replacement. A connecting session remains private until HELLO and capability negotiation succeed; reconnect exhaustion tears down the transport and enters a terminal failed state.
 - `EdgeSwitchStateMachine` contains only control handoff and pointer-safety states. External failures arrive through `forceReturn(.remoteUnavailable)`.
@@ -85,7 +100,8 @@ The rebaseline boundaries are implemented in the current v1 code:
 - `DisplayDiscovery` merges the public display list with optionally detected system-visible display IDs so a Samsung DeX virtual display is selectable; the hidden API is isolated behind the existing runtime-reflection adapter and falls back to the public list when unavailable.
 - `PointerDispatcher` serializes target selection, metric refresh, injection, and shutdown across the helper stdin and display-callback threads.
 
-This implementation status is separate from device verification status below.
+For the Architecture Leap replacement map, see ADR-0016 and
+`docs/architecture.md`.
 
 ## Validation
 
@@ -98,6 +114,10 @@ This implementation status is separate from device verification status below.
 
 ## Revisit conditions
 
-Revisit the retained architecture decisions when a production need requires a second transport, a second host/target family, bidirectional input, or a CXI v2 migration. Such a change requires its own ADR or a superseding ADR and must not be smuggled into a routine stabilization refactor.
+For current internal ownership/concurrency/migration decisions, use ADR-0016.
+Revisit the retained product/protocol/backend constraints when a production need
+requires a second transport, a second host/target family, bidirectional input,
+or a CXI v2 migration. Such a change requires its own ADR or superseding ADR
+and must not be smuggled into routine stabilization work.
 
 For current product scope and future-extension policy, see ADR-0013.

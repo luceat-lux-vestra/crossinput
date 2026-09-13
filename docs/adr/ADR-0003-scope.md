@@ -1,35 +1,57 @@
 # ADR-0003: Supported Scope (mac→Android One-Way First, Protocol Prepared for Both Directions)
 
-> Status: **accepted**
+> Status: **accepted historically; current product direction superseded by ADR-0013, keyboard scope superseded by ADR-0007**
 > Date: 2026-08-03
+>
+> **Current interpretation:** the one-way macOS → Android topology remains
+> current, but ADR-0013 later made Android → macOS pointer/keyboard control an
+> explicit product non-goal unless a new product decision reopens it. The
+> reverse-direction mechanisms listed below are historical feasibility notes,
+> not current roadmap/extension commitments. ADR-0016 separately governs the
+> current internal ownership/concurrency architecture and does not reopen the
+> reverse direction.
 
 ## Context
 
-The product's essence is an "input bridge". The primary direction (macOS input → Android) is verified on device for the injection side (UHID); the macOS capture side (CGEventTap) is planned for Phase 4 and not yet implemented. The reverse direction (dex→mac) was also considered at user request. The iPad (iPadOS) has no CGEventTap-equivalent API, so input capture is impossible with the current architecture.
+The product's essence is an "input bridge". The primary direction (macOS input → Android) was verified on device for the injection side (UHID); at this historical point the macOS capture side (CGEventTap) was still planned. The reverse direction (dex→mac) was also considered at user request. The iPad (iPadOS) has no CGEventTap-equivalent API, so input capture would require a different design.
 
 ## Decision
 
-1. **v1 release scope is mac → Android one-way** (both the DeX external display and the phone screen). Phone-screen control also works on Android without DeX.
-2. **v1 input devices: all pointer devices on the Mac** — trackpad, wired mouse, wireless mouse — captured via CGEventTap, which is device-agnostic. No per-device setup.
-3. ~~**Keyboard (mac → Android) is not in v1**~~ **Superseded by [ADR-0007](ADR-0007-keyboard-delivery.md)** (2026-08-05): keyboard delivery (UHID + virtual injection fallback), macOS system-shortcut handling, and Korean 2-set input are now in scope as a keyboard extension. ADR-0003 v1 scope remains mac → Android one-way pointer input.
-4. **The CXI protocol is designed so both directions can be supported by adding message types only** (message type space separated without direction prefixes; types added later).
-5. The reverse direction extension is only possible via the following paths:
-   - Android touch capture: **AccessibilityService** (no root, limited touch)
-   - Android software keyboard capture: **custom IME app** (`InputMethodService`, no root, our keyboard must be the active IME)
+1. **macOS → Android one-way** is the supported input direction (both the DeX external display and the phone screen). **Retained and strengthened by ADR-0013.**
+2. **Mac pointer devices** — trackpad, wired mouse, wireless mouse — are captured through the host input mechanism without per-device configuration. The concrete host ownership/mechanism is subject to ADR-0016 rather than frozen by this historical ADR.
+3. ~~**Keyboard (mac → Android) is not in v1**~~ **Superseded by [ADR-0007](ADR-0007-keyboard-delivery.md)** (2026-08-05): keyboard delivery, macOS system-shortcut handling, and Korean 2-set input entered scope. ADR-0013 retains one-way macOS → Android keyboard input.
+4. The CXI message space was designed to permit additive message types. **This is a protocol-structure observation, not a current commitment to bidirectional input; ADR-0013 controls product direction.**
+5. Historical feasibility exploration for reverse direction identified possible mechanisms:
+   - Android touch capture: AccessibilityService (limited/no-root surface)
+   - Android software keyboard capture: custom IME app (`InputMethodService`)
    - macOS injection: `CGEventPost`
-6. **iPad is out of scope** (not technically impossible, but requires a separate design).
+
+   **Superseded as product scope by ADR-0013:** these mechanisms are not current
+   implementation targets or approved extension points. Reopening Android →
+   macOS pointer/keyboard requires a new explicit product decision.
+6. **iPad is out of current scope.** A future iPad host would require a separate
+   product/architecture decision rather than being inferred from this ADR.
 
 ## Alternatives
 
-- Implement both directions from the start: increases v1 complexity and delays release. The UX of Android input capture (keyboard switching, etc.) is unverified.
-- Include iPad: no CGEventTap on iPadOS — requires a completely different architecture (screen sharing/managed profiles, etc.).
+- Implement both directions from the start: rejected; increases complexity and
+  depended on unverified Android input-capture UX. ADR-0013 later made the
+  reverse direction an explicit non-goal rather than merely deferred work.
+- Include iPad: requires a materially different host-input architecture and is
+  not a current commitment.
 
 ## Consequences
 
-- Positive: fast release within the verified v1 scope. Protocol extensibility is preserved.
-- Negative: the reverse direction takes on the character of a separate product (phone → Mac wireless input device). Android keyboard capture cannot receive input from other IMEs such as GBoard.
+- Positive: product input direction stays focused on macOS → Android.
+- Positive: protocol extensibility does not silently become product scope.
+- Historical negative: reverse direction would behave like a separate product
+  with Android capture/IME constraints. Under ADR-0013 that observation supports
+  keeping it out of the current roadmap.
 
 ## Validation
 
 - (done) UHID mouse: DeX external display click/move/cursor display on-device verified (SM-G977N)
 - (done) CXI extension: mac→Android keyboard message type defined and shipped (`KEY_EVENT`, ADR-0007, PR #23)
+
+These historical validations do not alter the current product authority in
+ADR-0013 or the Architecture Leap ownership contract in ADR-0016.

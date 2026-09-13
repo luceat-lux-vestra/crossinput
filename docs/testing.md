@@ -1,6 +1,12 @@
 # Ampersand Testing Guide
 
 > On-device verification protocol. Linked to AGENTS.md hard rule 2 (no verification claim without on-device logs).
+>
+> ADR-0012 is authoritative for verification levels, release-stability cycle
+> credit, and evidence-window reset policy. Architecture Leap #101 / ADR-0016
+> may replace the concrete implementation types named by historical procedures
+> below; verification follows affected behavior/responsibility, not obsolete
+> class names.
 
 ## General principles
 
@@ -10,6 +16,11 @@
   2. ADB `logcat` excerpt (no payloads/content — hard rule 4)
   3. Video/screen capture
   4. A list of commands that reproduce the verification procedure
+- Level-1 verification is targeted to the behavior changed. Do **not** impose an
+  arbitrary repeated-manual-run count. Repeat a case only when an intermittent
+  defect or another stated hypothesis gives the repetition count evidentiary
+  value.
+- >=100 real physical handoff/return cycles belong only to ADR-0012 Level 3.
 
 ## Verification levels
 
@@ -22,14 +33,21 @@ to Level 3 (see [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md))
 Applies to every individual issue fix and PR. Required:
 
 - Unit/integration tests covering the affected behavior.
-- CI green on the PR HEAD.
-- Targeted real-device verification of the behavior the change touched
-  (reproduction of the original defect, then regression check).
+- CI green on the exact PR HEAD used for the acceptance decision.
+- Targeted real-device verification of device-dependent behavior the change
+  touched (reproduction of the original defect, then regression check).
 - Human visual confirmation when machine evidence cannot observe the surface
   (e.g. pointer visibility, scroll direction on screen).
 
-A bug-fix PR never requires repetitive manual cycles (and never 100 cycles).
-The targeted checks are scoped to what the change could plausibly affect.
+A bug-fix PR never requires repetitive manual cycles merely as ritual (and never
+100 cycles). The targeted checks are scoped to what the change could plausibly
+affect. If a defect is intermittent, record the reason for any chosen repetition
+count and what the repetitions are intended to establish.
+
+Docs-only design work that introduces no new runtime/device claim may satisfy
+Level 1 without a fresh physical run when its issue/ADR explicitly says so; its
+later runtime implementation slices still require their own device-dependent
+evidence.
 
 ### Level 2 — Feature stabilization
 
@@ -37,10 +55,14 @@ Applies once all blocker/bug issues for a feature area are closed. Required:
 
 - A release-candidate build from the stabilization branch.
 - A representative physical smoke test of the whole feature on real hardware.
-- Diagnostics readiness: logs must be able to classify every failure mode the
-  feature can produce (entry, return, takeover, emergency return,
-  remoteUnavailable, watchdog recovery, transport failure, queue shed,
-  coalescing, cancelled-delivery burst, held-button cleanup).
+- Diagnostics readiness: logs must be able to classify every semantic failure
+  mode the feature can produce, including entry/return, takeover, emergency or
+  watchdog recovery, transport/session failure, bounded admission/coalescing,
+  lifecycle-driven work retirement/cancellation, held-input cleanup, and
+  remote-state recovery when cleanliness cannot be proved.
+
+Concrete diagnostic event/type names may change during the Architecture Leap;
+classification coverage must survive those implementation changes.
 
 ### Level 3 — Release stability
 
@@ -59,18 +81,20 @@ Applies to the release candidate as a whole. Required:
 One physical cycle is **not** a state-machine transition count. A valid
 cycle is:
 
-```
-local -> successful physical remoteActive entry -> usable remote session
+```text
+local -> successful physical remote-control entry -> usable remote session
       -> return/local recovery
 ```
 
-The target must be a real physical device (SM-G977N DeX). Synthetic
-unit/state-machine loops — e.g. `testOneHundredEdgeHandoffCyclesStaySafe` —
-remain useful deterministic regression tests but contribute zero physical
-cycles. See [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)
-for cycle counting, evidence windows, and fail-closed classification.
+The target must be a real physical device. Historical evidence below uses the
+SM-G977N DeX setup. Synthetic unit/state-machine/event-tap loops — e.g.
+`testOneHundredEdgeHandoffCyclesStaySafe` — remain useful deterministic
+regression tests but contribute zero physical cycles. See
+[ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md) for cycle
+counting, evidence windows, reset-sensitive responsibilities, and fail-closed
+classification.
 
-## Verification environment (current)
+## Verification environment (historical/current evidence baseline)
 
 | Item | Value |
 |---|---|
@@ -79,12 +103,16 @@ for cycle counting, evidence windows, and fail-closed classification.
 | ADB | 37.0.1, wireless debugging (mDNS TLS) |
 | DeX | wired HDMI external display 1920x1080 |
 
+This table describes the established evidence environment; it does not make a
+particular model number an architecture requirement. A new device-dependent
+claim records the exact hardware/software environment used for that claim.
+
 ## DeX input routing verification protocol
 
 1. Pre-check: `adb shell dumpsys display` — DeX active (Desktop display ON, phone display DOZE)
 2. After input injection, confirm pointer events via `adb shell getevent -lt` / `logcat`
 3. Visual check: whether the pointer appears on the DeX screen (external monitor) and whether input reaches the phone screen
-4. Repeat each verification item 10+ times
+4. Run each targeted verification case sufficiently to establish the issue/claim. Repetition beyond one successful reproduction/regression run requires a stated rationale (for example, an intermittent race); there is no generic "10+ times" Level-1 rule.
 
 ### Verification items (R1)
 
@@ -100,7 +128,7 @@ Status: ✅ verified on device (SM-G977N) · ⏳ not yet verified. Full results 
 
 ## Phase 2: CXI helper verification (issue #6)
 
-Drives the Android helper over the binary CXI protocol using
+Drives the current Android helper over the binary CXI v1 protocol using
 `scripts/deploy-helper.sh`. Prereqs: DeX active (same setup as Phase 0),
 APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 
@@ -108,8 +136,8 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 2. `scripts/deploy-helper.sh start` — build + push + launch `app_process` with FIFO stdin.
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
-5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; the macOS selection controller publishes the target only after this response.
-6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper returns `POINTER_RESULT` with status/accepted movement, without logging payloads. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the dispatcher degrades to InputManager until the next `SELECT_DISPLAY`.
+5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; current pre-Leap macOS selection publishes only after this response. The Leap retains the confirmation/barrier requirement through TargetLease rather than preserving that controller type.
+6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper returns `POINTER_RESULT` with status/accepted movement, without logging payloads. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the current dispatcher degrades to InputManager until the next `SELECT_DISPLAY`.
 7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
 9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy pointer and keyboard UHID devices and exit cleanly (B-07).
@@ -133,9 +161,11 @@ Issue #57 acceptance (desktop-sink pointer routing):
   right. Horizontal was previously inverted on the InputManager path.
 - Send a move immediately after `select` (UHID create race): the first
   reports must reach the desktop.
-- Mid-session UHID failure: held buttons are released best-effort before the
-  virtual device closes and subsequent input continues on InputManager until
-  the next `SELECT_DISPLAY`.
+- Mid-session UHID failure: current behavior attempts held-button release before
+  the virtual device closes and continues through InputManager. For Leap
+  implementation claims, ADR-0016/#107 additionally require proof that cleanup
+  or recovery establishes trustworthy remote state; the historical best-effort
+  behavior alone is not proof of cleanliness.
 
 ### Remote physical-device verification
 
@@ -191,15 +221,20 @@ Still requires human confirmation (marked MANUAL_REQUIRED, never collapsed
 into PASS): visible pointer motion/appearance on the DeX screen, idle-fade
 reappearance, visible scroll direction (the attached screen-recording assists
 review but cursor composition is not machine-verifiable), and the complete
-macOS → Android → macOS edge handoff. Edge state-machine logic stays covered by
-the existing automated macOS tests.
+macOS → Android → macOS edge handoff. Handoff-policy logic stays covered by
+automated macOS tests; exact test/type names may change under ADR-0016.
 
 PASS/HOLD rules: overall is `FAIL` if any automatable assertion failed;
 otherwise `AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING` while any visual item
 remains open; PR #59 stays HOLD until those items are physically confirmed
 per AGENTS.md rule 2.
 
-Keyboard (Phase 9, ADR-0007 — added to the same helper session):
+### Keyboard compatibility verification (ADR-0007 / current CXI v1)
+
+The following exercises the existing pre-Leap `KEY_EVENT` wire/backend behavior.
+It does **not** prove the ADR-0016/#141 correlated semantic-outcome contract;
+#141 requires its own exact-head positive, negative, ambiguous, timeout, late,
+stale, and physical verification after implementation.
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
 11. Send one key down/up pair using the dedicated fixtures, then verify as follows (character input is only asserted after the full down/up pair):
@@ -210,8 +245,8 @@ Keyboard (Phase 9, ADR-0007 — added to the same helper session):
     scripts/deploy-helper.sh send "$DOWN_HEX"
     scripts/deploy-helper.sh send "$UP_HEX"
     ```
-    - Step 1 (`key-event-down.bin`, action 0): reports the key as pressed.
-    - Step 2 (`key-event-up.bin`, action 1): reports the key as released.
+    - Step 1 (`key-event-down.bin`, action 0): current helper reports the key as pressed through its backend.
+    - Step 2 (`key-event-up.bin`, action 1): current helper reports the key as released through its backend.
     - After the complete down/up sequence, confirm that exactly one character was entered in the focused DeX field.
     - Confirm that no repeated input continues after the key-up report.
     - Run `scripts/deploy-helper.sh stop` and confirm that no stuck-key state remains after shutdown.
@@ -252,12 +287,18 @@ behavior remains covered by the Android unit tests, which passed in the same
 build. Screen and ADB-pulled log evidence is preserved in
 [`docs/research/evidence/inputmanager-held-key-2026-08-10/`](research/evidence/inputmanager-held-key-2026-08-10/).
 
+This historical/current backend verification proves the behavior it observed;
+it does not prove that helper teardown alone is a trustworthy remote-state
+cleanliness mechanism for the Leap. #107 owns that proof/reset contract.
+
 Launch the helper with the override (manual). Both spellings are accepted:
+
 ```sh
 adb shell app_process -cp /data/local/tmp/crossinput-helper.apk / com.crossinput.helper.Main --keyboard-backend=input-manager
 ```
 
 Or via deploy-helper.sh (environment variable):
+
 ```sh
 KEYBOARD_BACKEND=input-manager scripts/deploy-helper.sh start
 ```
@@ -265,7 +306,7 @@ KEYBOARD_BACKEND=input-manager scripts/deploy-helper.sh start
 Before recording any result, confirm the run is actually on the forced backend —
 the helper logs the active backend once at startup:
 
-```
+```text
 [Main] keyboard backend mode=input-manager
 [KeyboardBackend] keyboard backend selected backend=input-manager mode=forced
 ```
@@ -279,6 +320,7 @@ the session switches after a UHID report failure.
 Automated coverage (`KeyboardBackendTest.kt`, `KeyboardBackendModeTest.kt`) —
 these substitute a fake injector for the hidden API, so they constrain the
 selection logic only and are not a substitute for the on-device run:
+
 - AUTO: UHID preferred; falls back on creation failure, report failure, and unmappable key codes
 - Forced UHID: never falls back to virtual injection, survives report failure
 - Forced InputManager: never creates or uses UHID; down/up pass through once each
@@ -305,10 +347,13 @@ Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet ve
 | 9 | SHUTDOWN | Clean exit; UHID devices destroyed; stdout flushed | ✅ |
 | 10 | InputManager virtual-injection fallback | Fallback engaged (forced), single char + modifier, no repeat, no stuck keys, shutdown clean | ✅ verified on device (SM-G977N, 2026-08-10; issue #33) |
 
-## PR #42 mandatory regression matrix
+## Historical PR #42 regression matrix
 
-The following is required after the controller and pointer-backend split. A
-local build is not a substitute for the device record.
+The following matrix records the verification obligations from the pre-Leap
+controller/pointer-backend split. It remains regression evidence and a source of
+behaviors the Leap must preserve/revalidate, but it does not freeze the old
+controller/type layout. New Leap PRs use their own issue-specific matrices plus
+ADR-0016/ADR-0012 obligations.
 
 | Area | Required checks | Evidence status |
 |---|---|---|
@@ -322,21 +367,27 @@ local build is not a substitute for the device record.
 
 ## Edge switching stability (Phase 5)
 
-- The state-machine and real macOS event-tap/helper 100-cycle regressions
-  remain useful deterministic regression tests. They are synthetic loops:
-  they contribute **zero** physical cycles toward the Level-3 gate.
+- Historical state-machine and real macOS event-tap/helper 100-cycle regressions
+  remain useful deterministic regression tests. They are synthetic/scripted
+  logic loops for evidence-credit purposes: they contribute **zero** physical
+  cycles toward the Level-3 gate unless a separately approved physical
+  automation harness satisfies ADR-0012's physical-cycle definition.
 - Release stability is declared complete only under the Level-3 rule in
   [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md): >=100 real
-  physical handoff/return cycles accumulated on a release-candidate build,
+  physical handoff/return cycles accumulated on a release-candidate lineage,
   naturally or via approved physical automation — never by asking a user to
   manually bounce the pointer 100 times in one sitting.
-- For each failure case, verify state machine logs + recovery path.
+- For each failure case, verify the current architecture's ownership/control
+  diagnostics and recovery path. Do not require an obsolete class/state-machine
+  log name after that implementation has been superseded.
 
 ### A/B comparison protocol (origin/main vs fix branch, issue #37 / PR #38)
 
 Goal: prove the left-edge immediate-return defect is reproduced on `origin/main`
-and not on the fix branch, under identical conditions. If both branches behave
-identically, the root cause is not yet found — do not claim otherwise.
+and not on the fix branch, under identical conditions. This is a historical
+issue-specific procedure, not a generic requirement for future Leap PRs. If both
+branches behave identically, the root cause is not yet found — do not claim
+otherwise.
 
 1. **Same conditions for both branches**: same Mac, same physical mouse, same
    Android device, same DeX display, same configured edge(s), same TCC grants
@@ -363,17 +414,20 @@ identically, the root cause is not yet found — do not claim otherwise.
      the boundary + hysteresis
    Identical behavior on both branches ⇒ root cause not found; stop and
    investigate before continuing.
-5. **Record the transition reason** for every return:
-   `edge transition <from> -> <to> reason=<cause>`. The left-edge return must
-   be `reason=boundaryCrossed` (never watchdog/connection/suppression paths).
+5. **Record the transition reason** for every return. Historical diagnostics used
+   `edge transition <from> -> <to> reason=<cause>` and required the left-edge
+   return to be `reason=boundaryCrossed` rather than watchdog/connection/
+   suppression paths. Equivalent semantic evidence is acceptable after those
+   internal state/type names are replaced.
 
 ### Four-direction trace collection (top/bottom sign validation)
 
 For each edge (left, right, top, bottom) capture metadata-only diag excerpts
 covering: (1) movement toward Android, (2) movement inside Android, (3)
 pull-back toward macOS, (4) reaching the boundary, (5) crossing the hysteresis
-threshold, and (6) the `localActive` transition with reason. Validate the
-direction invariant with the private trace fixture/unit assertions, not by
-logging raw deltas: movement toward Android must increase the virtual position
-and movement toward macOS must decrease it. The top/bottom directions were
-inverted in origin/main; the fix branch must hold the invariant everywhere.
+threshold, and (6) the local-return transition with reason. Validate the
+direction invariant with private trace fixtures/unit assertions, not by logging
+raw deltas: movement toward Android must increase the virtual position and
+movement toward macOS must decrease it. The top/bottom directions were inverted
+in the historical origin/main defect; replacement HandoffPolicy tests must
+preserve the corrected invariant without preserving the old state-machine type.
