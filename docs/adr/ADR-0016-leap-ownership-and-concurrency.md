@@ -71,6 +71,8 @@ The critical decisions are:
 - explicit semantic outcomes for persistent key/button transitions;
 - non-abandonment of already-issued persistent transition outcomes;
 - terminal old-target cleanup before helper-global route mutation;
+- a remote-state cleanliness recovery fence before dirty Session replacement may
+  become control-capable;
 - helper/backend cleanup as a proof obligation, never an assumption;
 - platform-neutral semantic input before the remote adapter boundary; and
 - App/UI as composition and projection, not hidden lifecycle ownership.
@@ -93,6 +95,11 @@ while Control remains local. Capture and suppression are separate lifetimes.
 Represents one concrete Android/helper/CXI connection instance. A replacement
 connection is a new Session, never a mutation of the old identity.
 
+Session identity and remote-state cleanliness are related but not identical: a
+fresh SessionHandle proves only that ownership is new. It does **not** by itself
+prove that persistent state left by a previous helper/backend instance has been
+cleared.
+
 ### Target
 
 Represents one confirmed selected remote routing context inside exactly one
@@ -109,7 +116,8 @@ Represents one bounded remote-input pipeline scoped to exactly one Control and
 its captured Session/Target context.
 
 These lifecycles must not collapse into one application state machine or one
-global generation counter.
+global generation counter. Remote-state cleanliness is a readiness/trust
+condition on Session recovery, not a seventh mutable ownership lifecycle.
 
 ## 2. Handles and leases
 
@@ -126,7 +134,8 @@ Reconnect/replacement therefore means:
 1. invalidate/shut down SessionHandle A;
 2. allow outstanding work to retain only A;
 3. create SessionHandle B; and
-4. publish B separately.
+4. publish B separately only when its required recovery/readiness conditions are
+   satisfied.
 
 `SessionReference`-style mutable-current indirection is not part of the target
 design.
@@ -190,11 +199,13 @@ Acquisition is fail-closed:
 
 1. verify capability readiness and capture availability;
 2. snapshot exact SessionHandle + TargetLease;
-3. create InputIngress + DeliveryWorker bound to those resources;
-4. prepare ControlLease + synchronous local-return gate;
-5. atomically install SuppressionLease + exact ingress in the host suppression
+3. verify that the Session is control-capable, including any required
+   remote-state cleanliness recovery fence;
+4. create InputIngress + DeliveryWorker bound to those resources;
+5. prepare ControlLease + synchronous local-return gate;
+6. atomically install SuppressionLease + exact ingress in the host suppression
    boundary; and
-6. only then publish Control as remote-owned.
+7. only then publish Control as remote-owned.
 
 If any step fails, close/cancel partial resources and remain local.
 Host suppression must never consume input without already having a valid bounded
@@ -332,8 +343,26 @@ One ordered semantic lane covers pointer and keyboard input.
 | key repeat | no shedding by default | only with later proof | strict by default |
 | cleanup/release | no lossy treatment | never silently | terminal/strong |
 
-If a non-droppable transition cannot be admitted, invoke local return rather
-than silently losing remote persistent state.
+### Admission result controls suppression
+
+For a host event that would otherwise be delivered remotely, suppression may
+consume it only after InputIngress returns an admission result that permits
+consumption, or when the event is intentionally handled by the accepted P0
+host-confinement mechanism.
+
+In particular:
+
+- successful admission may consume the corresponding host input according to
+  the active SuppressionLease;
+- intentionally shed additive motion/scroll may be consumed only under the
+  explicit bounded-overload policy while Control is still valid; and
+- **rejected non-droppable key/button/repeat input is not consumed**. It invokes
+  the synchronous local-return gate and the triggering host event is returned
+  unchanged where CGEventTap semantics permit.
+
+The suppression decision and the admission result are therefore one atomic
+safety decision at the event boundary; a queue-full or closing ingress cannot
+turn a non-droppable event into a silent host-side loss.
 
 ## 9. DeliveryWorker and persistent outcome ownership
 
@@ -447,7 +476,7 @@ The safe A -> B sequence is:
 4. let every already-issued persistent transition ahead of the barrier reach a
    semantic outcome, updating only the closing A ledger;
 5. if any such transition remains ambiguous, do not treat A as clean —
-   invalidate/reconnect Session instead of selecting B on it;
+   invalidate/recover Session instead of selecting B on it;
 6. while TargetLease A and route A are still valid, execute one terminal cleanup
    fence for the now-known confirmed held persistent state;
 7. wait only under a bounded remote-cleanup policy for that fence;
@@ -459,7 +488,7 @@ The safe A -> B sequence is:
 
 If route disappearance, cleanup timeout, backend ambiguity, or stream loss
 prevents a trustworthy old-target state, do not reuse the Session as clean for
-B. Invalidate it and re-establish remote state.
+B. Invalidate it and enter the Session recovery/cleanliness fence below.
 
 TargetLease A remains valid long enough for its own privileged terminal cleanup,
 but ordinary A user input is already closed. Cleanup privilege admits no new
@@ -473,8 +502,8 @@ persistent state becomes ambiguous.
 Persistent state includes at least keys and pointer buttons.
 
 Unknown outcome after a state-changing command must remain unknown. The system
-must not invent a clean state from transport success, task cancellation, or
-process death.
+must not invent a clean state from transport success, task cancellation, process
+death, or the mere creation of a new SessionHandle.
 
 Rules:
 
@@ -497,7 +526,38 @@ to `notApplied` without evidence.
 Host held-key state changes only from `applied` outcomes. Timeout, stream loss,
 or backend-uncertain failure after send is ambiguous persistent state.
 
-## 13. Helper/backend cleanup is a proof obligation
+## 13. Session recovery requires a remote-state cleanliness fence
+
+Invalidating SessionHandle A prevents stale ownership from reaching replacement
+SessionHandle B. It does **not** prove that remote persistent state created by A
+has disappeared from Android.
+
+When A is invalidated because persistent state is ambiguous, SessionManager must
+enter a recovery-required condition. A transport/helper candidate may be started
+for bounded recovery, discovery, or reset work, but it is not published as a
+**control-capable ready Session** and no new TargetLease/ControlLease may be used
+for input until a recovery fence establishes a trustworthy neutral remote state.
+
+A recovery fence may be satisfied only by evidence-backed semantics such as:
+
+- confirmed terminal cleanup under the old routing/backend context;
+- a helper/backend reset operation whose contract proves held state neutral;
+- teardown/recreation of a backend identity for which platform evidence proves
+  destruction clears the relevant held state; or
+- another separately reviewed mechanism with equivalent proof.
+
+Merely reconnecting ADB, launching a new helper, obtaining HELLO_ACK, or creating
+SessionHandle B is **not** sufficient evidence of cleanliness.
+
+If no available recovery mechanism can prove neutral remote state, CrossInput
+remains local/blocked for remote Control rather than assuming the new Session is
+clean. #107 owns backend-specific cleanup/reset proof and implementation.
+
+This fence is bounded with respect to user safety: local host control has already
+returned and never waits for recovery. The remote feature may remain unavailable
+until a trustworthy Session can be established.
+
+## 14. Helper/backend cleanup is a proof obligation
 
 Architecture must not assume "helper/session died, therefore remote held state
 is clean."
@@ -517,7 +577,7 @@ shutdown, and idempotent repeated cleanup.
 If trustworthy cleanup cannot be established, that limitation remains explicit
 and feeds Session trust/recovery policy.
 
-## 14. Platform-neutral semantic input
+## 15. Platform-neutral semantic input
 
 The semantic domain introduced by #103 must not contain:
 
@@ -542,7 +602,7 @@ macOS event
 `CapturedKeyEvent` carrying Android KeyEvent semantics is not a target host-domain
 API.
 
-## 15. Application state is projection
+## 16. Application state is projection
 
 The application layer becomes a composition root plus presentation projection.
 It may issue intents such as connect/disconnect, select target, enable/disable
@@ -568,15 +628,20 @@ Capability does not own Session.
 
 ```text
 disconnected -> connecting(candidate)
-connecting   -> ready(SessionHandle)
+connecting   -> ready(SessionHandle)             // clean/trustworthy candidate
 connecting   -> failed/disconnected
 ready        -> reconnecting/disconnected
-reconnecting -> ready(new SessionHandle)
+ready        -> recoveryRequired(reason)         // persistent ambiguity
+reconnecting -> ready(new SessionHandle)          // only after readiness proof
 reconnecting -> failed/disconnected
+recoveryRequired -> recovering(candidate/reset)
+recovering   -> ready(clean SessionHandle)        // recovery fence proved neutral
+recovering   -> recoveryRequired/failed/disconnected
 ```
 
-A candidate stays private until handshake/capability negotiation succeeds.
-Concrete SessionHandle is `open -> closing -> closed`.
+A candidate stays private until handshake/capability negotiation succeeds **and**
+any required recovery cleanliness fence succeeds. Concrete SessionHandle is
+`open -> closing -> closed`.
 
 ### Target
 
@@ -590,8 +655,8 @@ any         -> unavailable     // Session invalidated
 ```
 
 `closing(A)` includes issued-persistent reconciliation plus terminal cleanup.
-If a trustworthy state cannot be established, Session is invalidated instead of
-moving to B inside it.
+If a trustworthy state cannot be established, Session enters recoveryRequired
+instead of moving to B inside it.
 
 ### Control
 
@@ -625,12 +690,12 @@ outcomes and terminal cleanup; it is never rebound to new ordinary input.
 | missing/revoked capability | local/blocked | healthy Session/Target may remain |
 | event-tap/capture failure | local/blocked | healthy Session/Target may remain |
 | ordinary boundary return | local | Session/Target unchanged if remote state is clean |
-| non-droppable admission saturation | local immediately | classify any earlier issued persistent state; current rejected event was not remotely admitted |
+| non-droppable admission saturation | local immediately; triggering event is not consumed | classify any earlier issued persistent state; current rejected event was not remotely admitted |
 | additive motion/scroll timeout | local if required | Session may remain reusable if protocol/transport remains trustworthy |
 | explicit proven-not-applied key/button result | local/fail-safe | Session may remain reusable after cleanup of prior confirmed held state |
-| ambiguous key/button result | local immediately | cleanup; invalidate Session if certainty cannot be re-established |
-| target disappearance/change | local immediately | reuse Session only after trustworthy old-target reconciliation/cleanup |
-| transport/helper disconnect | local immediately | invalidate Session + Target; reconnect policy owns replacement |
+| ambiguous key/button result | local immediately | recovery/cleanup required; no new remote Control until cleanliness proved |
+| target disappearance/change | local immediately | reuse Session only after trustworthy old-target reconciliation/cleanup; otherwise recovery fence |
+| transport/helper disconnect | local immediately | invalidate Session + Target; if persistent state may be ambiguous, recovery fence before remote Control |
 | external-control takeover | local immediately; triggering event passes through | Session/Target unchanged unless independently failed |
 
 Lower-domain failures must not be reclassified as unrelated lifecycle failures
@@ -706,8 +771,11 @@ for it.
 
 ### SessionManager / concrete Session
 
-SessionManager serializes connection/reconnect/replacement policy. Each concrete
-Session owns protocol correlation, disconnect state, and RemoteCommandLane.
+SessionManager serializes connection/reconnect/replacement/recovery policy. Each
+concrete Session owns protocol correlation, disconnect state, and
+RemoteCommandLane. SessionManager also prevents a dirty/ambiguous predecessor
+from being replaced by a control-capable Session until the recovery fence proves
+remote cleanliness.
 
 ### DeliveryWorker
 
@@ -731,7 +799,9 @@ Cancellation means different things before and after a remote commit point:
   ownership until resolved or classified ambiguous;
 - terminal cleanup is a privileged closing operation, not ordinary input; and
 - Session invalidation cancels remaining remote activity only after the system
-  has conservatively classified unresolved persistent state as untrustworthy.
+  has conservatively classified unresolved persistent state as untrustworthy;
+  any replacement remains non-control-capable until the recovery fence proves
+  cleanliness.
 
 This distinction is mandatory; generic Task cancellation is not an ownership
 model.
@@ -774,8 +844,8 @@ CGEventTap remains bounded/nonblocking.
 ### I7 — Persistent Transitions Are Never Silently Lost
 Key/button transitions are ordered and semantically classified.
 
-**Enforced by:** one ordered lane, non-droppable admission, explicit semantic
-outcomes, and non-abandonment after wire commit.
+**Enforced by:** one ordered lane, non-droppable admission, admission-bound
+suppression, explicit semantic outcomes, and non-abandonment after wire commit.
 
 ### I8 — Cleanup Never Blocks Local Return
 Remote cleanup begins only after local safety release and remains bounded.
@@ -783,9 +853,12 @@ Remote cleanup begins only after local safety release and remains bounded.
 **Enforced by:** local-return ordering + async closing context.
 
 ### I9 — Ambiguous Persistent State Is Not Reused as Clean
-Unknown key/button state cannot seed a new Control/Target context.
+Unknown key/button state cannot seed a new Control/Target context even through a
+fresh transport/helper/SessionHandle.
 
-**Enforced by:** reconciliation/cleanup proof or Session invalidation.
+**Enforced by:** reconciliation/cleanup proof, Session invalidation, and the
+remote-state cleanliness recovery fence before a replacement becomes
+control-capable.
 
 ### I10 — Diagnostics Are Payload-Safe
 Raw pointer/key/HID/clipboard payloads never enter diagnostics.
@@ -811,9 +884,9 @@ behavior.
 | I4 | model A -> B with queued additive work, issued persistent transition, late result, cleanup, and selection; assert SELECT_DISPLAY(B) cannot pass unresolved A persistent state |
 | I5 | concurrent acquire/release attempts; assert only one active SuppressionLease and idempotent first-winner release |
 | I6 | source-level prohibition tests plus bounded-ingress stress/benchmark; no semaphore/remote await on event callback path |
-| I7 | queue saturation, positive/notApplied/ambiguous results, late positive result after local return, and result reordering attempts; assert ledger/order rules |
+| I7 | queue saturation must return the rejected non-droppable host event locally; also test positive/notApplied/ambiguous outcomes, late positive result after local return, and result reordering attempts |
 | I8 | make cleanup/helper never respond; assert local return completes before cleanup timeout and cleanup terminates boundedly |
-| I9 | timeout after persistent send and cleanup uncertainty; assert Session cannot become basis for new Target/Control |
+| I9 | timeout after persistent send, invalidate Session A, establish candidate B, and withhold cleanup/reset proof; assert B cannot publish a TargetLease or acquire remote Control until the recovery fence succeeds |
 | I10 | inject sentinel pointer/key/HID/clipboard payloads into error paths; assert diagnostics contain metadata only |
 | I11 | compile/unit-test routing-scope APIs so session-routed backends cannot claim arbitrary TargetLease routing; physical evidence gates device claims |
 
@@ -827,7 +900,7 @@ timeouts.
 | Current responsibility/type | Target direction |
 | --- | --- |
 | `AppModel` | composition + presentation projection (#108) |
-| `SessionController` | SessionManager connection/reconnect policy |
+| `SessionController` | SessionManager connection/reconnect/recovery policy |
 | `SessionReference` | **delete**; immutable SessionHandle |
 | `RemoteSession` | concrete async session + ordered RemoteCommandLane |
 | `requestBlocking()` | **delete** |
@@ -899,6 +972,11 @@ Rejected. A small additive v1 outcome extension can satisfy the Leap contract.
 Rejected. A backend/transport failure may occur after partial or uncertain
 application. Semantic certainty must be explicit.
 
+### Assume a fresh Session is clean
+Rejected. A new connection identity prevents stale ownership retargeting but does
+not prove old remote held state disappeared. Dirty replacement requires the
+recovery cleanliness fence.
+
 ### Assume helper process exit cleans InputManager pointer state
 Rejected without evidence. #107 must prove or implement cleanup.
 
@@ -909,7 +987,9 @@ Positive:
 - stale work is isolated primarily by resource ownership;
 - old Session work cannot redirect into a replacement;
 - local pointer safety is independent of Android and actor scheduling;
+- admission failure cannot silently swallow non-droppable host input;
 - target changes reconcile issued persistent state before cleanup/selection;
+- dirty Session replacement cannot bypass unresolved held state;
 - persistent input state is outcome-based rather than write-based;
 - one ordered lane simplifies state ordering and cleanup;
 - routing claims remain honest;
@@ -922,7 +1002,7 @@ Cost:
 - structure-coupled tests must be replaced;
 - temporary migration adapters may be needed;
 - #141 adds additive v1 protocol work;
-- #107 must prove/repair backend teardown cleanup;
+- #107 must prove/repair backend teardown cleanup and recovery semantics;
 - runtime slices require repeated exact-head physical verification; and
 - ADR-0012 cycle credit resets when candidate lineage is invalidated.
 
@@ -948,10 +1028,11 @@ Review must trace at least:
 4. target A -> B with ordinary input queued/in-flight;
 5. target A -> B with an issued or confirmed held key/button;
 6. target disappearance before reconciliation/cleanup completes;
-7. Session replacement with queued/in-flight delivery;
+7. Session replacement with queued/in-flight delivery, including dirty-state
+   recovery before replacement becomes control-capable;
 8. capability revocation with healthy Session;
 9. event-tap failure;
-10. non-droppable InputIngress saturation;
+10. non-droppable InputIngress saturation and triggering-event pass-through;
 11. helper-side key rejection while Session remains alive;
 12. key/button timeout after send;
 13. late positive persistent result after Control closes;
