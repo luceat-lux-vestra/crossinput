@@ -6,7 +6,7 @@ import Diagnostics
 /// Issue #96 investigation primitive modeled on Deskflow's current macOS
 /// primary-screen cursor ownership sequence.
 ///
-/// Remote entry deliberately preserves the observed ordering:
+/// Remote entry preserves the observed ordering:
 ///
 ///     SetsCursorInBackground(true)
 ///     CGDisplayHideCursor(liveDisplay)
@@ -130,7 +130,10 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
     private let lock = NSLock()
     private let operations: Operations
     private var activeGeneration: UInt64?
+    /// Non-nil means one successful hide still requires exactly one show.
     private var hiddenDisplayID: CGDirectDisplayID?
+    /// True means a successful associate(false) still requires associate(true).
+    private var isDisassociated = false
 
     internal static func production() -> DeskflowCursorIsolation {
         DeskflowCursorIsolation(operations: .production())
@@ -144,16 +147,13 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         self.operations = operations
     }
 
-    /// Enters the Deskflow-style off-screen cursor lifecycle before CrossInput
-    /// makes suppression observable. Any partial failure is rolled back and
-    /// rejects suppression admission.
     @discardableResult
     internal func begin(generation: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
 
-        guard activeGeneration == nil, hiddenDisplayID == nil else {
-            Diagnostics.log("deskflow-cursor-isolation begin rejected active-generation")
+        guard activeGeneration == nil, hiddenDisplayID == nil, !isDisassociated else {
+            Diagnostics.log("deskflow-cursor-isolation begin rejected outstanding-debt")
             return false
         }
         guard let displayID = operations.liveDisplayID() else {
@@ -172,15 +172,14 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             )
             return false
         }
+        hiddenDisplayID = displayID
 
         let preDisassociateAssociate = operations.associate(true)
         guard preDisassociateAssociate == .success else {
-            _ = operations.setCursorInBackground()
-            let rollbackShow = operations.show(displayID)
+            rollbackVisibilityLocked()
             Diagnostics.log(
                 "deskflow-cursor-isolation pre-disassociate-associate failed "
-                    + "result=\(preDisassociateAssociate.rawValue) "
-                    + "rollback-show=\(rollbackShow.rawValue)"
+                    + "result=\(preDisassociateAssociate.rawValue)"
             )
             return false
         }
@@ -188,47 +187,54 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         operations.setSuppressionInterval(0.0001)
         let disassociateResult = operations.associate(false)
         guard disassociateResult == .success else {
-            let rollbackAssociate = operations.associate(true)
-            _ = operations.setCursorInBackground()
-            let rollbackShow = operations.show(displayID)
+            _ = operations.associate(true)
+            rollbackVisibilityLocked()
             operations.setSuppressionInterval(0.0)
             Diagnostics.log(
-                "deskflow-cursor-isolation disassociate failed result=\(disassociateResult.rawValue) "
-                    + "rollback-associate=\(rollbackAssociate.rawValue) "
-                    + "rollback-show=\(rollbackShow.rawValue)"
+                "deskflow-cursor-isolation disassociate failed result=\(disassociateResult.rawValue)"
             )
             return false
         }
 
+        isDisassociated = true
         activeGeneration = generation
-        hiddenDisplayID = displayID
         Diagnostics.log(
             "deskflow-cursor-isolation entered generation=\(generation) display=\(displayID)"
         )
         return true
     }
 
-    /// Balances only the generation that owns the remote cursor lifecycle.
-    /// Cleanup follows Deskflow's primary enter ordering before P0 is allowed
-    /// to perform its existing one-shot restore warp.
     @discardableResult
     internal func end(generation: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
 
         guard let activeGeneration else { return true }
-        guard activeGeneration == generation, let displayID = hiddenDisplayID else {
+        guard activeGeneration == generation else {
             Diagnostics.log("deskflow-cursor-isolation stale-generation end rejected")
             return false
         }
 
         let backgroundResult = operations.setCursorInBackground()
-        let showResult = operations.show(displayID)
+        let showResult: CGError
+        if let displayID = hiddenDisplayID {
+            showResult = operations.show(displayID)
+            if showResult == .success {
+                hiddenDisplayID = nil
+            }
+        } else {
+            showResult = .success
+        }
+
         let showAssociateResult = operations.associate(true)
+        if showAssociateResult == .success {
+            isDisassociated = false
+        }
         let enterAssociateResult = operations.associate(true)
         operations.setSuppressionInterval(0.0)
 
-        guard showResult == .success,
+        guard hiddenDisplayID == nil,
+              !isDisassociated,
               showAssociateResult == .success,
               enterAssociateResult == .success else {
             Diagnostics.log(
@@ -242,7 +248,6 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         }
 
         self.activeGeneration = nil
-        hiddenDisplayID = nil
         Diagnostics.log(
             "deskflow-cursor-isolation ended generation=\(generation) "
                 + "background=\(backgroundResult.map { String($0) } ?? "unavailable")"
@@ -250,32 +255,48 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         return true
     }
 
-    /// Last-resort teardown balance. It intentionally leaves
-    /// SetsCursorInBackground enabled, matching current Deskflow semantics.
+    /// Best-effort teardown that retries only outstanding cleanup debt. A show
+    /// that already succeeded is never repeated, so visibility counts cannot be
+    /// over-balanced by teardown.
     internal func forceReset() {
         lock.lock()
         defer { lock.unlock() }
-        guard activeGeneration != nil, let displayID = hiddenDisplayID else { return }
+        guard activeGeneration != nil || hiddenDisplayID != nil || isDisassociated else { return }
 
         let backgroundResult = operations.setCursorInBackground()
-        let showResult = operations.show(displayID)
-        let showAssociateResult = operations.associate(true)
-        let enterAssociateResult = operations.associate(true)
+        var showResult = CGError.success
+        if let displayID = hiddenDisplayID {
+            showResult = operations.show(displayID)
+            if showResult == .success {
+                hiddenDisplayID = nil
+            }
+        }
+
+        var associateResult = CGError.success
+        if isDisassociated {
+            associateResult = operations.associate(true)
+            if associateResult == .success {
+                isDisassociated = false
+            }
+        }
         operations.setSuppressionInterval(0.0)
 
-        if showResult == .success,
-           showAssociateResult == .success,
-           enterAssociateResult == .success {
+        if hiddenDisplayID == nil, !isDisassociated {
             activeGeneration = nil
-            hiddenDisplayID = nil
         }
         Diagnostics.log(
             "deskflow-cursor-isolation force-reset "
                 + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
-                + "show=\(showResult.rawValue) "
-                + "show-associate=\(showAssociateResult.rawValue) "
-                + "enter-associate=\(enterAssociateResult.rawValue)"
+                + "show=\(showResult.rawValue) associate=\(associateResult.rawValue)"
         )
+    }
+
+    private func rollbackVisibilityLocked() {
+        guard let displayID = hiddenDisplayID else { return }
+        _ = operations.setCursorInBackground()
+        if operations.show(displayID) == .success {
+            hiddenDisplayID = nil
+        }
     }
 
     internal var activeGenerationForTesting: UInt64? {
@@ -284,5 +305,9 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
 
     internal var hiddenDisplayIDForTesting: CGDirectDisplayID? {
         lock.withLock { hiddenDisplayID }
+    }
+
+    internal var isDisassociatedForTesting: Bool {
+        lock.withLock { isDisassociated }
     }
 }
