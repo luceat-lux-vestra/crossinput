@@ -5,6 +5,7 @@ import IOKit.hid
 
 private enum ProbeError: Error, CustomStringConvertible {
     case managerOpen(IOReturn)
+    case managerClose(IOReturn)
     case selectedDeviceMissing
     case seizeFailed(IOReturn)
 
@@ -12,6 +13,8 @@ private enum ProbeError: Error, CustomStringConvertible {
         switch self {
         case let .managerOpen(result):
             return String(format: "IOHIDManagerOpen failed: 0x%08x", UInt32(bitPattern: result))
+        case let .managerClose(result):
+            return String(format: "IOHIDManagerClose failed before seize: 0x%08x", UInt32(bitPattern: result))
         case .selectedDeviceMissing:
             return "selected HID device disappeared before exclusive open"
         case let .seizeFailed(result):
@@ -101,17 +104,22 @@ private func run() throws {
     ]
     IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
 
+    // IOHIDManagerOpen opens the manager's current/future devices too. Use it
+    // only to establish enumeration, retain the copied device refs, then close
+    // the manager before testing an independent exclusive IOHIDDeviceOpen.
     let managerResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     guard managerResult == kIOReturnSuccess else {
         throw ProbeError.managerOpen(managerResult)
-    }
-    defer {
-        IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     }
 
     let devices = (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>) ?? []
     let mice = devices.filter(isMouse)
     let identities = mice.map(identity)
+
+    let managerCloseResult = IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+    guard managerCloseResult == kIOReturnSuccess else {
+        throw ProbeError.managerClose(managerCloseResult)
+    }
 
     switch mode {
     case .list:
