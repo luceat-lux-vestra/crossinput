@@ -7,12 +7,18 @@ private final class DeskflowExecutorRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var backgroundResults: [Int32?]
     private var showResults: [CGError]
+    private var suppressionResults: [Int32?]
     private var eventsStorage: [String] = []
     private var mutationsStorage: [CursorMutationExecutor.Kind] = []
 
-    init(backgroundResults: [Int32?] = [0, 0], showResults: [CGError] = [.success]) {
+    init(
+        backgroundResults: [Int32?] = [0, 0],
+        showResults: [CGError] = [.success],
+        suppressionResults: [Int32?] = [0, 0]
+    ) {
         self.backgroundResults = backgroundResults
         self.showResults = showResults
+        self.suppressionResults = suppressionResults
     }
 
     var events: [String] { lock.withLock { eventsStorage } }
@@ -46,9 +52,10 @@ private final class DeskflowExecutorRecorder: @unchecked Sendable {
         }
     }
 
-    func suppression(_ value: Double) {
+    func suppression(_ value: Double) -> Int32? {
         lock.withLock {
             eventsStorage.append(value == 0 ? "suppression:0" : "suppression:0.0001")
+            return suppressionResults.isEmpty ? 0 : suppressionResults.removeFirst()
         }
     }
 
