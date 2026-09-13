@@ -1,0 +1,288 @@
+import CoreGraphics
+import Darwin
+import Foundation
+import Diagnostics
+
+/// Issue #96 investigation primitive modeled on Deskflow's current macOS
+/// primary-screen cursor ownership sequence.
+///
+/// Remote entry deliberately preserves the observed ordering:
+///
+///     SetsCursorInBackground(true)
+///     CGDisplayHideCursor(liveDisplay)
+///     CGAssociateMouseAndMouseCursorPosition(true)
+///     CGSetLocalEventsSuppressionInterval(0.0001)
+///     CGAssociateMouseAndMouseCursorPosition(false)
+///
+/// Local return mirrors Deskflow's primary enter path before P0 performs its
+/// existing one-shot edge restore:
+///
+///     SetsCursorInBackground(true)
+///     CGDisplayShowCursor(hiddenDisplay)
+///     CGAssociateMouseAndMouseCursorPosition(true)
+///     CGAssociateMouseAndMouseCursorPosition(true)
+///     CGSetLocalEventsSuppressionInterval(0.0)
+///
+/// This is an investigation-only private-SPI candidate. It does not change
+/// InputCapture suppression, remote delta production, state-machine ownership,
+/// Android/helper/protocol behavior, or the P0 one-shot restore path.
+internal final class DeskflowCursorIsolation: @unchecked Sendable {
+    internal struct Operations: @unchecked Sendable {
+        let liveDisplayID: @Sendable () -> CGDirectDisplayID?
+        let setCursorInBackground: @Sendable () -> Int32?
+        let hide: @Sendable (CGDirectDisplayID) -> CGError
+        let show: @Sendable (CGDirectDisplayID) -> CGError
+        let associate: @Sendable (Bool) -> CGError
+        let setSuppressionInterval: @Sendable (Double) -> Void
+
+        static func production() -> Operations {
+            let spi = PrivateCursorSPI()
+            return Operations(
+                liveDisplayID: Self.resolveLiveDisplayID,
+                setCursorInBackground: { spi.setCursorInBackground() },
+                hide: { CGDisplayHideCursor($0) },
+                show: { CGDisplayShowCursor($0) },
+                associate: { CGAssociateMouseAndMouseCursorPosition($0) },
+                setSuppressionInterval: { CGSetLocalEventsSuppressionInterval($0) }
+            )
+        }
+
+        static func noOp() -> Operations {
+            Operations(
+                liveDisplayID: { CGMainDisplayID() },
+                setCursorInBackground: { 0 },
+                hide: { _ in .success },
+                show: { _ in .success },
+                associate: { _ in .success },
+                setSuppressionInterval: { _ in }
+            )
+        }
+
+        private static func resolveLiveDisplayID() -> CGDirectDisplayID? {
+            guard let event = CGEvent(source: nil) else { return nil }
+            let point = event.location
+            var displayID = CGDirectDisplayID()
+            var count: UInt32 = 0
+            guard CGGetDisplaysWithPoint(point, 1, &displayID, &count) == .success,
+                  count == 1 else {
+                return nil
+            }
+            return displayID
+        }
+    }
+
+    private final class PrivateCursorSPI: @unchecked Sendable {
+        private typealias ConnectionFn = @convention(c) () -> Int32
+        private typealias SetConnectionPropertyFn = @convention(c) (
+            Int32, Int32, CFString, CFTypeRef
+        ) -> Int32
+
+        private let handle: UnsafeMutableRawPointer?
+        private let connection: ConnectionFn?
+        private let setter: SetConnectionPropertyFn?
+
+        init() {
+            let handle = dlopen(
+                "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+                RTLD_LAZY | RTLD_LOCAL
+            )
+            self.handle = handle
+
+            guard let handle else {
+                connection = nil
+                setter = nil
+                return
+            }
+
+            if let symbol = dlsym(handle, "_CGSDefaultConnection") {
+                connection = unsafeBitCast(symbol, to: ConnectionFn.self)
+            } else {
+                connection = nil
+            }
+
+            if let symbol = dlsym(handle, "CGSSetConnectionProperty") {
+                setter = unsafeBitCast(symbol, to: SetConnectionPropertyFn.self)
+            } else {
+                setter = nil
+            }
+        }
+
+        deinit {
+            if let handle { dlclose(handle) }
+        }
+
+        func setCursorInBackground() -> Int32? {
+            guard let connection, let setter else { return nil }
+            let cid = connection()
+            let result = setter(
+                cid,
+                cid,
+                "SetsCursorInBackground" as CFString,
+                kCFBooleanTrue
+            )
+            Diagnostics.log(
+                "issue96 deskflow-cursor-spi result=\(result) connection=_CGSDefaultConnection"
+            )
+            return result
+        }
+    }
+
+    private let lock = NSLock()
+    private let operations: Operations
+    private var activeGeneration: UInt64?
+    private var hiddenDisplayID: CGDirectDisplayID?
+
+    internal static func production() -> DeskflowCursorIsolation {
+        DeskflowCursorIsolation(operations: .production())
+    }
+
+    internal static func noOp() -> DeskflowCursorIsolation {
+        DeskflowCursorIsolation(operations: .noOp())
+    }
+
+    internal init(operations: Operations) {
+        self.operations = operations
+    }
+
+    /// Enters the Deskflow-style off-screen cursor lifecycle before CrossInput
+    /// makes suppression observable. Any partial failure is rolled back and
+    /// rejects suppression admission.
+    @discardableResult
+    internal func begin(generation: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard activeGeneration == nil, hiddenDisplayID == nil else {
+            Diagnostics.log("deskflow-cursor-isolation begin rejected active-generation")
+            return false
+        }
+        guard let displayID = operations.liveDisplayID() else {
+            Diagnostics.log("deskflow-cursor-isolation begin rejected display-unavailable")
+            return false
+        }
+        guard operations.setCursorInBackground() == 0 else {
+            Diagnostics.log("deskflow-cursor-isolation begin rejected background-spi")
+            return false
+        }
+
+        let hideResult = operations.hide(displayID)
+        guard hideResult == .success else {
+            Diagnostics.log(
+                "deskflow-cursor-isolation hide failed result=\(hideResult.rawValue)"
+            )
+            return false
+        }
+
+        let preDisassociateAssociate = operations.associate(true)
+        guard preDisassociateAssociate == .success else {
+            _ = operations.setCursorInBackground()
+            let rollbackShow = operations.show(displayID)
+            Diagnostics.log(
+                "deskflow-cursor-isolation pre-disassociate-associate failed "
+                    + "result=\(preDisassociateAssociate.rawValue) "
+                    + "rollback-show=\(rollbackShow.rawValue)"
+            )
+            return false
+        }
+
+        operations.setSuppressionInterval(0.0001)
+        let disassociateResult = operations.associate(false)
+        guard disassociateResult == .success else {
+            let rollbackAssociate = operations.associate(true)
+            _ = operations.setCursorInBackground()
+            let rollbackShow = operations.show(displayID)
+            operations.setSuppressionInterval(0.0)
+            Diagnostics.log(
+                "deskflow-cursor-isolation disassociate failed result=\(disassociateResult.rawValue) "
+                    + "rollback-associate=\(rollbackAssociate.rawValue) "
+                    + "rollback-show=\(rollbackShow.rawValue)"
+            )
+            return false
+        }
+
+        activeGeneration = generation
+        hiddenDisplayID = displayID
+        Diagnostics.log(
+            "deskflow-cursor-isolation entered generation=\(generation) display=\(displayID)"
+        )
+        return true
+    }
+
+    /// Balances only the generation that owns the remote cursor lifecycle.
+    /// Cleanup follows Deskflow's primary enter ordering before P0 is allowed
+    /// to perform its existing one-shot restore warp.
+    @discardableResult
+    internal func end(generation: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let activeGeneration else { return true }
+        guard activeGeneration == generation, let displayID = hiddenDisplayID else {
+            Diagnostics.log("deskflow-cursor-isolation stale-generation end rejected")
+            return false
+        }
+
+        let backgroundResult = operations.setCursorInBackground()
+        let showResult = operations.show(displayID)
+        let showAssociateResult = operations.associate(true)
+        let enterAssociateResult = operations.associate(true)
+        operations.setSuppressionInterval(0.0)
+
+        guard showResult == .success,
+              showAssociateResult == .success,
+              enterAssociateResult == .success else {
+            Diagnostics.log(
+                "deskflow-cursor-isolation cleanup failed generation=\(generation) "
+                    + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
+                    + "show=\(showResult.rawValue) "
+                    + "show-associate=\(showAssociateResult.rawValue) "
+                    + "enter-associate=\(enterAssociateResult.rawValue)"
+            )
+            return false
+        }
+
+        self.activeGeneration = nil
+        hiddenDisplayID = nil
+        Diagnostics.log(
+            "deskflow-cursor-isolation ended generation=\(generation) "
+                + "background=\(backgroundResult.map { String($0) } ?? "unavailable")"
+        )
+        return true
+    }
+
+    /// Last-resort teardown balance. It intentionally leaves
+    /// SetsCursorInBackground enabled, matching current Deskflow semantics.
+    internal func forceReset() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard activeGeneration != nil, let displayID = hiddenDisplayID else { return }
+
+        let backgroundResult = operations.setCursorInBackground()
+        let showResult = operations.show(displayID)
+        let showAssociateResult = operations.associate(true)
+        let enterAssociateResult = operations.associate(true)
+        operations.setSuppressionInterval(0.0)
+
+        if showResult == .success,
+           showAssociateResult == .success,
+           enterAssociateResult == .success {
+            activeGeneration = nil
+            hiddenDisplayID = nil
+        }
+        Diagnostics.log(
+            "deskflow-cursor-isolation force-reset "
+                + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
+                + "show=\(showResult.rawValue) "
+                + "show-associate=\(showAssociateResult.rawValue) "
+                + "enter-associate=\(enterAssociateResult.rawValue)"
+        )
+    }
+
+    internal var activeGenerationForTesting: UInt64? {
+        lock.withLock { activeGeneration }
+    }
+
+    internal var hiddenDisplayIDForTesting: CGDirectDisplayID? {
+        lock.withLock { hiddenDisplayID }
+    }
+}
