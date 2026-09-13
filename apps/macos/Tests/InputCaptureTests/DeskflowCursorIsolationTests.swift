@@ -9,17 +9,20 @@ private final class DeskflowCursorRecorder: @unchecked Sendable {
     private var hideResults: [CGError]
     private var showResults: [CGError]
     private var associateResults: [CGError]
+    private var suppressionResults: [Int32?]
 
     init(
         backgroundResults: [Int32?] = [0, 0],
         hideResults: [CGError] = [.success],
         showResults: [CGError] = [.success],
-        associateResults: [CGError] = [.success, .success, .success, .success]
+        associateResults: [CGError] = [.success, .success, .success, .success],
+        suppressionResults: [Int32?] = [0, 0]
     ) {
         self.backgroundResults = backgroundResults
         self.hideResults = hideResults
         self.showResults = showResults
         self.associateResults = associateResults
+        self.suppressionResults = suppressionResults
     }
 
     var events: [String] { lock.withLock { eventsStorage } }
@@ -52,9 +55,10 @@ private final class DeskflowCursorRecorder: @unchecked Sendable {
         }
     }
 
-    func suppression(_ value: Double) {
+    func suppression(_ value: Double) -> Int32? {
         lock.withLock {
             eventsStorage.append(value == 0 ? "suppression:0" : "suppression:0.0001")
+            return suppressionResults.isEmpty ? 0 : suppressionResults.removeFirst()
         }
     }
 }
@@ -116,6 +120,23 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         XCTAssertEqual(recorder.events, ["background", "hide:7"])
         XCTAssertNil(isolation.hiddenDisplayIDForTesting)
         XCTAssertFalse(isolation.isDisassociatedForTesting)
+    }
+
+    func testSuppressionIntervalUnavailableRejectsAdmissionAndRollsBackVisibility() {
+        let recorder = DeskflowCursorRecorder(suppressionResults: [nil])
+        let isolation = makeIsolation(recorder)
+
+        XCTAssertFalse(isolation.begin(generation: 22))
+        XCTAssertNil(isolation.activeGenerationForTesting)
+        XCTAssertNil(isolation.hiddenDisplayIDForTesting)
+        XCTAssertFalse(isolation.isDisassociatedForTesting)
+        XCTAssertEqual(
+            recorder.events,
+            [
+                "background", "hide:7", "associate:true", "suppression:0.0001",
+                "background", "show:7"
+            ]
+        )
     }
 
     func testDisassociateFailureRollsBackVisibilityAndSuppressionInterval() {
