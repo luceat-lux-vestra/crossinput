@@ -232,12 +232,12 @@ final class ExternalControlTakeoverTests: XCTestCase {
 
         _ = capture.handleForTesting(type: .keyDown, event: keyEvent(type: .keyDown, processID: physicalProcessID))
         _ = capture.handleForTesting(type: .leftMouseDown, event: mouseEvent(type: .leftMouseDown, processID: physicalProcessID))
-        XCTAssertEqual(observation.keyEvents.map(\.action), [0])
+        XCTAssertEqual(observation.keyEvents.map(\.transition), [.down])
 
         let takeover = mouseEvent(type: .mouseMoved, processID: remoteProcessID)
         _ = capture.handleForTesting(type: .mouseMoved, event: takeover)
 
-        XCTAssertEqual(observation.keyEvents.map(\.action), [0, 1])
+        XCTAssertEqual(observation.keyEvents.map(\.transition), [.down, .up])
         XCTAssertEqual(observation.resetCount, 1)
         XCTAssertEqual(observation.releases, [.externalControl])
     }
