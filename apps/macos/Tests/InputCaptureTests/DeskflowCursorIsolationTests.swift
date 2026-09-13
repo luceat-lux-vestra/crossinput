@@ -136,11 +136,12 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         XCTAssertTrue(isolation.begin(generation: 6))
         XCTAssertFalse(isolation.end(generation: 6))
         XCTAssertEqual(isolation.activeGenerationForTesting, 6)
-        XCTAssertFalse(isolation.isDisassociatedForTesting,
-                       "first return association already restored hardware coupling")
+        XCTAssertTrue(isolation.isDisassociatedForTesting,
+                      "failed first return association must retain hardware-coupling debt")
 
         isolation.forceReset()
         XCTAssertNil(isolation.activeGenerationForTesting)
+        XCTAssertFalse(isolation.isDisassociatedForTesting)
         XCTAssertFalse(recorder.events.contains { $0.contains("hide") || $0.contains("show") })
     }
 
