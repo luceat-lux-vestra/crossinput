@@ -19,6 +19,7 @@ is_java_17_home() {
 
 resolve_java_17_home() {
   local candidate=""
+  local sdkman_dir="$HOME/.sdkman/candidates/java"
 
   # Explicit project override wins when valid.
   if is_java_17_home "${JAVA_17_HOME:-}"; then
@@ -32,7 +33,7 @@ resolve_java_17_home() {
     return 0
   fi
 
-  # Native macOS JDK discovery; avoids machine-specific SDKMAN paths.
+  # Native macOS JDK discovery when the JDK is registered with java_home.
   if [ "$(uname -s)" = "Darwin" ] && [ -x /usr/libexec/java_home ]; then
     candidate="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
     if is_java_17_home "$candidate"; then
@@ -41,11 +42,17 @@ resolve_java_17_home() {
     fi
   fi
 
-  # Common SDKMAN fallback without pinning a particular patch/vendor directory.
-  candidate="$HOME/.sdkman/candidates/java/current"
-  if is_java_17_home "$candidate"; then
-    printf '%s\n' "$candidate"
-    return 0
+  # SDKMAN 'current' may point at a newer default JDK. Scan every installed
+  # SDKMAN candidate and select the first actual Java 17 home instead of
+  # assuming that the current symlink is Java 17.
+  if [ -d "$sdkman_dir" ]; then
+    for candidate in "$sdkman_dir"/*; do
+      [ -d "$candidate" ] || continue
+      if is_java_17_home "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
   fi
 
   return 1
@@ -55,8 +62,9 @@ JAVA_HOME="$(resolve_java_17_home || true)"
 if [ -z "$JAVA_HOME" ]; then
   echo "ERROR: JDK 17 not found." >&2
   echo "  Install/configure JDK 17, or set JAVA_17_HOME to its home directory." >&2
+  echo "  SDKMAN check: ls -1 \"$HOME/.sdkman/candidates/java\"" >&2
   if [ "$(uname -s)" = "Darwin" ]; then
-    echo "  macOS check: /usr/libexec/java_home -v 17" >&2
+    echo "  macOS check: /usr/libexec/java_home -V" >&2
   fi
   exit 1
 fi
