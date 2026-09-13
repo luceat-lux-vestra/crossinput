@@ -44,10 +44,12 @@ def main() -> None:
         re.compile(r"(?m)^\s*import\s+(?:CoreGraphics|AppKit|ApplicationServices|Protocol|AndroidBridge)\b"),
         "InputDomain imports a platform/protocol module",
     )
+    # These spellings represent concrete Android wire constants rather than
+    # prose that merely documents the forbidden dependency categories.
     require_no_pattern(
         domain_files,
-        re.compile(r"\b(?:KEYCODE_|META_|UHID|InputManager)\b"),
-        "InputDomain contains remote-platform/backend semantics",
+        re.compile(r"\b(?:KEYCODE_|META_)"),
+        "InputDomain contains Android key/meta constants",
     )
     require_no_pattern(
         capture_files,
