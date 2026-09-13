@@ -64,8 +64,10 @@ The domain intentionally contains no Session/Target/Control mutable owner. Under
 
 ## Compatibility contract
 
-CXI v1 remains unchanged in #103. Deterministic tests pin the existing key codes, modifier bits, actions, repeat behavior, and pointer payload semantics. Unsupported macOS keys remain unsupported rather than being assigned Android-specific meaning in the host layer.
+CXI v1 remains unchanged in #103. Deterministic tests pin the complete supported key-code table, modifier bits, actions, repeat behavior, and pointer payload semantics. Unsupported macOS keys remain unsupported rather than being assigned Android-specific meaning in the host layer.
 
 ## Migration rule
 
-Temporary compatibility names or test fixtures are migration-only. Production code must not regain Android-shaped host input records, and `Delivery -> InputCapture` must not return.
+The old Android-shaped input structs and the temporary test compatibility initializer are removed in #103. `InputCapture.PointerEvent` and `CapturedKeyEvent` remain only as source-level aliases to the `InputDomain` semantic types: they add no storage, Android semantics, or translation layer, and Delivery does not depend on them. Their host-facing names are tracked for removal during the #104 InputCapture decomposition.
+
+Production code must not regain Android-shaped host input records, and `Delivery -> InputCapture` must not return.
