@@ -349,7 +349,10 @@ final class CursorMutationExecutorTests: XCTestCase {
 
         let finished = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: makeMoveEvent(at: point)))
+            let event = makeMoveEvent(at: point)
+            let returned = capture.handleForTesting(type: .mouseMoved, event: event)
+            XCTAssertTrue(returned?.takeUnretainedValue() === event,
+                          "a successful hold must return the same normalized movement event")
             finished.signal()
         }
         XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)

@@ -57,11 +57,13 @@ private func issue96MoveEvent(at point: CGPoint, dx: Int64, dy: Int64) -> CGEven
     return event
 }
 
-/// Issue #96 proof obligations for the no-repeated-warp architecture.
+/// Issue #96 proof obligations for the one-physical-park + normalized-host-stream architecture.
 ///
-/// These tests deliberately inject the platform mutation so they verify the
-/// number and coordinates of physical cursor mutations without moving the real
-/// test runner's pointer.
+/// The candidate permits one physical Quartz park per suppression generation.
+/// Every later physical movement still forwards its raw delta remotely, but the
+/// incoming host event is rewritten to the configured edge with zero deltas and
+/// returned downstream. This proves the combined PR #125/#127 mechanism rather
+/// than either previously rejected mechanism in isolation.
 final class Issue96CursorMutationPolicyTests: XCTestCase {
     private var owners: [InputCaptureTestOwner] = []
     private var captures: [InputCapture] = []
@@ -113,7 +115,7 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
                        "#96 candidate must not silently change the P0 restore coordinate contract")
     }
 
-    func testInputCaptureStillConsumesAndForwardsEveryMoveWhileWarpCountStaysOne() {
+    func testInputCaptureForwardsEveryMoveReturnsNormalizedHostSamplesAndPhysicallyParksOnce() {
         let mutationObservation = Issue96MutationObservation()
         let forwarded = Issue96ForwardedMovementObservation()
         let executor = makeExecutor(observation: mutationObservation)
@@ -139,8 +141,20 @@ final class Issue96CursorMutationPolicyTests: XCTestCase {
 
         for (point, delta) in zip(points, deltas) {
             let event = issue96MoveEvent(at: point, dx: delta.0, dy: delta.1)
-            XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: event),
-                         "suppressed movement must remain consumed")
+            let returned = capture.handleForTesting(type: .mouseMoved, event: event)
+            XCTAssertTrue(returned?.takeUnretainedValue() === event,
+                          "every admitted suppressed move must return the same normalized host event")
+
+            let expectedHold = DisplayEdgeResolver.pointerPosition(
+                for: .left,
+                in: frame,
+                at: point,
+                threshold: 2
+            )
+            XCTAssertEqual(event.type, .mouseMoved)
+            XCTAssertEqual(event.location, expectedHold)
+            XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaX), 0)
+            XCTAssertEqual(event.getIntegerValueField(.mouseEventDeltaY), 0)
         }
 
         XCTAssertEqual(forwarded.generationValues, [1, 1, 1],
