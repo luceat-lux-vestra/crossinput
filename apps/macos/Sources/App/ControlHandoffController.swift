@@ -1,8 +1,17 @@
 import Foundation
 import InputCapture
+import InputCapability
 import EdgeSwitch
 import Diagnostics
 import Delivery
+
+enum ControlEnableResult: Equatable {
+    case enabled
+    case alreadyEnabled
+    case missingAccessibility
+    case missingInputMonitoring
+    case captureUnavailable
+}
 
 /// Thin composition boundary between capture and the control-handoff machine.
 /// It owns pointer safety and movement accounting, but has no session or ADB
@@ -14,6 +23,8 @@ final class ControlHandoffController: @unchecked Sendable {
     var onStateChange: ((ControlState) -> Void)?
 
     private let sender: InputSender
+    private let capabilityController: InputCapabilityController
+    private let captureStart: @MainActor () -> Bool
     private var transitionGate = TransitionSequenceGate()
     private var currentSuppressionGeneration: UInt64 = 0
     /// Serializes the control enable gate with capture callbacks. A callback
@@ -25,12 +36,17 @@ final class ControlHandoffController: @unchecked Sendable {
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
 
+    @MainActor
     init(sender: InputSender,
          capture: InputCapture = InputCapture(),
-         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine()) {
+         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
+         capabilityController: InputCapabilityController = InputCapabilityController(),
+         captureStart: (@MainActor () -> Bool)? = nil) {
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
+        self.capabilityController = capabilityController
+        self.captureStart = captureStart ?? { capture.startTrusted() }
 
         switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
@@ -82,15 +98,37 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     @MainActor
-    func enable() -> Bool {
-        guard !isEdgeSwitchEnabled else { return true }
-        guard capture.start() else { return false }
+    func enable() -> ControlEnableResult {
+        guard !isEdgeSwitchEnabled else { return .alreadyEnabled }
+
+        let capabilities = capabilityController.refresh()
+        guard capabilities.accessibilityGranted else {
+            return .missingAccessibility
+        }
+
+        guard captureStart() else {
+            let afterFailure = capabilityController.refresh()
+            if !afterFailure.inputMonitoringGranted {
+                return .missingInputMonitoring
+            }
+            return .captureUnavailable
+        }
+
         lifecycleLock.withLock {
             lifecycleStarted = true
             edgeSwitchEnabled = true
         }
         switchMachine.activate()
-        return true
+        return .enabled
+    }
+
+    /// Capability loss is a local host-control failure, never a Session
+    /// failure. Disable capture/control while leaving the Android Session and
+    /// selected Target untouched for a later safe retry.
+    @MainActor
+    func inputCapabilityLost() {
+        guard isEdgeSwitchEnabled || capture.isSuppressed else { return }
+        endControlEpoch(stopCapture: true)
     }
 
     /// Disables only edge-switch acquisition. The capture tap remains
@@ -160,6 +198,7 @@ final class ControlHandoffController: @unchecked Sendable {
             edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
         }
     }
+
     /// Production capture→sender wiring: one captured event, one admission
     /// decision, and — only when the event became a new batch owner — one
     /// delivery completion routed to handoff accounting on the main actor.
