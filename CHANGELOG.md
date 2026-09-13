@@ -5,19 +5,46 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-13
+
+Ampersand 0.1.1 is a pre-Architecture-Leap field-use maintenance release built from the reviewed production `main` lineage. It does not claim ADR-0012 Level-3 release-stability completion, and it does not satisfy the separate 0.2.0 permission/onboarding blocker tracked by #99.
+
 ### Added
 
-- Test-only deterministic keyboard backend override: `--keyboard-backend=uhid|input-manager|auto` argument for the Android helper (also accepted as `--keyboard-backend <value>`, and via `KEYBOARD_BACKEND=` for `scripts/deploy-helper.sh`); an unknown or missing value aborts startup instead of degrading to AUTO; production default remains AUTO (UHID preferred with automatic fallback)
-- Metadata-only logging for keyboard backend selection: `keyboard backend selected backend=uhid|input-manager mode=auto|forced`, reporting the backend that actually came up
-- Unit tests for keyboard backend selection, forced-mode semantics, failure paths, metadata-only logging, and override parsing
-- CI guard: shell scripts are syntax-checked (`bash -n`)
-- Physical-device verification of the forced InputManager keyboard fallback on SM-G977N / Android 12; single key delivery, modifier delivery, release behavior, held-key synthetic release during SHUTDOWN, and graceful process termination passed
+- Explicit **Enable/Disable Edge Switch** and **Disconnect** controls, keeping control ownership separate from Android session teardown.
+- Test-only deterministic pointer/keyboard backend selection and failure hooks used to verify UHID/InputManager routing and failover paths.
+- Metadata-only delivery/transport diagnostics, candidate build identity, wireless-ADB stress tooling, and the ADR-0012 fail-closed stability analyzer.
+- Physical-device verification coverage for the forced InputManager keyboard fallback on SM-G977N / Android 12, including held-key shutdown cleanup.
+- Hardened CI, CodeQL, release provenance, checksum generation, evidence sanitization, and repository policy checks.
 
 ### Changed
 
-- KeyboardBackend now honors forced backend selection: forced UHID never falls back to virtual injection; forced InputManager never uses UHID; failures in forced modes are logged and reported safely without silent fallback
-- Virtual key injection moved behind a `VirtualKeyInjector` seam so the fallback path is testable off-device, and a `SecurityException` from the hidden API is now logged by its own class name instead of `InvocationTargetException`
-- Helper shutdown now captures the main looper before starting the stdin worker, performs keyboard cleanup before HID cleanup on the main thread, and releases accepted virtual key-down events before teardown; the deploy helper waits for the actual `app_process` to exit before orphan cleanup
+- Reworked the macOS application around explicit Session, Target, Control, delivery, and transport boundaries while retaining CXI v1 compatibility.
+- DeX desktop pointer routing now prefers a system-routed UHID mouse so the visible Android cursor follows the normal InputReader path; non-desktop targets continue to use explicit-display InputManager routing.
+- Semantic pointer commands now use explicit pointer delivery results, including accepted movement, while helper backend selection/failover remains isolated on Android.
+- Horizontal scrolling is supported consistently on the UHID and InputManager pointer paths.
+- Keyboard backend selection is deterministic under test overrides; AUTO continues to prefer UHID and fall back to InputManager where applicable.
+- Helper shutdown and backend cleanup sequencing were strengthened, including release of accepted virtual key-down state before teardown.
+- Product positioning and documentation now use **Ampersand** as the user-facing application name and **CrossInput/CXI** for repository/protocol terminology.
+
+### Fixed
+
+- Prevented immediate or directionally inverted edge returns by normalizing the first movement after entry and applying one consistent four-edge direction model.
+- Fixed pull-back from a clamped Android boundary by crediting return-direction requested intent instead of losing it when accepted remote movement is zero.
+- Made the suppression watchdog actually execute independently of the event-tap run loop and blocked dead-session edge re-entry after fail-safe return.
+- Moved the Shift-Cmd-X emergency return check into the event tap so it remains available while keyboard events are suppressed.
+- Scoped edge handoff to the macOS display that actually contains the current pointer event, avoiding stale multi-display geometry.
+- Prevented scroll/move queue pressure from being misclassified as remote transport failure; adjacent additive work coalesces and bounded overload sheds additive samples instead of forcing a false `remoteUnavailable` return.
+- Prevented stale event-tap callbacks from being relabeled into a later suppression generation and delivered into a replacement remote-control epoch.
+- Corrected InputManager right/middle-click metadata and strengthened backend failover/lifecycle handling.
+- Removed raw key-code/error-payload logging from keyboard failure paths and added guards against input-payload logging regressions.
+
+### Known limitations / evidence status
+
+- The packaged macOS app still does not bootstrap its matching Android helper automatically; the helper must be deployed separately with the documented development workflow.
+- Issue #96 is an accepted macOS native cursor-presentation limitation under repeated host confinement. Pointer/control safety behavior is retained; the exact AppKit/WindowServer root cause remains unverified.
+- Issue #99 remains an explicit **0.2.0 release blocker** for first-run input-permission onboarding and runtime permission recovery.
+- ADR-0012 Level-3 physical release-stability evidence remains tracked separately in #68 and is **INCOMPLETE (0/100 accepted cycles for the current post-rewrite lineage)**. This 0.1.1 field-use release does not claim Level-3 PASS.
 
 ## [0.1.0] - 2026-08-05
 
