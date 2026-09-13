@@ -98,18 +98,30 @@ Target change is an ordering barrier:
 
 1. restore local host control / end the current ControlLease;
 2. stop admitting new input for the old target;
-3. cancel or quiesce old delivery work according to the delivery contract;
-4. invalidate the old TargetLease;
-5. execute `SELECT_DISPLAY` on the ordered remote command lane;
-6. publish the new TargetLease only after confirmation;
-7. allow a new ControlLease to be acquired.
+3. close/cancel the old DeliveryWorker so it cannot create new remote commands;
+4. invalidate the old TargetLease at the Session authority **before** queuing
+   the new selection;
+5. enqueue `SELECT_DISPLAY` on the same ordered remote command lane used by
+   input delivery;
+6. let already-started old-target work finish or fail ahead of that barrier;
+7. reject any late old-target delivery that arrives after lease invalidation;
+8. publish the new TargetLease only after the helper confirms selection; and
+9. allow a new ControlLease to be acquired.
+
+If the command lane cannot reach the selection barrier within its bounded remote
+failure policy, the Session is invalidated rather than allowing route state to
+become ambiguous.
 
 This prevents old input from being silently redirected to a newly selected
 helper-global target.
 
 ### 4. One ControlLease is the authority for remote ownership
 
-Entering remote control creates one immutable **ControlLease**. It binds:
+Entering remote control creates one **ControlLease**. Its identity and captured
+Session/Target references are immutable. Its operational state has one allowed
+transition: **open -> closed**.
+
+It binds:
 
 - the current SessionHandle;
 - the current TargetLease;
@@ -124,6 +136,39 @@ Ending control closes that ingress and releases the host SuppressionLease.
 Late callbacks holding the old ingress can only fail admission; they cannot
 become valid for a replacement ControlLease.
 
+#### Control acquisition ordering
+
+Acquisition is explicit and fail-closed:
+
+1. verify capability readiness and capture availability;
+2. snapshot the exact SessionHandle and TargetLease that will own this Control;
+3. create the bounded InputIngress and DeliveryWorker bound to those handles;
+4. acquire/arm the host SuppressionLease with that exact ingress;
+5. only after suppression admission succeeds, publish the ControlLease as
+   remote-owned.
+
+If any step fails, partially created remote resources are closed/cancelled and
+Control remains local. There is no interval where host suppression is active but
+remote ingress ownership has not yet been established.
+
+#### Synchronous local-return gate
+
+Actor scheduling is not part of the safety proof. Every open ControlLease exposes
+an idempotent, thread-safe **local-return gate** callable from watchdog, event-tap,
+delivery, Session, Target, capability, and UI failure paths.
+
+The gate atomically wins once and immediately:
+
+1. marks the lease closed;
+2. releases host SuppressionLease locally;
+3. closes InputIngress; and
+4. schedules, but does not wait for, ControlCoordinator reconciliation,
+   DeliveryWorker cancellation, and remote cleanup.
+
+A lower-level failure source may signal this gate through an injected callback or
+safety handle, but it does not thereby become the Control owner. Ownership of
+Control state remains with ControlCoordinator.
+
 ### 5. Local restoration is independent and always wins
 
 Host safety is a local invariant, not a remote RPC outcome.
@@ -132,7 +177,8 @@ On normal return, watchdog expiry, emergency shortcut, permission/capture loss,
 remote failure, target invalidation, session replacement, external-control
 takeover, disable, or teardown:
 
-1. **restore local macOS control first**;
+1. **restore local macOS control first through the ControlLease local-return
+   gate**;
 2. close/invalidate the ControlLease ingress;
 3. cancel pending remote work;
 4. attempt bounded best-effort remote held-input cleanup;
@@ -225,8 +271,8 @@ Default backpressure semantics are:
 - cleanup/release transitions: stronger ordering than ordinary lossy samples.
 
 If the bounded mailbox cannot admit a non-droppable state transition, the safe
-response is to end the ControlLease and return local, not to silently lose the
-transition.
+response is to close the ControlLease through its local-return gate, not to
+silently lose the transition.
 
 ### 10. DeliveryWorker is asynchronous; blocking bridges are removed
 
@@ -265,6 +311,11 @@ The lane executes one stateful command at a time through completion. A newer
 Target selection cannot overtake an in-flight input command, and old input
 cannot be admitted against a newly published TargetLease.
 
+Every target-dependent command carries its TargetLease. The Session validates
+that lease at command admission and again immediately before execution. Work
+already executing before invalidation is ordered ahead of the target-selection
+barrier; work arriving after invalidation is rejected and never written.
+
 Read-only/discovery operations may use a separate safe request path only when
 there is no helper-global ordering dependency.
 
@@ -283,6 +334,9 @@ The architecture does not pretend such state is known.
 - If a non-idempotent state-changing delivery becomes ambiguous and the current
   protocol/backend cannot prove recovery, the current Session is invalidated
   rather than reused as if its input state were trustworthy.
+- If #107 cannot prove helper-side release semantics for a backend (including
+  process/session teardown), that gap must remain explicit and receive a
+  separate implementation/protocol decision; it must not be assumed away.
 
 No infinite cleanup retry is allowed.
 
@@ -304,7 +358,8 @@ A Target failure:
 A Session failure:
 
 - invalidates all TargetLeases and ControlLeases scoped to it;
-- restores local control immediately;
+- restores local control immediately through the active lease's local-return
+  gate;
 - may enter reconnect policy owned by SessionManager.
 
 A Control failure:
@@ -354,6 +409,87 @@ macOS event
 
 CXI v1 remains wire-compatible unless a separate protocol change is explicitly
 approved.
+
+## Lifecycle state contracts
+
+The target model intentionally avoids one giant application state machine. Each
+owner has a small state contract and coordinates only through explicit handles,
+leases, and signals.
+
+### Capability
+
+```text
+unknown/checking -> ready
+                 -> blocked(reason)
+ready            -> blocked(reason)   // runtime revocation/loss
+blocked          -> ready             // refresh/recovery
+```
+
+Capability state does not own or destroy Session.
+
+### Session manager
+
+```text
+disconnected -> connecting(candidate)
+connecting   -> ready(SessionHandle)
+connecting   -> failed/disconnected
+ready        -> reconnecting/disconnected
+reconnecting -> ready(new SessionHandle)
+reconnecting -> failed/disconnected
+```
+
+A candidate connection is private until handshake/capability negotiation
+succeeds. A published SessionHandle is never rebound to another connection.
+
+A concrete SessionHandle itself transitions only:
+
+```text
+open -> closing -> closed
+```
+
+Once closed it never becomes open again.
+
+### Target
+
+```text
+unavailable -> available(snapshot)
+available   -> selecting(candidate)
+selected(A) -> selecting(B)           // after Control A is closed
+selecting   -> selected(TargetLease)
+selecting   -> available/unavailable   // failure/disappearance
+any         -> unavailable             // Session invalidated
+```
+
+A TargetLease is scoped to one open SessionHandle and one confirmed route.
+
+### Control
+
+The externally meaningful ownership model is deliberately small:
+
+```text
+disabled -> local
+local    -> remote(ControlLease)
+remote   -> local                      // normal/fail-safe return
+local    -> disabled
+remote   -> disabled                   // implemented as local-return then disable
+```
+
+`returning` may exist as an internal/projection transient, but no remote cleanup
+is allowed to keep host suppression active while waiting in that state.
+
+Edge arming is policy data, not a separately owned lifecycle resource.
+
+### Delivery
+
+One DeliveryWorker belongs to one ControlLease:
+
+```text
+open -> closing -> closed
+```
+
+A worker that observes ambiguous persistent remote state may additionally mark
+the owning Session untrustworthy, but it is never rebound to another Session,
+Target, or Control.
 
 ## Target module / dependency direction
 
@@ -425,8 +561,8 @@ if implementation evidence justifies it) owns Control lifecycle state and the
 pure HandoffPolicy.
 
 The intended implementation is an actor. Local host release does not depend on
-actor scheduling: HostSuppressionController can release synchronously and then
-notify the actor of the resulting transition.
+actor scheduling: the current ControlLease local-return gate and
+HostSuppressionController release synchronously, then notify the actor.
 
 ### SessionManager / RemoteDeviceSession
 
@@ -446,9 +582,11 @@ InputIngress. No worker is rebound to a replacement Session or Target.
 
 ### I1 — Local Safety
 
-**Property:** macOS input can always return locally without waiting for Android.
+**Property:** macOS input can always return locally without waiting for Android
+or for ControlCoordinator actor scheduling.
 
-**Enforced by:** HostSuppressionController watchdog/emergency/local release.
+**Enforced by:** ControlLease local-return gate + HostSuppressionController
+watchdog/emergency/local release.
 
 ### I2 — No Cross-Lease Delivery
 
@@ -470,8 +608,9 @@ SessionReference.
 **Property:** input admitted for target A cannot be delivered after target B is
 published as current.
 
-**Enforced by:** TargetLease validation + ordered target-selection/input command
-lane + target-change control barrier.
+**Enforced by:** TargetLease invalidation before selection, admission/execution
+validation, ordered target-selection/input command lane, and target-change
+Control barrier.
 
 ### I5 — One Suppression Owner
 
@@ -498,7 +637,7 @@ fails safe.
 
 **Property:** remote cleanup is best effort after local restoration.
 
-**Enforced by:** return ordering and bounded asynchronous cleanup.
+**Enforced by:** local-return gate ordering and bounded asynchronous cleanup.
 
 ### I9 — Ambiguous Remote State Is Not Reused as Healthy
 
@@ -646,7 +785,13 @@ Before this ADR is accepted:
   cross-owner ordering relation is explicit;
 - review must specifically challenge Target selection vs in-flight input,
   actor reentrancy, local fail-safe independence, session replacement, held
-  state after timeout, and bounded capture behavior;
+  state after timeout, acquisition/rollback ordering, and bounded capture
+  behavior;
+- deterministic design review must trace at minimum: normal handoff/return,
+  target change with input in flight, Session replacement with input in flight,
+  permission revocation, queue saturation on a non-droppable transition,
+  external-control takeover, watchdog/emergency return, and ambiguous key/button
+  timeout;
 - `docs/architecture.md`, `AGENTS.md`, and ADR-0009 must not contradict this
   contract.
 
