@@ -42,7 +42,9 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
                 setCursorInBackground: { spi.setCursorInBackground() },
                 hide: { CGDisplayHideCursor($0) },
                 show: { CGDisplayShowCursor($0) },
-                associate: { CGAssociateMouseAndMouseCursorPosition($0) },
+                associate: { associated in
+                    CGAssociateMouseAndMouseCursorPosition(associated ? 1 : 0)
+                },
                 setSuppressionInterval: { CGSetLocalEventsSuppressionInterval($0) }
             )
         }
