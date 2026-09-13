@@ -3,6 +3,7 @@ import AppKit
 import Protocol
 import AndroidBridge
 import InputCapture
+import InputCapability
 import EdgeSwitch
 import AppSettings
 import Diagnostics
@@ -56,6 +57,12 @@ extension AppModel {
     }
 }
 
+private enum InputControlIssue: Equatable {
+    case missingAccessibility
+    case missingInputMonitoring
+    case captureUnavailable
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var sessionState: SessionState = .disconnected
@@ -66,17 +73,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var hostDisplays: [HostDisplayEdgeOption] = []
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
+    @Published private(set) var inputCapabilities: InputCapabilitySnapshot
+    @Published private(set) var inputMonitoringRequired = false
+    @Published private var inputControlIssue: InputControlIssue?
+
     /// Invalidates an in-flight connect/reconnect action when the user starts
     /// a newer action or intentionally disconnects.
     private var connectionIntentGeneration: UInt64 = 0
 
     let sessionController: SessionController
     let handoffController: ControlHandoffController
+    let inputCapabilityController: InputCapabilityController
     private let targetController: TargetSelectionController
 
     var capture: InputCapture { handoffController.capture }
 
-    init() {
+    init(inputCapabilityController: InputCapabilityController = InputCapabilityController(),
+         captureStart: (@MainActor () -> Bool)? = nil) {
+        self.inputCapabilityController = inputCapabilityController
+        self.inputCapabilities = inputCapabilityController.snapshot
+
         let reference = SessionReference()
         sessionController = SessionController(reference: reference)
         let sender = InputSender(session: reference)
@@ -85,7 +101,11 @@ final class AppModel: ObservableObject {
         sender.onDeliveryObservation = { [weak sessionController] observation in
             sessionController?.forwardDeliveryObservation(observation)
         }
-        handoffController = ControlHandoffController(sender: sender)
+        handoffController = ControlHandoffController(
+            sender: sender,
+            capabilityController: inputCapabilityController,
+            captureStart: captureStart
+        )
         targetController = TargetSelectionController(session: reference)
 
         // Production telemetry sink (review round 3): a single lock-protected
@@ -113,6 +133,10 @@ final class AppModel: ObservableObject {
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
         }
+        inputCapabilityController.onChange = { [weak self] snapshot in
+            self?.applyInputCapabilitySnapshot(snapshot)
+        }
+        inputCapabilityController.startMonitoring()
         refreshHostDisplays()
     }
 
@@ -155,17 +179,15 @@ final class AppModel: ObservableObject {
                 throw AppConnectionError.noAvailableTarget
             }
             applyEdgeConfig()
-            guard enable() else {
-                sessionController.fail("Accessibility permission required (System Settings → Privacy & Security → Accessibility)")
-                handoffController.remoteUnavailable()
-                return
-            }
+            // Input capability belongs to local Control, not Session. A
+            // blocked/failed capture attempt leaves the healthy Android
+            // Session and selected Target intact for an explicit retry.
+            _ = enable()
         } catch {
             guard intent == connectionIntentGeneration else { return }
             Diagnostics.log("connect failed: \(error)")
-            // A post-handshake failure (for example LIST_DISPLAYS or target
-            // refresh rejection) must not leave a live helper behind while
-            // the presentation state says the session failed.
+            // A post-handshake remote failure (for example LIST_DISPLAYS or
+            // target refresh rejection) is still a Session failure.
             sessionController.fail(error.localizedDescription)
             handoffController.remoteUnavailable()
         }
@@ -228,14 +250,73 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Control handoff
+    // MARK: - Input capability / control handoff
 
-    func enable() -> Bool {
-        guard handoffController.enable() else {
-            Diagnostics.log("capture start failed: accessibility not granted")
-            return false
+    @discardableResult
+    func refreshInputCapabilities() -> InputCapabilitySnapshot {
+        let snapshot = inputCapabilityController.refresh()
+        // `onChange` only fires on a real transition, so keep the presentation
+        // projection synchronized even when this is an explicit no-op refresh.
+        inputCapabilities = snapshot
+        if snapshot.inputMonitoringGranted {
+            inputMonitoringRequired = false
+            if inputControlIssue == .missingInputMonitoring { inputControlIssue = nil }
         }
-        return true
+        if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
+            inputControlIssue = nil
+        }
+        return snapshot
+    }
+
+    func requestAccessibility() {
+        let snapshot = inputCapabilityController.requestAccessibility()
+        applyInputCapabilitySnapshot(snapshot)
+    }
+
+    func requestInputMonitoring() {
+        let snapshot = inputCapabilityController.requestInputMonitoring()
+        applyInputCapabilitySnapshot(snapshot)
+        if !snapshot.inputMonitoringGranted {
+            openInputMonitoringSettings()
+        }
+    }
+
+    private func applyInputCapabilitySnapshot(_ snapshot: InputCapabilitySnapshot) {
+        let lostAccessibility = inputCapabilities.accessibilityGranted && !snapshot.accessibilityGranted
+        inputCapabilities = snapshot
+
+        if snapshot.inputMonitoringGranted {
+            inputMonitoringRequired = false
+            if inputControlIssue == .missingInputMonitoring { inputControlIssue = nil }
+        }
+        if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
+            inputControlIssue = nil
+        }
+
+        guard lostAccessibility else { return }
+        Diagnostics.log("input capability lost capability=accessibility action=local-return")
+        inputControlIssue = .missingAccessibility
+        handoffController.inputCapabilityLost()
+    }
+
+    @discardableResult
+    func enable() -> ControlEnableResult {
+        let result = handoffController.enable()
+        switch result {
+        case .enabled, .alreadyEnabled:
+            inputControlIssue = nil
+            // A successfully created modifying tap proves the current product
+            // path is usable even if Input Monitoring is not separately listed.
+            inputMonitoringRequired = false
+        case .missingAccessibility:
+            inputControlIssue = .missingAccessibility
+        case .missingInputMonitoring:
+            inputMonitoringRequired = true
+            inputControlIssue = .missingInputMonitoring
+        case .captureUnavailable:
+            inputControlIssue = .captureUnavailable
+        }
+        return result
     }
 
     func disableEdgeSwitch() {
@@ -262,13 +343,48 @@ final class AppModel: ObservableObject {
         sessionState == .ready
     }
 
+    var accessibilityStatusText: String {
+        inputCapabilities.accessibilityGranted ? "Granted" : "Required"
+    }
+
+    var inputMonitoringStatusText: String {
+        if inputCapabilities.inputMonitoringGranted { return "Granted" }
+        return inputMonitoringRequired ? "Required" : "Not separately granted"
+    }
+
+    var inputControlStatusText: String? {
+        switch inputControlIssue {
+        case .missingAccessibility:
+            return "Accessibility is required for Edge Switch"
+        case .missingInputMonitoring:
+            return "Input Monitoring is required on this Mac configuration"
+        case .captureUnavailable:
+            return "Input capture could not be created"
+        case nil:
+            return nil
+        }
+    }
+
     func emergencyReturn() {
         handoffController.emergencyReturn()
     }
 
     func openAccessibilitySettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-        NSWorkspace.shared.open(url)
+        openPrivacySettings(anchor: "Privacy_Accessibility")
+    }
+
+    func openInputMonitoringSettings() {
+        openPrivacySettings(anchor: "Privacy_ListenEvent")
+    }
+
+    private func openPrivacySettings(anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)"),
+           NSWorkspace.shared.open(url) {
+            return
+        }
+        if let fallback = URL(string: "x-apple.systempreferences:com.apple.preference.security") {
+            _ = NSWorkspace.shared.open(fallback)
+        }
     }
 
     var isDisconnected: Bool {
@@ -345,7 +461,6 @@ private struct AppMenu: View {
 
             if model.isDisconnected {
                 Button("Connect") { Task { await model.connectDefault() } }
-                Button("Grant Accessibility…") { model.openAccessibilitySettings() }
             }
 
             if let edgeSwitchAction = model.edgeSwitchActionTitle {
@@ -354,6 +469,22 @@ private struct AppMenu: View {
             if model.shouldShowDisconnect {
                 Button("Disconnect") { model.disconnect() }
             }
+
+            Divider()
+            Text("Input Permissions")
+            Text("Accessibility — \(model.accessibilityStatusText)")
+            if !model.inputCapabilities.accessibilityGranted {
+                Button("Grant Accessibility…") { model.requestAccessibility() }
+                Button("Open Accessibility Settings…") { model.openAccessibilitySettings() }
+            }
+            Text("Input Monitoring — \(model.inputMonitoringStatusText)")
+            if model.inputMonitoringRequired && !model.inputCapabilities.inputMonitoringGranted {
+                Button("Grant Input Monitoring…") { model.requestInputMonitoring() }
+            }
+            if let inputControlStatus = model.inputControlStatusText {
+                Text(inputControlStatus).foregroundStyle(.secondary)
+            }
+            Button("Refresh Input Permissions") { model.refreshInputCapabilities() }
 
             if !model.targets.isEmpty {
                 Divider()
@@ -397,7 +528,13 @@ private struct AppMenu: View {
             Divider()
             Button("Quit") { NSApplication.shared.terminate(nil) }
         }
-        .onAppear { model.refreshHostDisplays() }
+        .onAppear {
+            model.refreshHostDisplays()
+            model.refreshInputCapabilities()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshInputCapabilities()
+        }
     }
 
     @MainActor
@@ -406,6 +543,10 @@ private struct AppMenu: View {
         case .disconnected: return "Not connected"
         case .connecting: return "Connecting…"
         case .ready:
+            if let inputStatus = model.inputControlStatusText,
+               model.controlState == .disabled {
+                return inputStatus
+            }
             switch model.controlState {
             case .disabled: return "Edge Switch disabled"
             case .local: return "Local"
