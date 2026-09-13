@@ -151,7 +151,7 @@ final class DeskflowCursorIsolationTests: XCTestCase {
     func testPartialCleanupDoesNotDoubleShowDuringForceReset() {
         let recorder = DeskflowCursorRecorder(
             showResults: [.success],
-            associateResults: [.success, .success, .failure, .success]
+            associateResults: [.success, .success, .success, .failure]
         )
         let isolation = makeIsolation(recorder)
 
