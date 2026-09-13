@@ -124,11 +124,13 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
 
-    /// Production remote ownership uses the Deskflow-style cursor lifecycle.
-    /// The hardware pointer is disassociated only after background authority and
-    /// cursor hiding have been established. Steady-state `.hold` requests keep
-    /// the existing generation gates but perform zero absolute repositioning.
-    /// The existing one-shot `.restore` remains P0-owned on local return.
+    /// Production remote ownership uses the visible-cursor Deskflow-derived
+    /// lifecycle. Background cursor authority is reasserted and the hardware
+    /// mouse is disassociated for the remote epoch, but hide/show is deliberately
+    /// omitted so the native cursor-presentation oracle remains observable.
+    /// Steady-state `.hold` requests keep the existing generation gates while
+    /// performing zero absolute repositioning. The existing one-shot `.restore`
+    /// remains P0-owned on local return.
     internal static func production() -> CursorMutationExecutor {
         CursorMutationExecutor(deskflowCursorIsolation: .production()) { kind, point in
             guard productionPerformsPositionMutation(for: kind) else { return }
@@ -270,8 +272,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     }
 
     /// Invalidates an ownership epoch before `InputCapture` releases local
-    /// suppression. The Deskflow lifecycle is balanced before the epoch becomes
-    /// inactive; P0 can then admit only the generation-matched restore request.
+    /// suppression. The Deskflow-derived lifecycle is balanced before the epoch
+    /// becomes inactive; P0 can then admit only the generation-matched restore.
     @discardableResult
     func endOwnership(generation: UInt64) -> Bool {
         guard ownershipLock.lock(
