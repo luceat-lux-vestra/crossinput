@@ -141,8 +141,8 @@ final class DeskflowCursorIsolationTests: XCTestCase {
 
     func testDisassociateFailureRollsBackVisibilityAndSuppressionInterval() {
         let recorder = DeskflowCursorRecorder(
-            associateResults: [.success, .failure, .success],
-            showResults: [.success]
+            showResults: [.success],
+            associateResults: [.success, .failure, .success]
         )
         let isolation = makeIsolation(recorder)
 
