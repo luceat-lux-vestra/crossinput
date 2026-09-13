@@ -35,7 +35,11 @@ Examples include:
   reconnect, display refresh, edge configuration, diagnostics projection, and
   presentation;
 - CXI v1 target selection mutating helper-global routing state while later
-  pointer/keyboard messages implicitly depend on that state.
+  pointer/keyboard messages implicitly depend on that state; and
+- CXI v1 pointer transitions receiving `POINTER_RESULT` while `KEY_EVENT` is
+  currently fire-and-forget, so the host cannot distinguish helper-accepted
+  keyboard transitions from helper-side drops/rejections that leave the
+  Session alive.
 
 This structure is not being retained merely to reduce diff size. The Architecture
 Leap explicitly permits replacement or deletion of existing classes/modules when
@@ -283,12 +287,17 @@ The worker:
 
 - serializes semantic input delivery;
 - performs semantic-to-CXI v1 translation at the remote adapter boundary;
-- awaits responses asynchronously;
-- publishes delivery acknowledgements/failures back to ControlCoordinator;
-- owns the authoritative host-side ledger of remotely acknowledged held
-  keys/buttons for that ControlLease; and
+- awaits explicit delivery outcomes where the protocol provides them;
+- publishes delivery outcomes/failures back to ControlCoordinator;
+- owns the authoritative host-side ledger of **confirmed** remotely-held
+  persistent inputs once the relevant delivery-outcome contract exists; and
 - stops when the lease is closed, the Session is invalid, or the TargetLease is
   no longer current.
+
+Pointer button transitions already have a `POINTER_RESULT` outcome. The current
+pre-Leap `KEY_EVENT` path does **not** have an equivalent remote outcome and is
+therefore not evidence that a key transition was applied. The target design does
+not label fire-and-forget key writes as acknowledged delivery.
 
 `SessionConnection.requestBlocking()` and semaphore-based async-to-sync request
 bridges are removed. No capture callback waits for a remote acknowledgement.
@@ -316,18 +325,24 @@ that lease at command admission and again immediately before execution. Work
 already executing before invalidation is ordered ahead of the target-selection
 barrier; work arriving after invalidation is rejected and never written.
 
+For a fire-and-forget legacy command, "completion" means completion of the
+protocol's currently defined send/order contract, not proof of remote semantic
+application. Persistent input is not allowed to rely on that weaker definition
+in the final Leap architecture; see the keyboard-outcome requirement below.
+
 Read-only/discovery operations may use a separate safe request path only when
 there is no helper-global ordering dependency.
 
 ### 12. Ambiguous remote state invalidates trust
 
-A timeout or transport failure after sending a state-changing input can leave
-remote held state ambiguous: the helper may have applied the event even though
-the host did not observe an acknowledgement.
+A timeout, stream failure, or missing semantic outcome after sending a
+state-changing input can leave remote held state ambiguous: the helper may have
+applied the event even though the host cannot prove it.
 
 The architecture does not pretend such state is known.
 
-- Confirmed held state is tracked by DeliveryWorker.
+- Confirmed held state is tracked by DeliveryWorker only when the remote outcome
+  contract proves the transition was applied.
 - Cleanup is bounded and best effort.
 - The Android helper must also clean backend-owned held state on session/helper
   shutdown where the backend permits it (defense in depth; audited in #107).
@@ -407,8 +422,58 @@ macOS event
   -> Android backend adapter
 ```
 
-CXI v1 remains wire-compatible unless a separate protocol change is explicitly
-approved.
+CXI v1 framing/version compatibility remains the baseline. An additive v1
+capability/message extension may be introduced by a separately approved
+protocol issue when required to satisfy an invariant below; that is not a CXI
+v2 migration.
+
+### 16. Persistent keyboard transitions require an explicit delivery outcome
+
+The current CXI v1 keyboard path is weaker than the pointer path:
+
+- pointer move/button/scroll -> helper returns `POINTER_RESULT`;
+- `KEY_EVENT` -> helper processes the event but sends no correlated semantic
+  result;
+- the helper may reject/drop InputManager or forced-UHID key delivery while
+  keeping the Session alive and reporting only metadata diagnostics.
+
+This means the host cannot currently distinguish "key transition applied" from
+"helper remained alive but this transition was dropped." That is insufficient
+for the target invariant that persistent state transitions are either delivered
+in order or fail safe.
+
+The target architecture therefore requires an explicit keyboard-delivery outcome
+contract before the Leap's delivery migration is complete.
+
+**Preferred design:** keep CXI framing/version at v1 and add an additive
+capability plus correlated keyboard result, conceptually:
+
+```text
+HELLO_ACK capability: semantic-key-result
+KEY_EVENT(requestId != 0)
+  -> KEY_RESULT(requestId, delivered | failed)
+```
+
+Exact message names/encoding are decided in the dedicated protocol change, not
+by this architecture ADR. The important contract is:
+
+- positive result means the helper/backend reports that the semantic transition
+  was accepted/applied according to that backend's contract;
+- negative result is an explicit failure and causes the Control fail-safe path;
+- timeout/stream loss after send is ambiguous and invalidates Session trust for
+  persistent held state;
+- DeliveryWorker updates key-held state only after positive outcome;
+- helper teardown cleanup remains defense in depth, not a substitute for normal
+  delivery observability.
+
+A wire change is not required only if a later implementation proves an
+equivalent outcome/cleanup contract with the same safety properties. No such
+proof exists in the current pre-Leap path, so fire-and-forget keyboard delivery
+is **not** accepted as the final target architecture.
+
+This protocol work must be tracked separately under the Remote Track, update
+`protocol/protocol.md`, both implementations, capability negotiation, fixtures,
+and exact-head device evidence. It does not require CXI v2.
 
 ## Lifecycle state contracts
 
@@ -628,10 +693,11 @@ callback path.
 
 ### I7 — Persistent Transitions Are Never Silently Lost
 
-**Property:** key/button state transitions are delivered in order or control
-fails safe.
+**Property:** key/button state transitions are delivered in order with an
+explicit semantic outcome, or Control fails safe. They are never silently lost.
 
-**Enforced by:** unified ordered input lane + non-droppable admission policy.
+**Enforced by:** unified ordered input lane + non-droppable admission policy +
+pointer result / required keyboard outcome contract.
 
 ### I8 — Cleanup Never Blocks Local Return
 
@@ -673,8 +739,9 @@ The following mapping is directional, not a requirement to preserve names:
 | `CapturedKeyEvent` Android semantics | **delete from host API** | semantic key type in #103 |
 | `InputSender` | bounded ingress + per-lease async delivery | InputIngress + DeliveryWorker |
 | separate pointer/keyboard delivery queues | **delete** | one ordered semantic lane |
-| host-side duplicate held-input state | consolidate | DeliveryWorker ledger; helper defense-in-depth |
-| current `Protocol` target | keep v1 wire, isolate translation | CXI v1 adapter |
+| host-side duplicate held-input state | consolidate | DeliveryWorker outcome ledger; helper defense-in-depth |
+| fire-and-forget `KEY_EVENT` | **not final target** | additive v1 semantic key-result contract or proven equivalent |
+| current `Protocol` target | keep v1 framing; isolate translation | CXI v1 adapter |
 | helper `Main.kt` broad dispatch | separate protocol/target/backend ownership where justified | #107 |
 
 ## Migration strategy
@@ -690,8 +757,8 @@ Rules:
 4. structural compatibility with old tests is not a reason to preserve obsolete
    architecture; rewrite tests that encode implementation shape rather than
    required behavior;
-5. preserve CXI v1 wire compatibility and validated DeX routing unless a
-   separate approved change supersedes them;
+5. preserve CXI v1 framing/compatibility and validated DeX routing unless a
+   separately approved additive protocol change or migration supersedes them;
 6. #96 cursor behavior is carried forward exactly until materially new evidence
    justifies reopening it;
 7. reset-sensitive runtime changes receive exact-head physical verification and
@@ -703,7 +770,8 @@ graph:
 1. #102 — approve this ownership/concurrency contract;
 2. #103 — semantic input domain + module dependency direction;
 3. #99 / #104 / #105 — capability, host, and Control migration;
-4. #106 / #107 — delivery and Android/helper migration as dependencies permit;
+4. #106 / #107 plus the required keyboard-outcome protocol task — delivery and
+   Android/helper migration as dependencies permit;
 5. #108 — application composition/presentation convergence;
 6. #109 — adversarial verification + legacy purge.
 
@@ -740,13 +808,27 @@ Rejected as the target design. Separate queues make cross-class ordering an
 emergent property and complicate held-input cleanup. One semantic lane with
 class-aware coalescing is easier to reason about.
 
+### Keep fire-and-forget keyboard delivery because helper teardown cleans keys
+
+Rejected as the final target. Helper-side teardown cleanup is valuable defense
+in depth, but it does not tell the host whether an individual key transition was
+accepted while the Session remained alive. In particular, the current helper can
+log and drop a key event without failing the Session. Persistent state needs an
+explicit semantic outcome or an equivalent proved contract.
+
 ### Change CXI v1 to put the target ID in every input message immediately
 
 Not selected by this ADR. That could remove some helper-global route coupling,
-but it is a protocol migration with its own compatibility/evidence cost. The
-TargetLease + ordered command-lane design makes the current v1 contract safe
-without smuggling a wire migration into the architecture Leap. A future
-protocol change may revisit this separately.
+but it is a larger protocol migration with its own compatibility/evidence cost.
+The TargetLease + ordered command-lane design makes the current v1 route contract
+safe without requiring target IDs on every event. A future protocol change may
+revisit this separately.
+
+### Require CXI v2 solely to acknowledge keyboard delivery
+
+Rejected. A small additive v1 capability/result can satisfy the persistent-input
+outcome invariant without coupling the Architecture Leap to the broader CXI v2
+migration gate.
 
 ## Consequences
 
@@ -760,6 +842,8 @@ Positive:
 - local host safety remains independent of remote scheduling;
 - one ordered semantic input lane simplifies backpressure and held-state
   reasoning;
+- persistent keyboard state stops depending on fire-and-forget guesswork once
+  the required outcome contract is implemented;
 - async request execution no longer requires semaphore bridges;
 - platform details move behind explicit adapters;
 - dependent issues receive a concrete architecture contract instead of a
@@ -771,6 +855,8 @@ Negative / cost:
 - many existing tests will need replacement because they encode old class/
   generation structure;
 - the migration requires temporary adapters at some boundaries;
+- the keyboard-outcome contract adds a separately reviewed protocol/helper/macOS
+  compatibility slice;
 - exact-head physical verification is required repeatedly for materially
   affected runtime behavior;
 - ADR-0012 stability credit will reset when reset-sensitive production slices
@@ -785,13 +871,13 @@ Before this ADR is accepted:
   cross-owner ordering relation is explicit;
 - review must specifically challenge Target selection vs in-flight input,
   actor reentrancy, local fail-safe independence, session replacement, held
-  state after timeout, acquisition/rollback ordering, and bounded capture
-  behavior;
+  state after timeout, keyboard fire-and-forget semantics, acquisition/rollback
+  ordering, and bounded capture behavior;
 - deterministic design review must trace at minimum: normal handoff/return,
   target change with input in flight, Session replacement with input in flight,
   permission revocation, queue saturation on a non-droppable transition,
-  external-control takeover, watchdog/emergency return, and ambiguous key/button
-  timeout;
+  external-control takeover, watchdog/emergency return, helper-side key
+  rejection, and ambiguous key/button timeout;
 - `docs/architecture.md`, `AGENTS.md`, and ADR-0009 must not contradict this
   contract.
 
