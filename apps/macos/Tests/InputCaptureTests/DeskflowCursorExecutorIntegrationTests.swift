@@ -24,9 +24,9 @@ private final class DeskflowExecutorRecorder: @unchecked Sendable {
     var events: [String] { lock.withLock { eventsStorage } }
     var mutations: [CursorMutationExecutor.Kind] { lock.withLock { mutationsStorage } }
 
-    func background() -> Int32? {
+    func background(_ enabled: Bool) -> Int32? {
         lock.withLock {
-            eventsStorage.append("background")
+            eventsStorage.append("background:\(enabled)")
             return backgroundResults.isEmpty ? 0 : backgroundResults.removeFirst()
         }
     }
@@ -97,7 +97,7 @@ final class DeskflowCursorExecutorIntegrationTests: XCTestCase {
     private func makeIsolation(_ recorder: DeskflowExecutorRecorder) -> DeskflowCursorIsolation {
         DeskflowCursorIsolation(
             operations: .init(
-                setCursorInBackground: { recorder.background() },
+                setCursorInBackground: { recorder.background($0) },
                 associate: { recorder.associate($0) },
                 setSuppressionInterval: { recorder.suppression($0) }
             )
@@ -115,11 +115,11 @@ final class DeskflowCursorExecutorIntegrationTests: XCTestCase {
 
         XCTAssertFalse(executor.beginOwnership(generation: 1))
         XCTAssertFalse(executor.perform(kind: .hold, generation: 1, point: .zero))
-        XCTAssertEqual(recorder.events, ["background"])
+        XCTAssertEqual(recorder.events, ["background:true"])
         XCTAssertTrue(recorder.mutations.isEmpty)
     }
 
-    func testVisibleCursorLifecycleBalancesBeforeGenerationMatchedRestore() {
+    func testVisibleCursorLifecycleBalancesSPIBeforeGenerationMatchedRestore() {
         let recorder = DeskflowExecutorRecorder()
         let executor = CursorMutationExecutor(
             deskflowCursorIsolation: makeIsolation(recorder),
@@ -136,8 +136,8 @@ final class DeskflowCursorExecutorIntegrationTests: XCTestCase {
         XCTAssertEqual(
             recorder.events,
             [
-                "background", "associate:true", "suppression:0.0001", "associate:false",
-                "background", "associate:true", "associate:true", "suppression:0"
+                "background:true", "associate:true", "suppression:0.0001", "associate:false",
+                "associate:true", "associate:true", "suppression:0", "background:false"
             ]
         )
         XCTAssertFalse(recorder.events.contains { $0.contains("hide") || $0.contains("show") })
@@ -145,9 +145,9 @@ final class DeskflowCursorExecutorIntegrationTests: XCTestCase {
                        "injected executor semantics remain unchanged")
     }
 
-    func testCleanupDebtBlocksNextGenerationUntilTeardownRetry() {
+    func testBackgroundResetDebtBlocksNextGenerationUntilTeardownRetry() {
         let recorder = DeskflowExecutorRecorder(
-            associateResults: [.success, .success, .failure, .success],
+            backgroundResults: [0, 9, 0],
             suppressionResults: [0, 0, 0]
         )
         let isolation = makeIsolation(recorder)
@@ -161,9 +161,11 @@ final class DeskflowCursorExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(executor.endOwnership(generation: 3))
         XCTAssertFalse(executor.beginOwnership(generation: 4))
         XCTAssertEqual(isolation.activeGenerationForTesting, 3)
+        XCTAssertTrue(isolation.backgroundAuthorityEnabledForTesting)
 
         owner.stop()
         XCTAssertNil(isolation.activeGenerationForTesting)
         XCTAssertFalse(isolation.isDisassociatedForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
     }
 }
