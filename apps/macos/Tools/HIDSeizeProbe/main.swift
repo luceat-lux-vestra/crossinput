@@ -16,7 +16,7 @@ private enum ProbeError: Error, CustomStringConvertible {
         case let .managerClose(result):
             return String(format: "IOHIDManagerClose failed before seize: 0x%08x", UInt32(bitPattern: result))
         case .selectedDeviceMissing:
-            return "selected HID device disappeared before exclusive open"
+            return "selected retained HID device is missing from the frozen enumeration"
         case let .seizeFailed(result):
             return String(format: "IOHIDDeviceOpen(seize) failed: 0x%08x", UInt32(bitPattern: result))
         }
@@ -105,16 +105,18 @@ private func run() throws {
     IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
 
     // IOHIDManagerOpen opens the manager's current/future devices too. Use it
-    // only to establish enumeration, retain the copied device refs, then close
-    // the manager before testing an independent exclusive IOHIDDeviceOpen.
+    // only to establish enumeration. Freeze each retained device ref together
+    // with its identity, then close the manager before the exclusive-open test.
     let managerResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     guard managerResult == kIOReturnSuccess else {
         throw ProbeError.managerOpen(managerResult)
     }
 
     let devices = (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>) ?? []
-    let mice = devices.filter(isMouse)
-    let identities = mice.map(identity)
+    let enumerated = devices
+        .filter(isMouse)
+        .map { device in (device: device, identity: identity(of: device)) }
+    let identities = enumerated.map(\.identity)
 
     let managerCloseResult = IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
     guard managerCloseResult == kIOReturnSuccess else {
@@ -136,20 +138,23 @@ private func run() throws {
             identities: identities,
             selector: selector
         )
-        guard let device = mice.first(where: { identity(of: $0) == selectedIdentity }) else {
+        guard let selected = enumerated.first(where: { $0.identity == selectedIdentity }) else {
             throw ProbeError.selectedDeviceMissing
         }
 
         print("selected \(printable(selectedIdentity))")
         let seizeResult = IOHIDDeviceOpen(
-            device,
+            selected.device,
             IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
         )
         guard seizeResult == kIOReturnSuccess else {
             throw ProbeError.seizeFailed(seizeResult)
         }
         defer {
-            let closeResult = IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
+            let closeResult = IOHIDDeviceClose(
+                selected.device,
+                IOOptionBits(kIOHIDOptionsTypeNone)
+            )
             print(String(
                 format: "close result: 0x%08x",
                 UInt32(bitPattern: closeResult)
