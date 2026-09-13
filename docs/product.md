@@ -89,6 +89,7 @@ CXI v2 is not intended to become a universal cross-platform input framework and 
 
 ## Known limitations
 
+- On affected macOS versions, repeated host-cursor repositioning used to keep the Mac pointer confined during DeX control can leave the native directional/resize cursor visually rendered as an ordinary arrow even though pointer movement and AppKit tracking continue. A standalone AppKit/Quartz reproducer confirms repeated edge-hold warping is sufficient to trigger this presentation failure. The exact AppKit/WindowServer root cause is not confirmed. CrossInput intentionally retains the current confinement architecture because tested public/private alternatives either broke host confinement, hid the native cursor, or did not remove the presentation failure. See `docs/troubleshooting.md` and issue #96 for the verified recovery/workaround surface.
 - The v1 wire record still exposes raw Android display metadata for compatibility; the leakage and containment plan are recorded in [CXI v2 design](../protocol/v2-design.md).
 - Display hot-plug and state changes still require the complete failure-case regression matrix tracked in issue #17.
 - The packaged Mac application does not yet auto-deploy a matching helper; `HELLO_ACK` capability negotiation rejects an incompatible helper before input begins. Deployment packaging remains follow-up work.
