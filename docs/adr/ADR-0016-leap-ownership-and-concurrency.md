@@ -13,9 +13,11 @@
 
 ## Context
 
-The pre-Leap architecture contains several good local boundaries, but the system
-as a whole still relies on cross-layer coordination by mutable shared references,
-raw counters, queues, locks, callback ordering, and manual stale-work checks.
+The pre-Leap architecture contains several useful local boundaries, but the
+system as a whole still relies on cross-layer coordination by mutable shared
+references, raw counters, multiple queues, locks, callback ordering, and manual
+stale-work checks.
+
 Examples include:
 
 - `SessionReference.generation` guarding a mutable pointer to the current
@@ -41,373 +43,556 @@ Examples include:
   keyboard transitions from helper-side drops/rejections that leave the
   Session alive.
 
-This structure is not being retained merely to reduce diff size. The Architecture
-Leap explicitly permits replacement or deletion of existing classes/modules when
-that is the safer and more coherent route.
+Architecture Leap #101 explicitly permits replacement or deletion of existing
+classes/modules where that is safer and easier to reason about. Diff size and
+pre-Leap class preservation are not design constraints.
 
-The design must preserve validated behavior and safety evidence, not pre-Leap
-class boundaries.
+The design preserves validated product behavior, device/protocol facts, safety
+invariants, and reproducible evidence — not old implementation shape.
 
-## Decision
+## Decision summary
 
-### 1. Architecture is organized around owned lifecycles, not existing classes
+The target architecture is built around **owned lifecycle resources**:
 
-The authoritative lifecycles are:
+1. Capability
+2. Host capture
+3. Session
+4. Target
+5. Control
+6. Delivery
 
-1. **Capability** — whether the macOS host has the capabilities required to
-   capture/control input.
-2. **Host capture** — the event-tap and host-side observation mechanism.
-3. **Session** — one concrete Android/helper/CXI connection instance.
-4. **Target** — one selected remote routing target scoped to one Session.
-5. **Control** — one period in which CrossInput is authorized to transition
-   between local and remote ownership.
-6. **Delivery** — one remote-input pipeline scoped to one concrete Control,
-   Session, and Target.
+Each lifecycle has one authoritative owner. Coordination occurs through typed
+handles/leases and explicit ordering boundaries rather than a universal epoch or
+cross-layer generation choreography.
 
-These lifecycles are coordinated, but they are not collapsed into one global
-state machine or one universal generation counter.
+The critical design choices are:
 
-### 2. Replacement is modeled by immutable handles, not mutable current pointers
+- immutable identity + one-way invalidation for Session/Target/Control handles;
+- no mutable `SessionReference` that can redirect stale work into a replacement;
+- target selection as an ordered remote-state barrier;
+- one ControlLease per remote-ownership period;
+- a synchronous idempotent local-return gate independent of actor/Android
+  scheduling;
+- one bounded synchronous InputIngress on the event-tap boundary;
+- one ordered semantic delivery lane per ControlLease;
+- async remote requests only — no semaphore bridge;
+- explicit semantic outcomes for persistent input transitions;
+- helper/backend cleanup as defense in depth, never as an unproved assumption;
+- platform-neutral semantic input before the remote adapter boundary; and
+- application state as composition/presentation projection, not lifecycle
+  ownership.
 
-A concrete Session is represented by an immutable **SessionHandle** bound to one
-connection instance. Once created, that handle never starts pointing at a newer
-connection.
+## 1. Authoritative lifecycles
 
-`SessionReference`-style mutable indirection is not part of the target design.
-When reconnect/replacement occurs:
+### Capability
 
-1. the old SessionHandle is invalidated/shut down;
-2. outstanding work that captured it can only reach that old session;
-3. a new SessionHandle is created and published separately.
+Owns whether macOS has the capabilities required to observe/suppress input.
+Capability loss blocks Control and returns/stays local. It does not become a
+Session failure.
 
-The same principle applies to Target and Control. Identity may use typed IDs for
-diagnostics/testing, but correctness must not depend on comparing unrelated raw
-`UInt64` counters across layers.
+### Host capture
 
-### 3. Target selection produces a Session-scoped TargetLease
+Owns the CGEventTap and raw host-event observation lifetime. Capture can exist in
+listen-only mode while Control is local.
 
-CXI v1 `SELECT_DISPLAY` changes helper-global routing state. Therefore Target
-selection is not merely presentation state.
+### Session
 
-A successful selection returns an immutable **TargetLease** that is:
+Represents one concrete Android/helper/CXI connection instance. A replacement
+connection is a new Session, never a mutation of the old identity.
 
-- bound to exactly one SessionHandle;
-- created only after the helper confirms the selected target;
-- invalidated before a replacement target becomes routable; and
-- required by every target-dependent input delivery operation.
+### Target
 
-The Session boundary rejects delivery carrying an old TargetLease.
+Represents one confirmed selected remote routing context inside exactly one
+Session.
 
-Target change is an ordering barrier:
+### Control
 
-1. restore local host control / end the current ControlLease;
-2. stop admitting new input for the old target;
-3. close/cancel the old DeliveryWorker so it cannot create new remote commands;
-4. invalidate the old TargetLease at the Session authority **before** queuing
-   the new selection;
-5. enqueue `SELECT_DISPLAY` on the same ordered remote command lane used by
-   input delivery;
-6. let already-started old-target work finish or fail ahead of that barrier;
-7. reject any late old-target delivery that arrives after lease invalidation;
-8. publish the new TargetLease only after the helper confirms selection; and
-9. allow a new ControlLease to be acquired.
+Represents one period in which CrossInput is authorized to transition from
+local to remote ownership and suppress local host input.
 
-If the command lane cannot reach the selection barrier within its bounded remote
-failure policy, the Session is invalidated rather than allowing route state to
-become ambiguous.
+### Delivery
 
-This prevents old input from being silently redirected to a newly selected
-helper-global target.
+Represents one bounded remote-input pipeline scoped to exactly one Control and
+its captured Session/Target context.
 
-### 4. One ControlLease is the authority for remote ownership
+These lifecycles are intentionally separate. Do not collapse them into one
+application state machine or one global generation counter.
 
-Entering remote control creates one **ControlLease**. Its identity and captured
-Session/Target references are immutable. Its operational state has one allowed
-transition: **open -> closed**.
+## 2. Handles and leases: immutable identity, one-way lifetime
+
+A concrete Session is represented by a **SessionHandle** whose identity and
+connection reference never change. Its lifetime may transition only toward
+closure:
+
+```text
+open -> closing -> closed
+```
+
+Once closed, the handle never points at or becomes a replacement connection.
+
+`SessionReference`-style mutable-current indirection is not part of the target
+design. When reconnect/replacement occurs:
+
+1. old SessionHandle is invalidated/shut down;
+2. outstanding work can only still reference that old handle;
+3. a new SessionHandle is created and separately published.
+
+The same principle applies to TargetLease and ControlLease: their identity and
+captured owner references are immutable; validity may move only from open/valid
+to closed/invalid.
+
+Typed IDs may exist for diagnostics/tests. Correctness must not depend on
+comparing unrelated raw `UInt64` counters across layers.
+
+## 3. Target selection is remote state, not presentation state
+
+CXI v1 `SELECT_DISPLAY` mutates helper-global routing state. A selected target is
+therefore not just a UI field.
+
+A successful selection creates a **TargetLease** that is:
+
+- scoped to exactly one SessionHandle;
+- created only after helper confirmation;
+- immutable in identity/target metadata;
+- valid only while that Session and selected route remain valid; and
+- checked by every command whose semantics depend on selected-target routing.
+
+### Routing ownership is not the same as routing claim
+
+Binding a ControlLease to a selected TargetLease means “this Control was acquired
+under this selected-target context.” It does **not** permit code to claim that
+every backend explicitly routes to that display.
+
+The remote adapter must classify routing scope honestly, for example:
+
+- `selectedTarget(TargetLease)` — command semantics depend on the confirmed
+  selected target; or
+- `sessionRouted(SessionHandle)` — backend/system policy routes the command at
+  Session/system scope and cannot honestly promise explicit selected-display
+  routing.
+
+This distinction matters for the current keyboard path: phone-vs-DeX keyboard
+routing remains a physical-evidence question (#92), and system-routed UHID must
+not be described as explicitly targeting an arbitrary display ID.
+
+Control may still be bound to a TargetLease for product/lifecycle context while
+the remote adapter reports a narrower or system-routed delivery scope.
+
+## 4. Target change requires a cleanup fence before route mutation
+
+A target change must not let old-target persistent state leak across
+`SELECT_DISPLAY`.
+
+The safe A -> B sequence is:
+
+1. invoke the active ControlLease local-return gate;
+2. stop admitting ordinary input for A;
+3. cancel/shear off queued **ordinary** A delivery;
+4. while TargetLease A is still valid and route A is still current, enqueue one
+   **terminal cleanup fence** for any confirmed remotely held persistent state;
+5. wait only under a bounded remote-cleanup policy for that terminal fence;
+6. if cleanup is confirmed (or there is provably nothing persistent to clean),
+   invalidate TargetLease A;
+7. enqueue `SELECT_DISPLAY(B)` on the same stateful RemoteCommandLane, after the
+   old-target fence;
+8. publish TargetLease B only after helper confirmation; and
+9. only then permit a new ControlLease for B.
+
+If step 4/5 cannot establish a trustworthy old-target state — timeout, stream
+loss, helper/backend ambiguity, or route disappearance that prevents required
+cleanup — **do not select B on the same Session as if it were clean**. Invalidate
+that Session and reconnect/re-establish remote state instead.
+
+This is deliberately conservative for persistent state. Additive motion/scroll
+samples may be discarded without requiring this escalation because they do not
+represent held remote state.
+
+A TargetLease is invalidated before **new ordinary A input** can be admitted, but
+not so early that its own terminal cleanup becomes impossible. Terminal cleanup
+is a privileged final operation of the closing Control/Target context; no new
+user input shares that privilege.
+
+## 5. One ControlLease is the authority for remote ownership
+
+Entering remote control creates one **ControlLease** with immutable identity and
+captured owner references. Operational state is one-way:
+
+```text
+open -> closed
+```
 
 It binds:
 
-- the current SessionHandle;
-- the current TargetLease;
+- current SessionHandle;
+- current TargetLease;
 - one host SuppressionLease;
 - one synchronous InputIngress; and
-- one remote DeliveryWorker.
+- one asynchronous DeliveryWorker.
 
 No input callback may infer remote authority from global booleans or a mutable
-"current session" reference. It must possess the current lease-bound ingress.
+“current session” reference. It must possess the current lease-bound ingress.
 
-Ending control closes that ingress and releases the host SuppressionLease.
-Late callbacks holding the old ingress can only fail admission; they cannot
-become valid for a replacement ControlLease.
+Late callbacks holding an old ingress can only observe closed/rejected admission;
+they can never become valid for a replacement ControlLease.
 
-#### Control acquisition ordering
+### Control acquisition ordering
 
-Acquisition is explicit and fail-closed:
+Acquisition is fail-closed:
 
 1. verify capability readiness and capture availability;
-2. snapshot the exact SessionHandle and TargetLease that will own this Control;
-3. create the bounded InputIngress and DeliveryWorker bound to those handles;
-4. acquire/arm the host SuppressionLease with that exact ingress;
-5. only after suppression admission succeeds, publish the ControlLease as
-   remote-owned.
+2. snapshot the exact SessionHandle + TargetLease context;
+3. create InputIngress and DeliveryWorker bound to those exact handles;
+4. prepare a ControlLease/local-return safety handle;
+5. atomically install the SuppressionLease + exact ingress into the host
+   suppression boundary; and
+6. only after that installation succeeds, publish Control as remote-owned.
 
-If any step fails, partially created remote resources are closed/cancelled and
-Control remains local. There is no interval where host suppression is active but
-remote ingress ownership has not yet been established.
+If any step fails, close/cancel partial resources and remain local.
 
-#### Synchronous local-return gate
+The host suppression boundary must never enter a state where it consumes input
+without already having a valid bounded ingress and synchronous local-return
+path.
 
-Actor scheduling is not part of the safety proof. Every open ControlLease exposes
-an idempotent, thread-safe **local-return gate** callable from watchdog, event-tap,
-delivery, Session, Target, capability, and UI failure paths.
+## 6. Synchronous local-return gate
 
-The gate atomically wins once and immediately:
+Actor scheduling is **not** part of the pointer-safety proof.
 
-1. marks the lease closed;
-2. releases host SuppressionLease locally;
-3. closes InputIngress; and
-4. schedules, but does not wait for, ControlCoordinator reconciliation,
-   DeliveryWorker cancellation, and remote cleanup.
+Every open ControlLease exposes an idempotent, thread-safe local-return gate that
+can be triggered by:
 
-A lower-level failure source may signal this gate through an injected callback or
-safety handle, but it does not thereby become the Control owner. Ownership of
-Control state remains with ControlCoordinator.
+- normal boundary return;
+- watchdog;
+- emergency shortcut;
+- event-tap/capture loss;
+- capability loss;
+- remote delivery failure;
+- Session invalidation/replacement;
+- Target invalidation/change;
+- external-control takeover;
+- user disable/disconnect; or
+- teardown.
 
-### 5. Local restoration is independent and always wins
+The first caller wins. The bounded local sequence is:
 
-Host safety is a local invariant, not a remote RPC outcome.
+1. atomically mark ControlLease closing/closed so no new owner can treat it as
+   remote-valid;
+2. close InputIngress immediately so concurrent capture callbacks cannot admit
+   more remote work;
+3. synchronously release/clear HostSuppressionController's active
+   SuppressionLease and current-ingress slot so subsequent host events pass
+   locally; and
+4. schedule — **without waiting** — ControlCoordinator reconciliation,
+   DeliveryWorker cancellation, remote cleanup, diagnostics, and any Session
+   trust decision.
 
-On normal return, watchdog expiry, emergency shortcut, permission/capture loss,
-remote failure, target invalidation, session replacement, external-control
-takeover, disable, or teardown:
+Steps 1-3 are the safety boundary and must be bounded/local. No transport write,
+actor await, main-thread dispatch, helper response, or remote cleanup is allowed
+inside that critical local-return path.
 
-1. **restore local macOS control first through the ControlLease local-return
-   gate**;
-2. close/invalidate the ControlLease ingress;
-3. cancel pending remote work;
-4. attempt bounded best-effort remote held-input cleanup;
-5. invalidate the remote Session when its state is ambiguous and cannot be made
-   trustworthy.
+Implementations must define lock ordering so the gate cannot deadlock with the
+CGEventTap callback or HostSuppressionController. Do not invoke arbitrary
+callbacks while holding the tiny safety-state lock.
 
-Remote cleanup success is never a prerequisite for local restoration.
+Deinitialization is never the primary safety mechanism; explicit close +
+watchdog/emergency release are required.
 
-The accepted #96 P0 host-confinement behavior remains the production cursor
-policy during this Leap. The Leap does not reopen equivalent cursor-API
-permutation experiments.
+### External-control takeover special case
 
-### 6. Host suppression is an explicit local resource
+When another controller's triggering event causes takeover, local return must
+not synthesize a pointer restore/park that alters that triggering event. The
+triggering event passes through unchanged after suppression ownership is
+released.
 
-The macOS host side is decomposed into responsibilities rather than one
-`InputCapture` owner:
+## 7. Host responsibilities are split by mechanism and policy
+
+The pre-Leap `InputCapture` responsibilities are separated conceptually into:
 
 - **InputCapabilityController** — Accessibility/Input Monitoring capability
-  state and recovery; does not own Session.
-- **MacEventTap** — CGEventTap lifecycle and raw event observation.
-- **MacInputTranslator** — CoreGraphics/AppKit event representation to
-  platform-neutral semantic input.
-- **EdgeDetector** — local edge/hysteresis detection needed to request control
-  acquisition.
-- **HostSuppressionController** — event consumption, P0 cursor confinement,
-  watchdog, emergency release, external-control takeover, and SuppressionLease
-  ownership.
+  status/request/recovery;
+- **MacEventTap** — event-tap lifecycle and raw event observation;
+- **MacInputTranslator** — raw macOS event -> semantic input;
+- **EdgeDetector** — edge/hysteresis observation used to request handoff;
+- **HostSuppressionController** — event consumption, accepted P0 cursor
+  confinement, watchdog, emergency release, external-control takeover, and
+  SuppressionLease ownership.
 
-Only the host-suppression boundary may consume local events or mutate host cursor
-position. Its watchdog/fail-safe must be able to release locally without
-awaiting an actor, transport, Android helper, or main-thread callback.
+Exact type names are not frozen by this ADR, but these responsibilities must not
+collapse back into one implicit owner.
 
-### 7. Handoff policy is pure; lifecycle orchestration owns execution
+Only HostSuppressionController may consume local host input or perform the
+accepted P0 cursor-confinement mutations.
 
-The target replacement for the current internally queued
-`EdgeSwitchStateMachine` is a pure **HandoffPolicy** value/model:
+The accepted #96 product decision remains authoritative:
 
-- input: current policy state, entry edge, requested/accepted movement facts,
-  and explicit return/failure commands;
-- output: deterministic decisions such as acquire remote ownership or return
-  local ownership;
-- no transport, event tap, locks, tasks, queues, diagnostics, or callback
-  sequencing inside the policy.
+- keep P0-style confinement;
+- keep native Mac cursor visible;
+- accept/document the cursor-presentation limitation;
+- no private SkyLight/CGS production dependency;
+- no synthetic click/focus stealing;
+- no pointer-jump workaround;
+- no custom cursor solely to mask #96; and
+- no equivalent cursor-API permutation experiments without materially new
+  evidence.
 
-`ControlCoordinator` owns serialization and applies policy decisions. Therefore
-there is no need for transition sequence numbers solely to defend callbacks from
-another internal state-machine queue.
+## 8. Handoff policy is pure
 
-The #45 requested-vs-accepted movement rule and first-movement/hysteresis safety
-behavior remain product/safety facts unless deliberately superseded with new
-physical evidence.
+Replace the internally queued/callback-sequenced handoff orchestration with a
+pure **HandoffPolicy** model.
 
-### 8. Capture hot path uses a synchronous bounded ingress
+Inputs are facts:
 
-CGEventTap callbacks cannot `await` an actor and must remain bounded and
-nonblocking.
+- enabled/disabled;
+- edge entered;
+- entry edge;
+- requested/accepted movement acknowledgement;
+- explicit normal/failure return reason.
 
-Therefore the architecture intentionally uses one small synchronous boundary:
-**InputIngress**.
+Outputs are decisions:
 
-InputIngress is a lock-protected bounded mailbox scoped to one ControlLease. It:
+- acquire remote ownership;
+- remain remote/local; or
+- return local.
 
-- accepts platform-neutral semantic events in O(1) or bounded work;
-- coalesces only event classes whose semantics permit it;
-- never performs transport I/O;
-- never blocks waiting for remote completion;
+HandoffPolicy contains no transport, event tap, lock, task, queue, diagnostics,
+or callback sequencing.
+
+ControlCoordinator owns policy serialization. Therefore sequence counters used
+only to defend callbacks from another internal state-machine queue disappear.
+
+Validated behavior remains unless deliberately superseded with new evidence:
+
+- #45 requested-intent return credit when Android clamps accepted movement;
+- inward movement credits confirmed accepted movement;
+- #37 first post-entry movement cannot instantly return; and
+- return hysteresis prevents accidental edge wobble.
+
+## 9. Capture hot path uses one synchronous bounded InputIngress
+
+CGEventTap callbacks cannot `await` and must remain bounded/nonblocking.
+
+Each open ControlLease therefore owns one small lock-protected
+**InputIngress**. It:
+
+- admits semantic events in O(1) or otherwise strictly bounded work;
+- coalesces only event classes whose semantics allow it;
+- performs no transport I/O;
+- performs no remote await/semaphore wait;
 - returns an immediate admission result; and
 - becomes permanently closed when its ControlLease ends.
 
-Using a small lock here is intentional. Replacing it with an actor would force
-an async hop from the event callback and would not improve ownership semantics.
+A small lock here is intentional. An actor hop from the event callback would
+weaken the hot-path/safety contract rather than improve ownership.
 
-### 9. Remote input uses one ordered semantic lane per ControlLease
+## 10. One ordered semantic input lane per ControlLease
 
-The current split pointer/keyboard queues are not part of the target design.
-A single ControlLease owns one ordered semantic input lane so cross-class
-ordering such as modifier/button/key transitions cannot be reordered merely
-because they used different queues.
+The target architecture does not retain independent pointer and keyboard
+DispatchQueues.
 
-Default backpressure semantics are:
+One ControlLease owns one ordered semantic lane so persistent state transitions
+cannot reorder merely because they belong to different device classes.
 
-- relative pointer motion: adjacent samples may coalesce; overload may shed
-  samples because they do not represent persistent remote state;
-- scroll: adjacent samples may coalesce; bounded shedding is permitted when it
-  preserves the documented additive semantics;
-- pointer button transitions: never silently drop or reorder;
-- key down/up transitions: never silently drop or reorder;
-- key repeat: ordered by default; any future shedding/coalescing requires an
-  explicit semantic proof and tests;
-- cleanup/release transitions: stronger ordering than ordinary lossy samples.
+Default admission semantics:
 
-If the bounded mailbox cannot admit a non-droppable state transition, the safe
-response is to close the ControlLease through its local-return gate, not to
-silently lose the transition.
+| Event class | Coalesce | Shed | Required ordering |
+| --- | --- | --- | --- |
+| relative motion | adjacent only | yes under bounded overload | additive |
+| scroll | adjacent only | yes when additive semantics preserved | additive |
+| pointer button down/up | never | never silently | strict |
+| key down/up | never | never silently | strict |
+| key repeat | no shedding by default | only with later proof | strict by default |
+| cleanup/release | no lossy treatment | never silently | terminal/strong |
 
-### 10. DeliveryWorker is asynchronous; blocking bridges are removed
+If InputIngress cannot admit a non-droppable state transition, invoke the
+ControlLease local-return gate. Do not silently lose the transition.
 
-Each ControlLease owns one **DeliveryWorker** that drains InputIngress and talks
-to the exact SessionHandle/TargetLease captured by that lease.
+## 11. DeliveryWorker is asynchronous and per-Control
 
-The worker:
+Each ControlLease owns one **DeliveryWorker**. It is never rebound to a new
+Session, Target, or Control.
 
-- serializes semantic input delivery;
-- performs semantic-to-CXI v1 translation at the remote adapter boundary;
-- awaits explicit delivery outcomes where the protocol provides them;
-- publishes delivery outcomes/failures back to ControlCoordinator;
-- owns the authoritative host-side ledger of **confirmed** remotely-held
-  persistent inputs once the relevant delivery-outcome contract exists; and
-- stops when the lease is closed, the Session is invalid, or the TargetLease is
-  no longer current.
+Responsibilities:
 
-Pointer button transitions already have a `POINTER_RESULT` outcome. The current
-pre-Leap `KEY_EVENT` path does **not** have an equivalent remote outcome and is
-therefore not evidence that a key transition was applied. The target design does
-not label fire-and-forget key writes as acknowledged delivery.
+- drain exactly that ControlLease's InputIngress;
+- serialize semantic input according to the ordered-lane contract;
+- translate semantic input to CXI v1 at the remote adapter boundary;
+- await explicit semantic outcomes where defined;
+- return movement acknowledgement facts to ControlCoordinator/HandoffPolicy;
+- maintain the host-side ledger of **confirmed** remotely held persistent
+  inputs;
+- classify explicit failure vs cancellation vs ambiguous outcome; and
+- perform/coordinate terminal cleanup after local return without blocking local
+  control.
 
-`SessionConnection.requestBlocking()` and semaphore-based async-to-sync request
-bridges are removed. No capture callback waits for a remote acknowledgement.
+`SessionConnection.requestBlocking()` and semaphore-based async-to-sync bridges
+are removed. Capture never waits for remote completion.
 
-### 11. Stateful remote commands use an explicit non-reentrant command lane
+## 12. Stateful RemoteCommandLane
 
-Swift actor isolation alone is not sufficient to establish target/input ordering
-because actor methods are reentrant across `await` points.
+Swift actor isolation alone is insufficient because actor methods are reentrant
+across `await` points.
 
-Each concrete SessionHandle therefore owns an explicit ordered
-**RemoteCommandLane** for stateful operations whose relative order affects
-helper behavior, including at minimum:
+Each SessionHandle owns an explicit **RemoteCommandLane** for helper-global or
+stateful operations whose relative order affects correctness, including:
 
 - target selection;
-- pointer/keyboard input delivery;
-- held-input cleanup that must be ordered against those events; and
+- target-dependent pointer input;
+- keyboard input under its honest routing scope;
+- persistent held-input cleanup; and
 - shutdown/reset operations that alter backend state.
 
-The lane executes one stateful command at a time through completion. A newer
-Target selection cannot overtake an in-flight input command, and old input
-cannot be admitted against a newly published TargetLease.
+### Baseline execution contract
 
-Every target-dependent command carries its TargetLease. The Session validates
-that lease at command admission and again immediately before execution. Work
-already executing before invalidation is ordered ahead of the target-selection
-barrier; work arriving after invalidation is rejected and never written.
+The baseline implementation executes one stateful command through completion
+before starting the next. This is intentionally simple and matches the current
+pointer request/response model.
 
-For a fire-and-forget legacy command, "completion" means completion of the
-protocol's currently defined send/order contract, not proof of remote semantic
-application. Persistent input is not allowed to rely on that weaker definition
-in the final Leap architecture; see the keyboard-outcome requirement below.
+The architectural requirement is **total stateful ordering + explicit barriers**,
+not “serial forever.” A future measured optimization may use bounded pipelining
+only if it proves all of the following:
+
+- command write order remains deterministic;
+- persistent transition outcome/commit order cannot reorder;
+- Target selection is a barrier that drains all earlier target-dependent work
+  before route mutation;
+- shutdown/reset is a barrier;
+- stale/invalid TargetLease work is rejected before write; and
+- cancellation cannot allow an earlier command to semantically commit after a
+  later barrier.
+
+No optimization is justified merely for elegance; measure latency/throughput
+first.
+
+### Lease validation
+
+Every selected-target-dependent command carries its TargetLease. Validate it:
+
+1. at command admission; and
+2. again immediately before wire execution.
+
+Already-executing old-target work is ordered before the cleanup/selection fence.
+Late old-target ordinary work after closure/invalidation is rejected and never
+written.
+
+For a fire-and-forget legacy command, “write completed” is not a semantic
+outcome. Persistent input is not allowed to rely on that weaker definition in
+the final architecture.
 
 Read-only/discovery operations may use a separate safe request path only when
 there is no helper-global ordering dependency.
 
-### 12. Ambiguous remote state invalidates trust
+## 13. Persistent remote state and ambiguous outcomes
 
-A timeout, stream failure, or missing semantic outcome after sending a
-state-changing input can leave remote held state ambiguous: the helper may have
-applied the event even though the host cannot prove it.
+Persistent remote state includes at least keys and pointer buttons.
 
-The architecture does not pretend such state is known.
+A timeout, stream failure, target disappearance, or missing semantic result after
+a state-changing command can leave the host unable to prove whether the remote
+transition happened.
 
-- Confirmed held state is tracked by DeliveryWorker only when the remote outcome
-  contract proves the transition was applied.
-- Cleanup is bounded and best effort.
-- The Android helper must also clean backend-owned held state on session/helper
-  shutdown where the backend permits it (defense in depth; audited in #107).
-- If a non-idempotent state-changing delivery becomes ambiguous and the current
-  protocol/backend cannot prove recovery, the current Session is invalidated
-  rather than reused as if its input state were trustworthy.
-- If #107 cannot prove helper-side release semantics for a backend (including
-  process/session teardown), that gap must remain explicit and receive a
-  separate implementation/protocol decision; it must not be assumed away.
+The architecture must preserve that uncertainty instead of inventing a known
+state.
 
-No infinite cleanup retry is allowed.
+Rules:
 
-### 13. Session, Target, Control, and Capability remain separate failure domains
+- DeliveryWorker updates its held ledger only from a positive semantic outcome;
+- explicit negative outcome fails Control safe;
+- unknown outcome for a persistent transition returns local immediately;
+- ordinary cleanup is bounded/best effort;
+- if persistent state cannot be proven clean, do not reuse the Session as a
+  clean basis for a new Control/Target context;
+- helper/backend teardown cleanup is defense in depth, not a substitute for
+  normal semantic outcomes; and
+- no infinite cleanup retry is allowed.
 
-A capability/capture failure:
+### Event-class-specific escalation
 
-- restores/stays local;
-- blocks Control acquisition;
-- does **not** tear down a healthy Session solely because local TCC capability
-  is missing.
+Not every delivery timeout has identical meaning.
 
-A Target failure:
+- additive motion/scroll uncertainty may fail the current Control while Session
+  reuse can remain possible if the transport/protocol state is still known and
+  no persistent state became ambiguous;
+- key/button down/up uncertainty creates persistent-state ambiguity and requires
+  stronger cleanup/trust handling;
+- malformed/protocol-corrupt stream state invalidates Session regardless of
+  event class.
 
-- invalidates that TargetLease;
-- returns local if it was in use;
-- does not automatically redefine the underlying Session as transport-failed.
+Exact recovery classification belongs to #106/#107 tests, but implementations
+must not erase this distinction.
 
-A Session failure:
+## 14. Helper/backend cleanup is a proof obligation
 
-- invalidates all TargetLeases and ControlLeases scoped to it;
-- restores local control immediately through the active lease's local-return
-  gate;
-- may enter reconnect policy owned by SessionManager.
+Architecture must not assume “helper/session died, therefore remote held state
+is clean.” Each backend needs evidence.
 
-A Control failure:
+Current evidence is asymmetric:
 
-- restores local control;
-- ends only that ControlLease unless the underlying failure also proves the
-  Session or Target untrustworthy.
+- `UhidPointerInjector.close()` attempts a zero-button report before destroying
+  the virtual device;
+- the current `InputManagerPointerInjector.close()` only clears its local
+  button mask/state and does not emit a matching synthetic UP/release event.
 
-### 14. Application state is projection, not lifecycle ownership
+Therefore #107 must determine the actual Android semantics and either prove
+cleanup or implement a bounded explicit release/reset path while the old routing
+context remains valid.
 
-The application layer becomes a composition root plus presentation projection.
-It may issue intents such as connect, disconnect, select target, enable control,
-disable control, open permission settings, and emergency return.
+The same proof obligation applies to keyboard backends. Existing helper cleanup
+is useful but must be tested under shutdown, transport loss, target change,
+backend failover, and idempotent repeated cleanup.
 
-It does not directly:
+If a backend cannot establish a trustworthy cleanup contract, that limitation
+must remain explicit and feed Session trust/recovery policy. Do not document
+process death as sufficient without evidence.
 
-- own transport channels;
-- mutate event-tap state;
-- perform TCC inference;
-- serialize remote input;
-- hold mutable session references used by delivery; or
-- reinterpret lower-level failures as another lifecycle's failure.
+## 15. Persistent keyboard transitions require an explicit semantic outcome
 
-`AppModel` is not a compatibility requirement and may be replaced.
+Current CXI v1 is asymmetric:
 
-### 15. Semantic input is platform-neutral before the remote boundary
+- pointer move/button/scroll -> `POINTER_RESULT`;
+- `KEY_EVENT` -> helper-side execution with no correlated semantic result;
+- helper keyboard backends may reject/drop a transition while keeping Session
+  alive and emitting only metadata diagnostics.
+
+That is insufficient for the target invariant that persistent transitions are
+ordered and either delivered or fail safe.
+
+The target architecture therefore requires an explicit keyboard-delivery
+outcome before the Leap delivery migration is complete.
+
+Preferred compatible design (#141): keep CXI framing/version at v1 and add an
+additive HELLO capability plus a correlated key result, conceptually:
+
+```text
+HELLO_ACK capability: semantic-key-result
+KEY_EVENT(requestId != 0)
+  -> KEY_RESULT(requestId, delivered | failed)
+```
+
+Exact names/encoding are owned by the dedicated protocol change, not this ADR.
+Required semantics are:
+
+- positive means the helper/backend accepted/applied the semantic transition
+  according to its backend contract;
+- negative means explicit delivery failure and triggers Control fail-safe;
+- timeout/stream loss after send is ambiguous persistent state;
+- DeliveryWorker updates held-key state only after positive outcome;
+- stale result cannot mutate a replacement Control/Session ledger; and
+- helper teardown cleanup remains defense in depth.
+
+A different implementation is acceptable only if it proves equivalent outcome
+and cleanup guarantees. Fire-and-forget keyboard delivery is **not** accepted as
+the final target architecture.
+
+This additive v1 protocol work must update `protocol/protocol.md`, Swift/Kotlin
+protocol implementations, fixtures, capability negotiation, tests, and
+exact-head physical evidence. It does not require CXI v2.
+
+## 16. Semantic input is platform-neutral before the remote boundary
 
 The semantic domain introduced by #103 must not contain:
 
 - CoreGraphics/AppKit event types;
 - macOS virtual-key implementation details beyond the host adapter;
 - Android `KEYCODE_*` or `META_*` constants;
-- UHID/InputManager types;
+- UHID/InputManager types; or
 - CXI framing/message identifiers.
 
 Translation is explicit:
@@ -422,75 +607,41 @@ macOS event
   -> Android backend adapter
 ```
 
-CXI v1 framing/version compatibility remains the baseline. An additive v1
-capability/message extension may be introduced by a separately approved
-protocol issue when required to satisfy an invariant below; that is not a CXI
-v2 migration.
+`CapturedKeyEvent` carrying Android KeyEvent semantics is therefore not a target
+host-domain API.
 
-### 16. Persistent keyboard transitions require an explicit delivery outcome
+## 17. Application state is projection, not lifecycle ownership
 
-The current CXI v1 keyboard path is weaker than the pointer path:
+The application layer becomes a composition root plus presentation projection.
+It may issue user intents such as:
 
-- pointer move/button/scroll -> helper returns `POINTER_RESULT`;
-- `KEY_EVENT` -> helper processes the event but sends no correlated semantic
-  result;
-- the helper may reject/drop InputManager or forced-UHID key delivery while
-  keeping the Session alive and reporting only metadata diagnostics.
+- connect/disconnect;
+- select target;
+- enable/disable control;
+- emergency return;
+- open permission settings; and
+- refresh presentation.
 
-This means the host cannot currently distinguish "key transition applied" from
-"helper remained alive but this transition was dropped." That is insufficient
-for the target invariant that persistent state transitions are either delivered
-in order or fail safe.
+It does not directly own transport channels, mutate event-tap internals,
+serialize remote input, infer TCC from generic capture failure, or reclassify
+one lifecycle's failure as another's merely to reuse an existing path.
 
-The target architecture therefore requires an explicit keyboard-delivery outcome
-contract before the Leap's delivery migration is complete.
-
-**Preferred design:** keep CXI framing/version at v1 and add an additive
-capability plus correlated keyboard result, conceptually:
-
-```text
-HELLO_ACK capability: semantic-key-result
-KEY_EVENT(requestId != 0)
-  -> KEY_RESULT(requestId, delivered | failed)
-```
-
-Exact message names/encoding are decided in the dedicated protocol change, not
-by this architecture ADR. The important contract is:
-
-- positive result means the helper/backend reports that the semantic transition
-  was accepted/applied according to that backend's contract;
-- negative result is an explicit failure and causes the Control fail-safe path;
-- timeout/stream loss after send is ambiguous and invalidates Session trust for
-  persistent held state;
-- DeliveryWorker updates key-held state only after positive outcome;
-- helper teardown cleanup remains defense in depth, not a substitute for normal
-  delivery observability.
-
-A wire change is not required only if a later implementation proves an
-equivalent outcome/cleanup contract with the same safety properties. No such
-proof exists in the current pre-Leap path, so fire-and-forget keyboard delivery
-is **not** accepted as the final target architecture.
-
-This protocol work must be tracked separately under the Remote Track, update
-`protocol/protocol.md`, both implementations, capability negotiation, fixtures,
-and exact-head device evidence. It does not require CXI v2.
+`AppModel` is not a compatibility requirement.
 
 ## Lifecycle state contracts
 
-The target model intentionally avoids one giant application state machine. Each
-owner has a small state contract and coordinates only through explicit handles,
-leases, and signals.
+The target intentionally avoids one giant application state machine.
 
 ### Capability
 
 ```text
 unknown/checking -> ready
                  -> blocked(reason)
-ready            -> blocked(reason)   // runtime revocation/loss
-blocked          -> ready             // refresh/recovery
+ready            -> blocked(reason)
+blocked          -> ready
 ```
 
-Capability state does not own or destroy Session.
+Capability does not own Session.
 
 ### Session manager
 
@@ -503,63 +654,76 @@ reconnecting -> ready(new SessionHandle)
 reconnecting -> failed/disconnected
 ```
 
-A candidate connection is private until handshake/capability negotiation
-succeeds. A published SessionHandle is never rebound to another connection.
+A candidate is private until handshake/capability negotiation succeeds.
 
-A concrete SessionHandle itself transitions only:
+Concrete SessionHandle:
 
 ```text
 open -> closing -> closed
 ```
-
-Once closed it never becomes open again.
 
 ### Target
 
 ```text
 unavailable -> available(snapshot)
 available   -> selecting(candidate)
-selected(A) -> selecting(B)           // after Control A is closed
+selected(A) -> closing(A) -> selecting(B)
 selecting   -> selected(TargetLease)
-selecting   -> available/unavailable   // failure/disappearance
-any         -> unavailable             // Session invalidated
+selecting   -> available/unavailable
+any         -> unavailable     // Session invalidated
 ```
 
-A TargetLease is scoped to one open SessionHandle and one confirmed route.
+`closing(A)` includes local return + terminal cleanup fence. If that fence cannot
+establish a trustworthy persistent state, invalidate Session instead of moving
+to B within it.
 
 ### Control
-
-The externally meaningful ownership model is deliberately small:
 
 ```text
 disabled -> local
 local    -> remote(ControlLease)
-remote   -> local                      // normal/fail-safe return
+remote   -> local
 local    -> disabled
-remote   -> disabled                   // implemented as local-return then disable
+remote   -> disabled   // local-return gate first, then disable
 ```
 
-`returning` may exist as an internal/projection transient, but no remote cleanup
-is allowed to keep host suppression active while waiting in that state.
+`returning` may exist as presentation/internal progress only. Host suppression
+must already be released; remote cleanup never keeps the user trapped in a
+“returning” state.
 
-Edge arming is policy data, not a separately owned lifecycle resource.
+Edge arming is policy data, not its own lifecycle resource.
 
 ### Delivery
 
-One DeliveryWorker belongs to one ControlLease:
+One worker per ControlLease:
 
 ```text
 open -> closing -> closed
 ```
 
-A worker that observes ambiguous persistent remote state may additionally mark
-the owning Session untrustworthy, but it is never rebound to another Session,
-Target, or Control.
+A worker is never rebound to another Session/Target/Control.
+
+## Failure-domain matrix
+
+| Failure | Control | Session | Target |
+| --- | --- | --- | --- |
+| missing/revoked host capability | local/blocked | may remain healthy | may remain selected |
+| event-tap/capture failure | local/blocked | may remain healthy | may remain selected |
+| ordinary boundary return | local | unchanged if remote state clean | unchanged |
+| non-droppable queue saturation | local immediately | classify by persistent ambiguity | unchanged unless Session invalidated |
+| additive movement timeout | local/fail-safe | may remain reusable if protocol/transport trustworthy | unchanged |
+| ambiguous key/button transition | local immediately | invalidate unless state is re-established | invalid with Session if Session closes |
+| target disappearance/change | local if active | retain only if cleanup/route state trustworthy | invalidate/reselect |
+| transport/helper disconnect | local immediately | invalidate/reconnect | invalidate with Session |
+| external-control takeover | local immediately; triggering event passes through | unchanged unless independently failed | unchanged |
+
+A lower-domain failure must not be reclassified as an unrelated lifecycle
+failure merely to reuse an old API.
 
 ## Target module / dependency direction
 
-Exact target names may be adjusted during #103, but the dependency direction is
-fixed by this ADR:
+Exact SwiftPM target names are finalized by #103, but dependency direction is
+fixed:
 
 ```text
                          +----------------------+
@@ -587,313 +751,313 @@ fixed by this ADR:
                                                         +---------------+
 ```
 
-`Remote` must not depend on `MacHost`. `MacHost` must not depend on Android/CXI
-wire or backend details. `CrossInputDomain` must not depend on either platform.
+Rules:
 
-Diagnostics is a side boundary available to adapters/owners but may carry only
-metadata-safe facts, never raw input payloads.
+- Remote must not depend on MacHost;
+- MacHost must not depend on Android/CXI/UHID/InputManager details;
+- CrossInputDomain must not depend on either platform;
+- CXI framing is not a domain concept;
+- diagnostics is metadata-only and cannot carry raw input payloads.
 
 ## Concurrency contract
 
 ### MainActor
 
-Owns:
-
-- application composition/presentation projection;
-- UI intents;
-- AppKit/System Settings presentation actions; and
-- capability UI interaction where the platform API requires it.
-
-It is not on the capture or remote-input hot path.
+Owns application composition/presentation projection, UI intents, and AppKit
+presentation actions. It is not on the capture or remote-input hot path.
 
 ### Mac event-tap executor
 
-A dedicated CFRunLoop/queue owns CGEventTap callback execution. The callback may:
+Dedicated CFRunLoop/queue. Allowed work:
 
-- classify/translate one host event;
-- inspect a small lock-protected current suppression/ingress snapshot;
-- perform bounded InputIngress admission;
-- perform local fail-safe/suppression mechanics; and
-- emit a lightweight control signal.
+- bounded event classification/translation;
+- tiny lock-protected lease/ingress lookup;
+- bounded InputIngress admission;
+- local suppression/fail-safe mechanics; and
+- lightweight control signal emission.
 
-It may not perform transport I/O, actor waits, semaphore waits, unbounded work,
-or payload logging.
+Forbidden:
+
+- transport I/O;
+- actor/semaphore waits;
+- unbounded allocation/work; and
+- payload logging.
 
 ### ControlCoordinator
 
-A Swift actor (or an equivalently single, explicitly documented serial executor
-if implementation evidence justifies it) owns Control lifecycle state and the
-pure HandoffPolicy.
+Intended as a Swift actor (or equivalently explicit serial executor if evidence
+justifies another model). Owns Control lifecycle and pure HandoffPolicy.
 
-The intended implementation is an actor. Local host release does not depend on
-actor scheduling: the current ControlLease local-return gate and
-HostSuppressionController release synchronously, then notify the actor.
+Local return does **not** wait for this actor; the synchronous ControlLease gate
+releases host safety first and reconciles actor state afterward.
 
 ### SessionManager / RemoteDeviceSession
 
 SessionManager serializes connection/reconnect/replacement policy and publishes
-immutable SessionHandles.
+SessionHandles.
 
-A concrete remote session owns protocol correlation, disconnect, and one
-RemoteCommandLane. The stateful lane is explicitly non-reentrant across remote
-request awaits.
+Each concrete session owns protocol correlation, disconnect state, and its
+stateful RemoteCommandLane.
 
 ### DeliveryWorker
 
-One asynchronous worker exists per ControlLease. It drains that lease's bounded
-InputIngress. No worker is rebound to a replacement Session or Target.
+One async worker per ControlLease. It drains only that lease's InputIngress and
+talks only to that lease's Session/route context.
 
 ## Named invariants and enforcement points
 
 ### I1 — Local Safety
 
-**Property:** macOS input can always return locally without waiting for Android
-or for ControlCoordinator actor scheduling.
+Mac control returns without waiting for Android or actor scheduling.
 
-**Enforced by:** ControlLease local-return gate + HostSuppressionController
-watchdog/emergency/local release.
+**Enforced by:** synchronous ControlLease local-return gate +
+HostSuppressionController watchdog/emergency/local release.
 
-### I2 — No Cross-Lease Delivery
+### I2 — No Cross-Control Delivery
 
-**Property:** work admitted for one ControlLease cannot reach a replacement
-ControlLease.
+Work admitted for Control A cannot reach replacement Control B.
 
-**Enforced by:** per-lease InputIngress closure + per-lease DeliveryWorker.
+**Enforced by:** per-Control closed InputIngress + per-Control DeliveryWorker.
 
 ### I3 — No Cross-Session Retargeting
 
-**Property:** work holding an old SessionHandle cannot be redirected to a new
-session.
+Work holding Session A can never be redirected into Session B.
 
-**Enforced by:** immutable per-connection SessionHandle; no mutable
+**Enforced by:** immutable per-connection SessionHandle identity; no mutable
 SessionReference.
 
 ### I4 — No Cross-Target Retargeting
 
-**Property:** input admitted for target A cannot be delivered after target B is
-published as current.
+Ordinary input admitted under target A cannot be delivered after target B is
+published current.
 
-**Enforced by:** TargetLease invalidation before selection, admission/execution
-validation, ordered target-selection/input command lane, and target-change
-Control barrier.
+**Enforced by:** local-return/ingress close, terminal A cleanup fence,
+TargetLease validation, and ordered selection barrier.
 
 ### I5 — One Suppression Owner
 
-**Property:** at most one valid SuppressionLease may consume host input.
+At most one valid SuppressionLease consumes host input.
 
-**Enforced by:** HostSuppressionController single-owner lease slot and idempotent
+**Enforced by:** HostSuppressionController single-owner slot + idempotent local
 release.
 
 ### I6 — Bounded Capture Work
 
-**Property:** event-tap callback cost stays bounded/nonblocking.
+CGEventTap callback remains bounded/nonblocking.
 
-**Enforced by:** synchronous bounded InputIngress and no remote awaits on the
-callback path.
+**Enforced by:** synchronous bounded InputIngress; no remote await on callback
+path.
 
 ### I7 — Persistent Transitions Are Never Silently Lost
 
-**Property:** key/button state transitions are delivered in order with an
-explicit semantic outcome, or Control fails safe. They are never silently lost.
+Key/button transitions are delivered in order with an explicit semantic outcome
+or Control fails safe.
 
-**Enforced by:** unified ordered input lane + non-droppable admission policy +
-pointer result / required keyboard outcome contract.
+**Enforced by:** one ordered semantic lane + non-droppable admission + pointer
+result / required keyboard outcome contract.
 
 ### I8 — Cleanup Never Blocks Local Return
 
-**Property:** remote cleanup is best effort after local restoration.
+Remote cleanup begins only after local safety release and is bounded.
 
-**Enforced by:** local-return gate ordering and bounded asynchronous cleanup.
+**Enforced by:** local-return gate ordering + async terminal cleanup.
 
-### I9 — Ambiguous Remote State Is Not Reused as Healthy
+### I9 — Ambiguous Persistent State Is Not Reused as Clean
 
-**Property:** an uncertain state-changing remote delivery cannot silently become
-part of a supposedly clean replacement control session.
+Unknown key/button state cannot silently become the starting state for a new
+Control/Target context.
 
-**Enforced by:** session invalidation when cleanup/state certainty cannot be
-re-established.
+**Enforced by:** terminal cleanup proof or Session invalidation.
 
 ### I10 — Diagnostics Are Payload-Safe
 
-**Property:** raw pointer deltas/coordinates, key codes/typed content, HID
-reports, clipboard contents, and equivalent payloads never enter diagnostics.
+Raw pointer deltas/coordinates, key codes/typed content, HID reports, clipboard
+contents, and equivalent payloads never enter diagnostics.
 
-**Enforced by:** typed metadata-only observation APIs and adversarial tests.
+**Enforced by:** typed metadata-only observations + adversarial tests.
+
+### I11 — Routing Claims Are Honest
+
+Ownership under a selected TargetLease does not imply a backend can explicitly
+route every command to that display.
+
+**Enforced by:** typed remote routing scope + physical-evidence-backed backend
+claims (#92, ADR-0010, #107).
 
 ## Migration map
 
-The following mapping is directional, not a requirement to preserve names:
+The mapping is directional; target names are not frozen.
 
-| Current responsibility/type | Target responsibility | Planned owner |
-| --- | --- | --- |
-| `AppModel` | composition + view-state projection | #108 |
-| `SessionController` | connection/reconnect policy | SessionManager |
-| `SessionReference` | **delete** mutable-current indirection | immutable SessionHandle |
-| `RemoteSession` | per-connection CXI session + ordered command lane | RemoteDeviceSession |
-| `requestBlocking()` | **delete** | async RemoteCommandLane |
-| `TargetSelectionController` | target discovery/selection lifecycle | TargetCoordinator + TargetLease |
-| `ControlHandoffController` | **replace** orchestration/epoch choreography | ControlCoordinator + ControlLease |
-| `EdgeSwitchStateMachine` internal queue/sequences | **replace** with pure policy | HandoffPolicy |
-| `TransitionSequenceGate` | **delete** | actor/lease ownership |
-| monolithic `InputCapture` | capability, event tap, translation, edge, suppression | MacHost boundaries |
-| `CapturedKeyEvent` Android semantics | **delete from host API** | semantic key type in #103 |
-| `InputSender` | bounded ingress + per-lease async delivery | InputIngress + DeliveryWorker |
-| separate pointer/keyboard delivery queues | **delete** | one ordered semantic lane |
-| host-side duplicate held-input state | consolidate | DeliveryWorker outcome ledger; helper defense-in-depth |
-| fire-and-forget `KEY_EVENT` | **not final target** | additive v1 semantic key-result contract or proven equivalent |
-| current `Protocol` target | keep v1 framing; isolate translation | CXI v1 adapter |
-| helper `Main.kt` broad dispatch | separate protocol/target/backend ownership where justified | #107 |
+| Current responsibility/type | Target direction |
+| --- | --- |
+| `AppModel` | composition + presentation projection (#108) |
+| `SessionController` | SessionManager connection/reconnect policy |
+| `SessionReference` | **delete**; immutable SessionHandle |
+| `RemoteSession` | concrete async session + ordered command lane |
+| `requestBlocking()` | **delete** |
+| `TargetSelectionController` | TargetCoordinator + TargetLease + cleanup/selection fence |
+| `ControlHandoffController` | **replace** with ControlCoordinator + ControlLease |
+| `EdgeSwitchStateMachine` internal queue/sequences | pure HandoffPolicy |
+| `TransitionSequenceGate` | **delete** |
+| monolithic `InputCapture` | split capability/event-tap/translation/edge/suppression ownership |
+| `CapturedKeyEvent` Android semantics | **delete from host domain** (#103) |
+| `InputSender` | InputIngress + per-Control DeliveryWorker |
+| separate pointer/keyboard queues | **delete**; one ordered semantic lane |
+| host duplicate held-input bookkeeping | one outcome-based DeliveryWorker ledger |
+| fire-and-forget `KEY_EVENT` | **not final**; #141 semantic outcome or equivalent proof |
+| current `Protocol` target | retain v1 framing; isolate adapter/translation |
+| helper broad `Main.kt` dispatch | audit/split protocol-target-backend ownership (#107) |
+| InputManager pointer teardown local-mask reset | prove/replace with trustworthy cleanup (#107) |
 
 ## Migration strategy
 
-This ADR authorizes broad replacement but does **not** authorize one giant rewrite
-PR.
+Broad replacement is authorized; one giant rewrite PR is not.
 
 Rules:
 
 1. every merged slice leaves one coherent runnable architecture;
-2. temporary adapters require a named owner and deletion issue/step;
-3. no long-lived dual Control, Session, Target, or delivery owner may remain;
-4. structural compatibility with old tests is not a reason to preserve obsolete
-   architecture; rewrite tests that encode implementation shape rather than
-   required behavior;
+2. temporary adapters require an owner and explicit deletion point;
+3. do not keep dual Control/Session/Target/delivery ownership indefinitely;
+4. rewrite tests that encode obsolete structure instead of preserving bad
+   architecture to keep them green;
 5. preserve CXI v1 framing/compatibility and validated DeX routing unless a
-   separately approved additive protocol change or migration supersedes them;
-6. #96 cursor behavior is carried forward exactly until materially new evidence
-   justifies reopening it;
-7. reset-sensitive runtime changes receive exact-head physical verification and
-   restart/apply ADR-0012 lineage accounting as required.
+   separately approved additive protocol change/migration supersedes them;
+6. preserve accepted #96 behavior exactly unless materially new evidence
+   reopens it;
+7. reset-sensitive runtime changes require exact-head physical verification and
+   ADR-0012 lineage handling.
 
-Suggested implementation order remains governed by the native issue dependency
-graph:
+Issue dependency order remains authoritative. High-level sequence:
 
-1. #102 — approve this ownership/concurrency contract;
+1. #102 — approve ownership/concurrency contract;
 2. #103 — semantic input domain + module dependency direction;
-3. #99 / #104 / #105 — capability, host, and Control migration;
-4. #106 / #107 plus the required keyboard-outcome protocol task — delivery and
-   Android/helper migration as dependencies permit;
+3. #99 / #104 / #105 — capability, host, Control migration;
+4. #106 / #107 / #141 — delivery, helper/backend cleanup, keyboard outcome;
 5. #108 — application composition/presentation convergence;
 6. #109 — adversarial verification + legacy purge.
 
-Parallel work is allowed where dependencies do not overlap ownership being
-migrated.
+Parallel work is allowed when dependencies and ownership migration do not
+conflict.
 
 ## Alternatives considered
 
-### Preserve the current controllers and only narrow their responsibilities
+### Preserve current controllers and only narrow them
 
-Rejected. It reduces diff size but retains the hardest correctness property:
-multiple raw generations, locks, queues, and callbacks must still agree on which
-lifecycle is current.
+Rejected. Smaller diff would retain the hardest problem: raw generations,
+locks, queues, and callbacks still have to agree on current ownership.
 
-### One global actor for the entire application
+### One global actor
 
-Rejected. It makes ownership superficially simple but puts the event-tap hot
-path and local fail-safe behind async scheduling and creates unnecessary
-serialization between unrelated lifecycles.
+Rejected. It would put unrelated lifecycles behind one executor and weaken the
+CGEventTap/local-fail-safe boundary.
 
-### Actors everywhere, including capture admission
+### Actors everywhere
 
-Rejected. CGEventTap requires synchronous bounded handling. A small
-lock-protected ingress is the correct boundary for this workload.
+Rejected. CGEventTap admission is synchronous by nature; a tiny bounded lock is
+more honest and safer there.
 
-### One global generation counter shared by Session/Target/Control
+### One global generation
 
-Rejected. Those lifecycles are intentionally independent. A universal epoch
-hides ownership errors rather than modeling them.
+Rejected. Session, Target, and Control are intentionally independent lifecycles.
+A universal epoch hides ownership mistakes rather than modeling them.
 
-### Keep separate pointer and keyboard queues
+### Separate pointer/keyboard delivery queues
 
-Rejected as the target design. Separate queues make cross-class ordering an
-emergent property and complicate held-input cleanup. One semantic lane with
-class-aware coalescing is easier to reason about.
+Rejected as target architecture. They make cross-class persistent ordering an
+emergent property and complicate held-state cleanup.
 
-### Keep fire-and-forget keyboard delivery because helper teardown cleans keys
+### Fire-and-forget keyboard plus helper teardown cleanup
 
-Rejected as the final target. Helper-side teardown cleanup is valuable defense
-in depth, but it does not tell the host whether an individual key transition was
-accepted while the Session remained alive. In particular, the current helper can
-log and drop a key event without failing the Session. Persistent state needs an
-explicit semantic outcome or an equivalent proved contract.
+Rejected as final target. Current helper can drop/reject an individual key while
+Session stays alive, and teardown cleanup does not prove that normal delivery
+succeeded.
 
-### Change CXI v1 to put the target ID in every input message immediately
+### Change CXI v1 to carry target ID on every input immediately
 
-Not selected by this ADR. That could remove some helper-global route coupling,
-but it is a larger protocol migration with its own compatibility/evidence cost.
-The TargetLease + ordered command-lane design makes the current v1 route contract
-safe without requiring target IDs on every event. A future protocol change may
-revisit this separately.
+Not selected. It could simplify future routing, but the TargetLease + ordered
+barrier design makes current v1 safe without coupling #102 to a larger wire
+migration.
 
-### Require CXI v2 solely to acknowledge keyboard delivery
+### Require CXI v2 for keyboard outcomes
 
-Rejected. A small additive v1 capability/result can satisfy the persistent-input
-outcome invariant without coupling the Architecture Leap to the broader CXI v2
-migration gate.
+Rejected. A small additive v1 capability/result can satisfy the correctness
+contract without coupling the Leap to the broader v2 migration gate.
+
+### Assume helper process exit cleans InputManager pointer state
+
+Rejected without evidence. Current InputManager pointer close only resets local
+bookkeeping; #107 must prove or implement remote cleanup semantics.
 
 ## Consequences
 
 Positive:
 
-- stale work is isolated primarily by resource ownership rather than repeated
-  counter comparisons;
-- replacement sessions cannot receive old work through a mutable shared
-  reference;
-- target routing changes become explicit barriers;
-- local host safety remains independent of remote scheduling;
-- one ordered semantic input lane simplifies backpressure and held-state
-  reasoning;
-- persistent keyboard state stops depending on fire-and-forget guesswork once
-  the required outcome contract is implemented;
-- async request execution no longer requires semaphore bridges;
-- platform details move behind explicit adapters;
-- dependent issues receive a concrete architecture contract instead of a
-  mandate to preserve existing types.
+- stale work is isolated primarily by resource ownership;
+- old Session work cannot redirect into a replacement;
+- target changes have a cleanup + selection barrier;
+- local pointer safety is independent of Android and actor scheduling;
+- persistent input state becomes outcome-based rather than write-based;
+- one ordered lane simplifies state ordering and cleanup;
+- platform/routing claims stay semantically honest;
+- blocking async-to-sync request bridges disappear;
+- dependent issues receive a concrete target rather than “keep old structure.”
 
-Negative / cost:
+Cost:
 
-- this is a substantial internal rebuild, not a cosmetic refactor;
-- many existing tests will need replacement because they encode old class/
-  generation structure;
-- the migration requires temporary adapters at some boundaries;
-- the keyboard-outcome contract adds a separately reviewed protocol/helper/macOS
-  compatibility slice;
-- exact-head physical verification is required repeatedly for materially
-  affected runtime behavior;
-- ADR-0012 stability credit will reset when reset-sensitive production slices
-  change the candidate lineage.
+- substantial internal rebuild;
+- many structure-coupled tests must be replaced;
+- temporary migration adapters may be needed;
+- #141 adds a separately reviewed additive v1 protocol slice;
+- #107 must prove/repair backend teardown cleanup;
+- repeated exact-head physical verification is required for runtime slices;
+- ADR-0012 cycle credit resets when the candidate lineage is invalidated.
 
-## Validation
+## Validation / proof obligations
 
-Before this ADR is accepted:
+Before accepting this ADR:
 
-- documentation validation and repository-prescribed CI must pass on exact HEAD;
-- independent review must verify every lifecycle has one owner and every
-  cross-owner ordering relation is explicit;
-- review must specifically challenge Target selection vs in-flight input,
-  actor reentrancy, local fail-safe independence, session replacement, held
-  state after timeout, keyboard fire-and-forget semantics, acquisition/rollback
-  ordering, and bounded capture behavior;
-- deterministic design review must trace at minimum: normal handoff/return,
-  target change with input in flight, Session replacement with input in flight,
-  permission revocation, queue saturation on a non-droppable transition,
-  external-control takeover, watchdog/emergency return, helper-side key
-  rejection, and ambiguous key/button timeout;
-- `docs/architecture.md`, `AGENTS.md`, and ADR-0009 must not contradict this
-  contract.
+- exact-final-HEAD documentation/repository CI passes;
+- independent architecture review challenges the model rather than restating
+  it;
+- no contradictory current architecture/agent rule remains;
+- every lifecycle has one authoritative owner;
+- every cross-owner ordering relation is explicit;
+- no safety claim relies on actor scheduling or remote cleanup success.
 
-No physical-device test is required for this docs-only design PR. Physical
-claims remain those already established by existing evidence; implementation
-slices require their own exact-head device verification.
+Review must trace at least:
+
+1. normal handoff and return;
+2. Control acquisition failure halfway through setup;
+3. local return while ControlCoordinator is delayed;
+4. target A -> B with ordinary input queued/in-flight;
+5. target A -> B with a confirmed held key/button;
+6. target disappearance before cleanup can complete;
+7. Session replacement with queued/in-flight delivery;
+8. host capability revocation with healthy Session;
+9. event-tap failure;
+10. non-droppable queue saturation;
+11. helper-side keyboard rejection while Session stays alive;
+12. key/button timeout after send;
+13. additive movement timeout;
+14. external-control takeover;
+15. watchdog/emergency return;
+16. helper shutdown/backend cleanup, including InputManager pointer state;
+17. stale response after replacement; and
+18. diagnostics payload isolation.
+
+This PR is docs-only. No new physical behavior is claimed, so no new physical
+test is required for the ADR itself. Each implementation slice must supply its
+own exact-head physical evidence where the claim depends on macOS + Samsung DeX
+behavior.
 
 ## Revisit conditions
 
-Revisit this ADR when one of the following materially changes the ownership
-model:
+Revisit this ADR if any of the following materially changes the ownership model:
 
 - CXI v2 makes target identity explicit per input command;
-- a second production transport changes Session ownership requirements;
-- Android → macOS pointer/keyboard input becomes an approved product direction;
+- a second production transport changes Session ownership;
+- Android -> macOS pointer/keyboard input becomes approved scope;
 - simultaneous multi-device control becomes approved scope;
 - a materially different privileged host-input mechanism replaces the current
-  unprivileged CGEventTap/suppression architecture; or
-- new reproducible evidence disproves a safety assumption encoded here.
+  unprivileged CGEventTap/suppression design; or
+- new reproducible evidence disproves a safety assumption above.
