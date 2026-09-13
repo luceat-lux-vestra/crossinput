@@ -6,6 +6,7 @@ APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 PACKAGE="com.crossinput.helper"
 PERMISSION="android.permission.WRITE_SECURE_SETTINGS"
 BOOTSTRAP_COMPONENT="$PACKAGE/.WirelessAdbBootstrapActivity"
+LOG_TAG="CrossInputWirelessAdb"
 
 adb_cmd() {
   if [ -n "${ANDROID_SERIAL:-}" ]; then
@@ -40,31 +41,62 @@ adb_cmd install -r "$APK"
 echo "==> Granting WRITE_SECURE_SETTINGS"
 adb_cmd shell pm grant "$PACKAGE" "$PERMISSION"
 
-echo "==> Explicitly starting bootstrap component"
-# A newly installed Android package can remain in the stopped state until a
-# component is explicitly launched. Start the no-display bootstrap Activity so
-# future BOOT_COMPLETED delivery is not dependent on local screen interaction.
-adb_cmd shell am start -W -n "$BOOTSTRAP_COMPONENT" >/dev/null
-
-echo "==> Enabling Wireless debugging for the current boot"
-# This command runs as the adb shell user. Future boots are handled by the
-# installed receiver/job after Wi-Fi connectivity is available.
-adb_cmd shell settings put global adb_wifi_enabled 1
-
 GRANTED="$(adb_cmd shell dumpsys package "$PACKAGE" | grep -F "$PERMISSION: granted=true" || true)"
 if [ -z "$GRANTED" ]; then
   echo "ERROR: $PERMISSION was not granted to $PACKAGE" >&2
   exit 1
 fi
 
+echo "==> Enabling Wireless debugging for the current boot"
+# Keep the current transport alive while validating the installed-app path.
+adb_cmd shell settings put global adb_wifi_enabled 1
 ENABLED="$(adb_cmd shell settings get global adb_wifi_enabled | tr -d '\r')"
 if [ "$ENABLED" != "1" ]; then
   echo "ERROR: adb_wifi_enabled did not become 1" >&2
   exit 1
 fi
 
+echo "==> Explicitly starting bootstrap component"
+adb_cmd shell am start -W -n "$BOOTSTRAP_COMPONENT"
+
+echo "==> Package user state"
+adb_cmd shell dumpsys package "$PACKAGE" \
+  | grep -E 'User [0-9]+:|stopped=|notLaunched=|WRITE_SECURE_SETTINGS' \
+  || true
+
+echo "==> Waiting for installed-app recovery preflight"
+PREFLIGHT_OK=0
+for _ in $(seq 1 15); do
+  LOGS="$(adb_cmd logcat -d -t 200 -s "$LOG_TAG:I" '*:S' 2>/dev/null || true)"
+  if printf '%s\n' "$LOGS" | grep -q 'bootstrap activity started' \
+    && printf '%s\n' "$LOGS" | grep -q 'wireless ADB recovery succeeded outcome='; then
+    PREFLIGHT_OK=1
+    break
+  fi
+  sleep 1
+done
+
+if [ "$PREFLIGHT_OK" -ne 1 ]; then
+  echo "ERROR: installed recovery path did not complete its preflight." >&2
+  echo >&2
+  echo "=== $LOG_TAG logs ===" >&2
+  adb_cmd logcat -d -t 200 -s "$LOG_TAG:I" '*:S' >&2 || true
+  echo >&2
+  echo "=== package state ===" >&2
+  adb_cmd shell dumpsys package "$PACKAGE" \
+    | grep -E 'User [0-9]+:|stopped=|notLaunched=|enabled=|WRITE_SECURE_SETTINGS' >&2 \
+    || true
+  echo >&2
+  echo "=== jobscheduler ===" >&2
+  adb_cmd shell dumpsys jobscheduler "$PACKAGE" >&2 || true
+  exit 1
+fi
+
+echo "==> Recovery preflight passed"
+adb_cmd logcat -d -t 50 -s "$LOG_TAG:I" '*:S' || true
+
 cat <<EOF
-Wireless ADB recovery bootstrap installed.
+Wireless ADB recovery bootstrap installed and preflight-verified.
 
 Package: $PACKAGE
 Android API: $SDK
@@ -76,7 +108,7 @@ Next physical verification:
   3. Do not use USB or local screen interaction.
   4. Confirm _adb-tls-connect._tcp reappears after Wi-Fi reconnects.
   5. Reconnect and inspect:
-       adb logcat -d -s CrossInputWirelessAdb
+       adb logcat -d -t 200 -s $LOG_TAG:I '*:S'
 
 To remove the bootstrap package without affecting the pushed app_process APK:
   adb uninstall $PACKAGE
