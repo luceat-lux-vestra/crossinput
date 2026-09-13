@@ -23,9 +23,9 @@ import Diagnostics
 ///     CGAssociateMouseAndMouseCursorPosition(true)
 ///     CGSetLocalEventsSuppressionInterval(0.0)
 ///
-/// This is an investigation-only private-SPI candidate. It does not change
-/// InputCapture suppression, remote delta production, state-machine ownership,
-/// Android/helper/protocol behavior, or the P0 one-shot restore path.
+/// `CGSetLocalEventsSuppressionInterval` is unavailable to Swift in current
+/// SDKs even though Deskflow still calls the legacy symbol from C++. The
+/// investigation therefore resolves that exact CoreGraphics symbol via dlsym.
 internal final class DeskflowCursorIsolation: @unchecked Sendable {
     internal struct Operations: @unchecked Sendable {
         let liveDisplayID: @Sendable () -> CGDirectDisplayID?
@@ -33,10 +33,10 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         let hide: @Sendable (CGDirectDisplayID) -> CGError
         let show: @Sendable (CGDirectDisplayID) -> CGError
         let associate: @Sendable (Bool) -> CGError
-        let setSuppressionInterval: @Sendable (Double) -> Void
+        let setSuppressionInterval: @Sendable (Double) -> Int32?
 
         static func production() -> Operations {
-            let spi = PrivateCursorSPI()
+            let spi = CursorCompatibilitySPI()
             return Operations(
                 liveDisplayID: Self.resolveLiveDisplayID,
                 setCursorInBackground: { spi.setCursorInBackground() },
@@ -45,7 +45,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
                 associate: { associated in
                     CGAssociateMouseAndMouseCursorPosition(associated ? 1 : 0)
                 },
-                setSuppressionInterval: { CGSetLocalEventsSuppressionInterval($0) }
+                setSuppressionInterval: { spi.setLocalEventsSuppressionInterval($0) }
             )
         }
 
@@ -56,7 +56,7 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
                 hide: { _ in .success },
                 show: { _ in .success },
                 associate: { _ in .success },
-                setSuppressionInterval: { _ in }
+                setSuppressionInterval: { _ in 0 }
             )
         }
 
@@ -73,44 +73,59 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         }
     }
 
-    private final class PrivateCursorSPI: @unchecked Sendable {
+    private final class CursorCompatibilitySPI: @unchecked Sendable {
         private typealias ConnectionFn = @convention(c) () -> Int32
         private typealias SetConnectionPropertyFn = @convention(c) (
             Int32, Int32, CFString, CFTypeRef
         ) -> Int32
+        private typealias SetLocalEventsSuppressionIntervalFn = @convention(c) (Double) -> Int32
 
-        private let handle: UnsafeMutableRawPointer?
+        private let skyLightHandle: UnsafeMutableRawPointer?
+        private let coreGraphicsHandle: UnsafeMutableRawPointer?
         private let connection: ConnectionFn?
         private let setter: SetConnectionPropertyFn?
+        private let setSuppressionInterval: SetLocalEventsSuppressionIntervalFn?
 
         init() {
-            let handle = dlopen(
+            let skyLightHandle = dlopen(
                 "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
                 RTLD_LAZY | RTLD_LOCAL
             )
-            self.handle = handle
+            self.skyLightHandle = skyLightHandle
 
-            guard let handle else {
-                connection = nil
-                setter = nil
-                return
-            }
-
-            if let symbol = dlsym(handle, "_CGSDefaultConnection") {
+            if let skyLightHandle,
+               let symbol = dlsym(skyLightHandle, "_CGSDefaultConnection") {
                 connection = unsafeBitCast(symbol, to: ConnectionFn.self)
             } else {
                 connection = nil
             }
 
-            if let symbol = dlsym(handle, "CGSSetConnectionProperty") {
+            if let skyLightHandle,
+               let symbol = dlsym(skyLightHandle, "CGSSetConnectionProperty") {
                 setter = unsafeBitCast(symbol, to: SetConnectionPropertyFn.self)
             } else {
                 setter = nil
             }
+
+            let coreGraphicsHandle = dlopen(
+                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                RTLD_LAZY | RTLD_LOCAL
+            )
+            self.coreGraphicsHandle = coreGraphicsHandle
+            if let coreGraphicsHandle,
+               let symbol = dlsym(coreGraphicsHandle, "CGSetLocalEventsSuppressionInterval") {
+                setSuppressionInterval = unsafeBitCast(
+                    symbol,
+                    to: SetLocalEventsSuppressionIntervalFn.self
+                )
+            } else {
+                setSuppressionInterval = nil
+            }
         }
 
         deinit {
-            if let handle { dlclose(handle) }
+            if let skyLightHandle { dlclose(skyLightHandle) }
+            if let coreGraphicsHandle { dlclose(coreGraphicsHandle) }
         }
 
         func setCursorInBackground() -> Int32? {
@@ -124,6 +139,15 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             )
             Diagnostics.log(
                 "issue96 deskflow-cursor-spi result=\(result) connection=_CGSDefaultConnection"
+            )
+            return result
+        }
+
+        func setLocalEventsSuppressionInterval(_ interval: Double) -> Int32? {
+            guard let setSuppressionInterval else { return nil }
+            let result = setSuppressionInterval(interval)
+            Diagnostics.log(
+                "issue96 deskflow-suppression-interval value=\(interval) result=\(result)"
             )
             return result
         }
@@ -186,12 +210,17 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             return false
         }
 
-        operations.setSuppressionInterval(0.0001)
+        guard operations.setSuppressionInterval(0.0001) == 0 else {
+            rollbackVisibilityLocked()
+            Diagnostics.log("deskflow-cursor-isolation suppression-interval admission failed")
+            return false
+        }
+
         let disassociateResult = operations.associate(false)
         guard disassociateResult == .success else {
             _ = operations.associate(true)
             rollbackVisibilityLocked()
-            operations.setSuppressionInterval(0.0)
+            _ = operations.setSuppressionInterval(0.0)
             Diagnostics.log(
                 "deskflow-cursor-isolation disassociate failed result=\(disassociateResult.rawValue)"
             )
@@ -233,18 +262,20 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
             isDisassociated = false
         }
         let enterAssociateResult = operations.associate(true)
-        operations.setSuppressionInterval(0.0)
+        let suppressionResetResult = operations.setSuppressionInterval(0.0)
 
         guard hiddenDisplayID == nil,
               !isDisassociated,
               showAssociateResult == .success,
-              enterAssociateResult == .success else {
+              enterAssociateResult == .success,
+              suppressionResetResult == 0 else {
             Diagnostics.log(
                 "deskflow-cursor-isolation cleanup failed generation=\(generation) "
                     + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
                     + "show=\(showResult.rawValue) "
                     + "show-associate=\(showAssociateResult.rawValue) "
-                    + "enter-associate=\(enterAssociateResult.rawValue)"
+                    + "enter-associate=\(enterAssociateResult.rawValue) "
+                    + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable")"
             )
             return false
         }
@@ -257,8 +288,8 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
         return true
     }
 
-    /// Best-effort teardown that retries only outstanding cleanup debt. A show
-    /// that already succeeded is never repeated, so visibility counts cannot be
+    /// Best-effort teardown retries only outstanding cursor debt. A show that
+    /// already succeeded is never repeated, so visibility counts cannot be
     /// over-balanced by teardown.
     internal func forceReset() {
         lock.lock()
@@ -281,15 +312,18 @@ internal final class DeskflowCursorIsolation: @unchecked Sendable {
                 isDisassociated = false
             }
         }
-        operations.setSuppressionInterval(0.0)
+        let suppressionResetResult = operations.setSuppressionInterval(0.0)
 
-        if hiddenDisplayID == nil, !isDisassociated {
+        if hiddenDisplayID == nil,
+           !isDisassociated,
+           suppressionResetResult == 0 {
             activeGeneration = nil
         }
         Diagnostics.log(
             "deskflow-cursor-isolation force-reset "
                 + "background=\(backgroundResult.map { String($0) } ?? "unavailable") "
-                + "show=\(showResult.rawValue) associate=\(associateResult.rawValue)"
+                + "show=\(showResult.rawValue) associate=\(associateResult.rawValue) "
+                + "suppression=\(suppressionResetResult.map { String($0) } ?? "unavailable")"
         )
     }
 
