@@ -74,6 +74,9 @@ final class AppModel: ObservableObject {
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
     @Published private(set) var inputCapabilities: InputCapabilitySnapshot
+    /// Once tap creation has failed with listen access missing, this process
+    /// has evidence that Input Monitoring is required on this Mac/runtime.
+    /// Keep that fact after the user grants it so a later revoke is fail-safe.
     @Published private(set) var inputMonitoringRequired = false
     @Published private var inputControlIssue: InputControlIssue?
 
@@ -258,9 +261,9 @@ final class AppModel: ObservableObject {
         // `onChange` only fires on a real transition, so keep the presentation
         // projection synchronized even when this is an explicit no-op refresh.
         inputCapabilities = snapshot
-        if snapshot.inputMonitoringGranted {
-            inputMonitoringRequired = false
-            if inputControlIssue == .missingInputMonitoring { inputControlIssue = nil }
+        if snapshot.inputMonitoringGranted,
+           inputControlIssue == .missingInputMonitoring {
+            inputControlIssue = nil
         }
         if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
             inputControlIssue = nil
@@ -282,21 +285,32 @@ final class AppModel: ObservableObject {
     }
 
     private func applyInputCapabilitySnapshot(_ snapshot: InputCapabilitySnapshot) {
-        let lostAccessibility = inputCapabilities.accessibilityGranted && !snapshot.accessibilityGranted
+        let previous = inputCapabilities
+        let lostAccessibility = previous.accessibilityGranted && !snapshot.accessibilityGranted
+        let lostRequiredInputMonitoring = inputMonitoringRequired
+            && previous.inputMonitoringGranted
+            && !snapshot.inputMonitoringGranted
         inputCapabilities = snapshot
 
-        if snapshot.inputMonitoringGranted {
-            inputMonitoringRequired = false
-            if inputControlIssue == .missingInputMonitoring { inputControlIssue = nil }
+        if snapshot.inputMonitoringGranted,
+           inputControlIssue == .missingInputMonitoring {
+            inputControlIssue = nil
         }
         if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
             inputControlIssue = nil
         }
 
-        guard lostAccessibility else { return }
-        Diagnostics.log("input capability lost capability=accessibility action=local-return")
-        inputControlIssue = .missingAccessibility
-        handoffController.inputCapabilityLost()
+        if lostAccessibility {
+            Diagnostics.log("input capability lost capability=accessibility action=local-return")
+            inputControlIssue = .missingAccessibility
+            handoffController.inputCapabilityLost()
+            return
+        }
+        if lostRequiredInputMonitoring {
+            Diagnostics.log("input capability lost capability=input-monitoring action=local-return")
+            inputControlIssue = .missingInputMonitoring
+            handoffController.inputCapabilityLost()
+        }
     }
 
     @discardableResult
@@ -305,9 +319,9 @@ final class AppModel: ObservableObject {
         switch result {
         case .enabled, .alreadyEnabled:
             inputControlIssue = nil
-            // A successfully created modifying tap proves the current product
-            // path is usable even if Input Monitoring is not separately listed.
-            inputMonitoringRequired = false
+            // Do not clear `inputMonitoringRequired`: if a prior failed tap
+            // proved that this environment requires it, the requirement must
+            // survive the subsequent grant so revocation can be detected.
         case .missingAccessibility:
             inputControlIssue = .missingAccessibility
         case .missingInputMonitoring:
