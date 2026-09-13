@@ -28,6 +28,7 @@ let package = Package(
         .testTarget(name: "ProtocolTests", dependencies: ["Protocol"]),
         .testTarget(name: "AndroidBridgeTests", dependencies: ["AndroidBridge", "Protocol"]),
         .testTarget(name: "InputDomainTests", dependencies: ["InputDomain"]),
+        .testTarget(name: "DeliveryTests", dependencies: ["Delivery", "InputDomain"]),
         .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture", "InputDomain"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
