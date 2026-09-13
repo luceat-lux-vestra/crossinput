@@ -3,13 +3,26 @@
 Binary protocol between the macOS app and the Android helper.
 Transport: ADB subprocess stdin/stdout (app_process execution).
 
-> Rule: changing this document requires updating the golden fixtures in `protocol/fixtures/` and both implementations (Swift/Kotlin) (AGENTS.md hard rule 6).
+> Rule: changing a production protocol message requires updating the golden
+> fixtures in `protocol/fixtures/` and both implementations (Swift/Kotlin)
+> (AGENTS.md hard rule 6).
+>
+> **Current-keyboard compatibility note (2026-09-13):** the implemented v1
+> `KEY_EVENT` path is currently fire-and-forget at the protocol level: unlike
+> semantic pointer requests, the helper sends no correlated key-delivery result.
+> Helper/backend failure may therefore be observable only through metadata
+> diagnostics while the Session remains alive. Architecture Leap ADR-0016 found
+> that insufficient for persistent key-state ownership. Issue #141 owns an
+> additive v1 capability/result extension (or equivalent reviewed mechanism)
+> that must distinguish semantic certainty before the rebuilt delivery pipeline
+> is complete. This note documents the **current wire**; it does not implement or
+> reserve the final #141 encoding, and therefore changes no fixtures in this PR.
 
 ## Frame format
 
 Every message is a single frame; all integers are **little-endian**:
 
-```
+```text
 0                   1                   2                   3
 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -27,7 +40,10 @@ Every message is a single frame; all integers are **little-endian**:
 
 - magic: `43 58 49` ("CXI")
 - version: `1`
-- requestId: for request-response matching. Responses reply with the same requestId.
+- requestId: for request-response matching where a message defines a correlated
+  response. A non-zero requestId on a message does not by itself guarantee that
+  the current v1 message type has a semantic response (notably current
+  `KEY_EVENT`).
 
 ## Message types
 
@@ -46,7 +62,7 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x0009 | POINTER_MOVE_REL | dx i32 + dy i32 (relative pointer delta, target display pixels) |
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
 | 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up; positive horizontal = left — mirrors the macOS scroll axes; Android backends convert to their native conventions: AXIS_HSCROLL positive is right, so the InputManager backend negates horizontal and the UHID backend inverts it into the AC Pan field) |
-| 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (Android KeyEvent semantics, see below) |
+| 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (current v1 Android KeyEvent wire semantics; see below) |
 
 ### Android → Mac
 
@@ -62,6 +78,11 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x8008 | FATAL_ERROR | code u32 + message: u32 length + bytes |
 | 0x8009 | POINTER_RESULT | status u8 + deliveredDx i32 + deliveredDy i32 |
 
+There is currently **no correlated keyboard-result message** in the implemented
+v1 table. #141 will define its additive capability/message semantics together
+with fixtures and both implementations; ADR-0016 requires semantic outcome
+classes equivalent to `applied`, proven `notApplied`, and `ambiguous`.
+
 `POINTER_RESULT.status` is `0=DELIVERED`, `1=FAILED`, or
 `2=PARTIALLY_DELIVERED`. The helper reports the movement actually accepted by
 the selected backend. A partial UHID write is never retried; macOS accounts
@@ -76,6 +97,9 @@ the current semantic pointer path. The current helper advertises:
 | 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
 | 1 | `explicitPointerRouting` | the helper can serve pointer targets through an explicit-display-routing backend when required (desktop sinks may instead be served by the system-routed backend; see "Application path") |
 
+No keyboard semantic-result capability is implemented yet. #141 must allocate
+and document any additive capability/result encoding before production use.
+
 ## Application path and v1 compatibility
 
 The normal Ampersand application path uses the semantic `POINTER_*` messages
@@ -86,18 +110,23 @@ through InputReader, so the visible pointer sprite follows the virtual
 device — injected InputManager events bypass InputReader and never move it.
 Every other target uses the InputManager backend, which sets the event
 display ID explicitly. If the UHID device cannot be created or a report write
-fails mid-session, the dispatcher degrades to InputManager until the next
-`SELECT_DISPLAY`. macOS does not construct a descriptor or report; the
-semantic UHID descriptor (buttons/X/Y/wheel/AC Pan) lives in the helper and
-is covered by byte-exact unit tests.
+fails mid-session, the dispatcher currently degrades to InputManager until the
+next `SELECT_DISPLAY`. macOS does not construct the semantic pointer descriptor
+or report; that descriptor (buttons/X/Y/wheel/AC Pan) lives in the helper and is
+covered by byte-exact unit tests.
 
 `CREATE_HID_DEVICE`, `HID_REPORT`, and `DESTROY_HID_DEVICE` remain implemented
 by the helper as a CXI v1 compatibility path for existing clients and fixtures.
-They are not removed, renamed, or negotiated as CXI v2 in this rebaseline.
+They are not removed, renamed, or negotiated as CXI v2 in the Architecture Leap.
+
+ADR-0016 adds ownership/ordering requirements around this existing wire. In
+particular, target selection is a helper-global route barrier; old-Control
+stateful work/cleanup must retire before a later route mutation. This does not
+change the v1 frame encoding by itself.
 
 ## display structure
 
-```
+```text
 displayId u32
 type u8          (0=UNKNOWN 1=BUILT_IN 2=HDMI 3=DP 4=VIRTUAL 5=EXTERNAL 6=OVERLAY 7=FLAG_DESKTOP)
 flags u32        (raw Display.FLAG_*)
@@ -111,13 +140,15 @@ uniqueId: u32 length + UTF-8 bytes
 layerStack u32   (always recorded in v1; -1 if unknown)
 ```
 
-## KEY_EVENT semantics (ADR-0007)
+## KEY_EVENT semantics (ADR-0007, current compatibility wire)
 
-`KEY_EVENT` is the single keyboard message covering both Android delivery backends
-(UHID keyboard and virtual-keyboard injection). The Mac sends abstract key events;
-**the helper decides the backend** and reports failures via `HID_ERROR`.
+`KEY_EVENT` is the current CXI v1 keyboard wire message covering both Android
+delivery backends (UHID keyboard and virtual-keyboard injection). The helper
+decides the backend.
 
-```
+The current compatibility payload carries Android `KeyEvent` values:
+
+```text
 keyCode u16      Android KeyEvent.KEYCODE_* (e.g. 29=KEYCODE_A, 67=KEYCODE_DEL, 111=KEYCODE_ESCAPE)
 metaState u32    Android KeyEvent.META_* bit flags (actual Android constants:
                  0x1=Shift, 0x2=Alt, 0x4=Sym, 0x8=Function, 0x1000=Ctrl, 0x10000=Meta,
@@ -126,24 +157,35 @@ action u8        0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP
 repeatCount u8   repeat count (0 = first press; key repeats are sent as explicit DOWN events)
 ```
 
+**Current outcome behavior:** `Controller.handle(TYPE_KEY_EVENT)` invokes the
+keyboard backend and emits no correlated protocol response for that frame.
+Backend selection/failure diagnostics may be logged as metadata, but a write to
+the CXI stream is not semantic proof that the key transition was applied.
+`HID_ERROR` belongs to the raw HID-device compatibility operations and must not
+be documented as the normal semantic `KEY_EVENT` acknowledgement.
+
 Backend selection rules:
 
 1. **UHID keyboard backend** (preferred): the helper creates the keyboard device
    with the standard boot keyboard descriptor (below), maps `KEY_EVENT` to
-   reports internally, and owns device cleanup. The macOS application remains
-   on the semantic `KEY_EVENT` path.
+   reports internally, and owns device cleanup. The application remains on the
+   `KEY_EVENT` path at the v1 adapter boundary.
 2. **Virtual injection fallback**: if UHID keyboard creation or reporting fails
-   (or is not available on the device), the helper injects `KeyEvent`s from
-   `KEY_EVENT` directly (no keycode translation needed).
-3. The helper must not leave a key held after a backend failure or shutdown;
-   cleanup emits a release report before destroying the UHID device. Raw
-   `CREATE_HID_DEVICE`/`HID_REPORT` responses remain available to v1 clients.
+   (or is not available on the device), the helper can inject Android
+   `KeyEvent`s through the internal InputManager path.
+3. Current helper teardown attempts to release owned keyboard state. That is
+   useful defense in depth, but ADR-0016/#107 require backend-specific cleanup
+   proof and #141 requires a normal per-transition semantic outcome; teardown
+   alone is not final delivery acknowledgement.
+4. Under Architecture Leap #103, Android `KEYCODE_*` / `META_*` values remain a
+   compatibility-wire/remote-adapter concern rather than a platform-neutral
+   host/domain API.
 
 ### Standard boot keyboard HID descriptor (for CREATE_HID_DEVICE)
 
 USB HID standard boot keyboard descriptor (as used by Linux uhid examples):
 
-```
+```text
 0x05 0x01  Usage Page (Generic Desktop)
 0x09 0x06  Usage (Keyboard)
 0xA1 0x01  Collection (Application)
@@ -182,20 +224,20 @@ Bytes: `05 01 09 06 A1 01 05 07 19 E0 29 E7 15 00 25 01 75 01 95 08 81 02 95 01 
 
 ## Message flow (minimal scenario)
 
-```
+```text
 Mac ──────────────────────────► Android
 HELLO (req 1)                    │
                                  ├─► HELLO_ACK (req 1)
 LIST_DISPLAYS (req 2)            │
                                  ├─► DISPLAY_LIST (req 2)
 SELECT_DISPLAY (req 3)           │   (routes subsequent semantic POINTER_*
-                                 │    messages to the selected display)
+                                 │    messages through selected route state)
                                  ├─► DISPLAY_CHANGED (req 3)
-POINTER_MOVE_REL / BUTTON /      │   (helper picks the backend per target:
-SCROLL (req 4..n)                │    desktop sinks use the system-routed
-                                 │    UHID mouse; others use explicit
-                                 │    InputManager display targeting)
-                                 ├─► POINTER_RESULT (same req; accepted delta)
+POINTER_MOVE_REL / BUTTON /      │   (helper picks backend per target)
+SCROLL (req 4..n)                │
+                                 ├─► POINTER_RESULT (same req; semantic pointer result)
+KEY_EVENT (req k)                │   (current v1 compatibility behavior)
+                                 │    no correlated key-result frame today
 PING (req m)                     │
                                  ├─► PONG (req m)
 SHUTDOWN (req z)                 │
@@ -225,6 +267,10 @@ sequenceDiagram
             Helper-->>Mac: POINTER_RESULT(status, delivered delta)
         end
     end
+    opt current v1 keyboard compatibility path
+        Mac->>Helper: KEY_EVENT(keyCode, metaState, action, repeat)
+        Note right of Helper: No correlated key result in current implementation
+    end
     opt v1 raw HID compatibility client
         Mac->>Helper: CREATE_HID_DEVICE(descriptor)
         Helper-->>Mac: HID_CREATED(id)
@@ -236,11 +282,15 @@ sequenceDiagram
 
 ## Version rules
 
-- v1: initial definition. Later field additions (such as the optional
-  `HELLO_ACK` capabilities) keep the version; removals/meaning changes bump
-  the version. Wire compatibility and runtime feature compatibility are
-  separate: an older helper may speak v1 framing but still lack the features
+- v1: initial definition. Later field/message/capability additions that are
+  explicitly additive may keep the version; removals or incompatible meaning
+  changes bump the version. Wire compatibility and runtime feature compatibility
+  are separate: an older helper may speak v1 framing but still lack features
   required by the current application.
+- #141 is intended as an additive v1 safety extension. Its exact capability,
+  message type(s), result encoding, fixtures, and compatibility behavior are not
+  defined by ADR-0016; they must be defined and reviewed together in #141 before
+  implementation is considered complete.
 
 ## Reference: leap-scrcpy protocol (research)
 
