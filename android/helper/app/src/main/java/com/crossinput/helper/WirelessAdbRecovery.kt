@@ -1,5 +1,6 @@
 package com.crossinput.helper
 
+import android.app.Activity
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
@@ -11,6 +12,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import java.util.concurrent.atomic.AtomicInteger
@@ -20,6 +22,24 @@ internal const val WIRELESS_ADB_SETTING_KEY = "adb_wifi_enabled"
 internal const val WIRELESS_ADB_RECOVERY_JOB_ID = 0x43584941
 internal const val WIRELESS_ADB_VERIFY_DELAY_MS = 3_000L
 private const val WIRELESS_ADB_RETRY_BACKOFF_MS = 10_000L
+
+/**
+ * Explicit one-shot entry point used by the setup script after installation.
+ *
+ * Newly installed Android packages can remain in the stopped state until an
+ * explicit component is launched. Starting this no-display Activity removes
+ * that ambiguity, schedules the recovery job once, and immediately exits.
+ */
+class WirelessAdbBootstrapActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val result = WirelessAdbRecoveryScheduler.schedule(this)
+        if (result != JobScheduler.RESULT_SUCCESS) {
+            Log.w(TAG, "failed to schedule wireless ADB recovery job from bootstrap")
+        }
+        finish()
+    }
+}
 
 /**
  * Boot hook for the opt-in installed helper package.

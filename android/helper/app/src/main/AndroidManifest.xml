@@ -9,6 +9,14 @@
         android:label="Ampersand Helper"
         android:theme="@android:style/Theme.NoDisplay">
 
+        <activity
+            android:name=".WirelessAdbBootstrapActivity"
+            android:directBootAware="true"
+            android:enabled="true"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true" />
+
         <receiver
             android:name=".WirelessAdbRecoveryReceiver"
             android:directBootAware="true"

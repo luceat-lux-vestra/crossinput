@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 PACKAGE="com.crossinput.helper"
 PERMISSION="android.permission.WRITE_SECURE_SETTINGS"
+BOOTSTRAP_COMPONENT="$PACKAGE/.WirelessAdbBootstrapActivity"
 
 adb_cmd() {
   if [ -n "${ANDROID_SERIAL:-}" ]; then
@@ -38,6 +39,12 @@ adb_cmd install -r "$APK"
 
 echo "==> Granting WRITE_SECURE_SETTINGS"
 adb_cmd shell pm grant "$PACKAGE" "$PERMISSION"
+
+echo "==> Explicitly starting bootstrap component"
+# A newly installed Android package can remain in the stopped state until a
+# component is explicitly launched. Start the no-display bootstrap Activity so
+# future BOOT_COMPLETED delivery is not dependent on local screen interaction.
+adb_cmd shell am start -W -n "$BOOTSTRAP_COMPONENT" >/dev/null
 
 echo "==> Enabling Wireless debugging for the current boot"
 # This command runs as the adb shell user. Future boots are handled by the
