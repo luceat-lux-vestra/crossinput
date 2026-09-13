@@ -95,9 +95,9 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertNil(capture.handleForTesting(type: .keyDown, event: keyDown))
         capture.release(reason: .captureStopped)
 
-        XCTAssertEqual(observation.ordinary.map(\.action), [0])
-        XCTAssertEqual(observation.cleanup.map(\.action), [1])
-        XCTAssertEqual(observation.cleanup.map(\.keyCode), [29])
+        XCTAssertEqual(observation.ordinary.map(\.transition), [.down])
+        XCTAssertEqual(observation.cleanup.map(\.transition), [.up])
+        XCTAssertEqual(observation.cleanup.map(\.key), [.a])
     }
 
     func testSuppressionGenerationAdvancesAfterRelease() {
