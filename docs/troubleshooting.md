@@ -19,6 +19,56 @@ Issues found during development and verification, with causes and fixes. Work in
 | Cursor invisible on the DeX screen | Samsung fades the cursor after ~3.5s idle — normal DeX behavior; move the pointer to bring it back |
 | Input delivered to the phone screen instead of DeX | This is the known category B failure observed in upstream projects (deskflow-android etc.) — see `docs/research/upstream-inventory.md`. Our Phase 0 verification was category A (delivered to the DeX display); if it regresses, start with the routing check in `docs/roadmap.md` Phase 0 |
 
+## macOS native cursor presentation
+
+On affected macOS configurations, the native directional/resize cursor can remain
+visually rendered as the normal arrow after Mac ↔ DeX handoff even though pointer
+movement, AppKit tracking, and cursor-region callbacks continue normally.
+
+This is a **known macOS cursor-presentation limitation**, tracked in issue #96.
+CrossInput keeps the current host-confinement architecture because repeated
+edge-hold cursor repositioning is required to keep the Mac pointer confined while
+raw relative movement is forwarded to DeX. A standalone AppKit/Quartz reproducer
+confirmed that repeated edge-hold `CGWarpMouseCursorPosition()` calls are
+sufficient to produce the presentation failure. The exact AppKit/WindowServer
+root cause remains unverified.
+
+Do not treat the visual arrow as loss of pointer capture by itself. If DeX input,
+host confinement, and local return otherwise work, the failure is presentation-
+only.
+
+### Known recovery behavior
+
+Recovery is display- and app/window-local. The following behaviors were verified
+from known BROKEN states on the current P0 architecture:
+
+- keyboard-only switching to an application with a window on the affected display
+  can restore the native cursor presentation;
+- TextEdit on the affected display was independently verified as a working
+  recovery target;
+- real activation/click of an application window on the affected display can
+  restore presentation;
+- clicking the affected display's menu-bar region can restore presentation.
+
+The following are **not** reliable recovery actions:
+
+- pressing Shift or other generic keyboard activity;
+- Cmd-Tab to an application on another display;
+- merely hovering the affected display's menu bar;
+- arbitrary cursor-rect invalidation, redraw, or tracking-area rebuild in an
+  unrelated diagnostic window.
+
+Do not summarize this as “Cmd-Tab always fixes it.” The narrowest verified
+workaround is to bring an application with a window on the **affected display**
+frontmost; the exact recovery-producing macOS transition is still unknown.
+
+CrossInput intentionally does **not** ship the investigated alternatives that
+hide the macOS cursor, replace it with a custom cursor, use private SkyLight/CGS
+cursor ownership as a production dependency, synthesize clicks/focus changes, or
+allow the Mac pointer to move with remote DeX movement. Those approaches either
+break required interaction invariants or remove the native-cursor oracle rather
+than fixing the presentation state.
+
 ## Keyboard
 
 | Symptom | Cause/Fix |
