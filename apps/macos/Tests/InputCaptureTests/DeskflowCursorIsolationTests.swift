@@ -21,9 +21,9 @@ private final class DeskflowCursorRecorder: @unchecked Sendable {
 
     var events: [String] { lock.withLock { eventsStorage } }
 
-    func background() -> Int32? {
+    func background(_ enabled: Bool) -> Int32? {
         lock.withLock {
-            eventsStorage.append("background")
+            eventsStorage.append("background:\(enabled)")
             return backgroundResults.isEmpty ? 0 : backgroundResults.removeFirst()
         }
     }
@@ -47,30 +47,32 @@ final class DeskflowCursorIsolationTests: XCTestCase {
     private func makeIsolation(_ recorder: DeskflowCursorRecorder) -> DeskflowCursorIsolation {
         DeskflowCursorIsolation(
             operations: .init(
-                setCursorInBackground: { recorder.background() },
+                setCursorInBackground: { recorder.background($0) },
                 associate: { recorder.associate($0) },
                 setSuppressionInterval: { recorder.suppression($0) }
             )
         )
     }
 
-    func testVisibleCursorEntryAndReturnOrderingContainsNoVisibilityMutation() {
+    func testVisibleCursorEntryAndReturnBalancesBackgroundAuthority() {
         let recorder = DeskflowCursorRecorder()
         let isolation = makeIsolation(recorder)
 
         XCTAssertTrue(isolation.begin(generation: 10))
         XCTAssertEqual(isolation.activeGenerationForTesting, 10)
         XCTAssertTrue(isolation.isDisassociatedForTesting)
+        XCTAssertTrue(isolation.backgroundAuthorityEnabledForTesting)
 
         XCTAssertTrue(isolation.end(generation: 10))
         XCTAssertNil(isolation.activeGenerationForTesting)
         XCTAssertFalse(isolation.isDisassociatedForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
 
         XCTAssertEqual(
             recorder.events,
             [
-                "background", "associate:true", "suppression:0.0001", "associate:false",
-                "background", "associate:true", "associate:true", "suppression:0"
+                "background:true", "associate:true", "suppression:0.0001", "associate:false",
+                "associate:true", "associate:true", "suppression:0", "background:false"
             ]
         )
         XCTAssertFalse(recorder.events.contains { $0.contains("hide") || $0.contains("show") })
@@ -81,25 +83,34 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         let isolation = makeIsolation(recorder)
 
         XCTAssertFalse(isolation.begin(generation: 1))
-        XCTAssertEqual(recorder.events, ["background"])
+        XCTAssertEqual(recorder.events, ["background:true"])
         XCTAssertNil(isolation.activeGenerationForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
     }
 
-    func testSuppressionIntervalUnavailableRejectsAdmissionWithoutDisassociation() {
-        let recorder = DeskflowCursorRecorder(suppressionResults: [nil, 0])
+    func testSuppressionIntervalFailureRollsBackBackgroundAuthority() {
+        let recorder = DeskflowCursorRecorder(
+            backgroundResults: [0, 0],
+            suppressionResults: [nil, 0]
+        )
         let isolation = makeIsolation(recorder)
 
         XCTAssertFalse(isolation.begin(generation: 22))
         XCTAssertNil(isolation.activeGenerationForTesting)
         XCTAssertFalse(isolation.isDisassociatedForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
         XCTAssertEqual(
             recorder.events,
-            ["background", "associate:true", "suppression:0.0001", "suppression:0"]
+            [
+                "background:true", "associate:true", "suppression:0.0001",
+                "suppression:0", "background:false"
+            ]
         )
     }
 
-    func testDisassociateFailureReassociatesAndResetsSuppressionInterval() {
+    func testDisassociateFailureReassociatesAndRollsBackBackgroundAuthority() {
         let recorder = DeskflowCursorRecorder(
+            backgroundResults: [0, 0],
             associateResults: [.success, .failure, .success]
         )
         let isolation = makeIsolation(recorder)
@@ -107,11 +118,12 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         XCTAssertFalse(isolation.begin(generation: 3))
         XCTAssertNil(isolation.activeGenerationForTesting)
         XCTAssertFalse(isolation.isDisassociatedForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
         XCTAssertEqual(
             recorder.events,
             [
-                "background", "associate:true", "suppression:0.0001", "associate:false",
-                "associate:true", "suppression:0"
+                "background:true", "associate:true", "suppression:0.0001", "associate:false",
+                "associate:true", "suppression:0", "background:false"
             ]
         )
     }
@@ -124,10 +136,12 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         XCTAssertFalse(isolation.end(generation: 5))
         XCTAssertEqual(isolation.activeGenerationForTesting, 4)
         XCTAssertTrue(isolation.isDisassociatedForTesting)
+        XCTAssertTrue(isolation.backgroundAuthorityEnabledForTesting)
     }
 
-    func testCleanupFailureRetainsEpochAndForceResetRetriesOnlyAssociationDebt() {
+    func testCleanupFailureRetainsEpochButDoesNotLeakBalancedSPI() {
         let recorder = DeskflowCursorRecorder(
+            backgroundResults: [0, 0],
             associateResults: [.success, .success, .failure, .success],
             suppressionResults: [0, 0, 0]
         )
@@ -136,13 +150,32 @@ final class DeskflowCursorIsolationTests: XCTestCase {
         XCTAssertTrue(isolation.begin(generation: 6))
         XCTAssertFalse(isolation.end(generation: 6))
         XCTAssertEqual(isolation.activeGenerationForTesting, 6)
-        XCTAssertTrue(isolation.isDisassociatedForTesting,
-                      "failed first return association must retain hardware-coupling debt")
+        XCTAssertFalse(isolation.isDisassociatedForTesting,
+                       "second return association restored hardware coupling")
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting,
+                       "successful SPI=false must clear background authority immediately")
 
         isolation.forceReset()
         XCTAssertNil(isolation.activeGenerationForTesting)
-        XCTAssertFalse(isolation.isDisassociatedForTesting)
-        XCTAssertFalse(recorder.events.contains { $0.contains("hide") || $0.contains("show") })
+        XCTAssertEqual(recorder.events.filter { $0 == "background:false" }.count, 1)
+    }
+
+    func testBackgroundResetFailureCreatesDebtAndTeardownRetriesIt() {
+        let recorder = DeskflowCursorRecorder(
+            backgroundResults: [0, 7, 0],
+            suppressionResults: [0, 0, 0]
+        )
+        let isolation = makeIsolation(recorder)
+
+        XCTAssertTrue(isolation.begin(generation: 7))
+        XCTAssertFalse(isolation.end(generation: 7))
+        XCTAssertTrue(isolation.backgroundAuthorityEnabledForTesting)
+        XCTAssertFalse(isolation.begin(generation: 8))
+
+        isolation.forceReset()
+        XCTAssertNil(isolation.activeGenerationForTesting)
+        XCTAssertFalse(isolation.backgroundAuthorityEnabledForTesting)
+        XCTAssertEqual(recorder.events.filter { $0 == "background:false" }.count, 2)
     }
 
     func testProductionPolicyUsesNoAbsoluteHoldMutationButKeepsRestore() {
