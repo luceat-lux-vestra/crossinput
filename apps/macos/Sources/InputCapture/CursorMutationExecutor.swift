@@ -120,6 +120,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     }
 
     private let platformMutation: @Sendable (Kind, CGPoint) -> Void
+    private let remoteCursorIsolation: RemoteCursorIsolation
     fileprivate let coordinationTimeout: TimeInterval
     fileprivate let beforeCommitHook: (@Sendable () -> Void)?
     fileprivate let requestEnqueuedHook: (@Sendable () -> Void)?
@@ -133,25 +134,38 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     private var activeGeneration: UInt64?
     private var latestGeneration: UInt64?
 
-    /// Creates the production executor. `CGWarpMouseCursorPosition` is kept
-    /// inside this abstraction so the call has one auditable writer.
+    /// Production remote ownership follows a Cocoa relative-input lifecycle:
+    /// the system cursor is disassociated/hidden for the remote epoch, so a
+    /// `.hold` request requires no absolute cursor reposition. The existing
+    /// one-shot `.restore` remains P0-owned on local return.
     internal static func production() -> CursorMutationExecutor {
-        CursorMutationExecutor { _, point in
+        CursorMutationExecutor(remoteCursorIsolation: .production()) { kind, point in
+            guard productionPerformsPositionMutation(for: kind) else { return }
             CGWarpMouseCursorPosition(point)
         }
     }
 
+    /// Pure policy seam so tests can prove that steady-state production hold
+    /// requests never reach an absolute cursor-position API.
+    internal static func productionPerformsPositionMutation(for kind: Kind) -> Bool {
+        kind == .restore
+    }
+
     /// Test construction injects the platform mutation and can pause just
-    /// before the serialized ownership commit.
+    /// before the serialized ownership commit. The default isolation is a
+    /// no-op so existing executor tests continue to exercise mutation/epoch
+    /// semantics independently of the production cursor lifecycle.
     internal init(
         coordinationTimeout: TimeInterval = 0.25,
         beforeCommitHook: (@Sendable () -> Void)? = nil,
         requestEnqueuedHook: (@Sendable () -> Void)? = nil,
+        remoteCursorIsolation: RemoteCursorIsolation = .noOp(),
         mutation: @escaping @Sendable (Kind, CGPoint) -> Void
     ) {
         self.coordinationTimeout = coordinationTimeout
         self.beforeCommitHook = beforeCommitHook
         self.requestEnqueuedHook = requestEnqueuedHook
+        self.remoteCursorIsolation = remoteCursorIsolation
         self.platformMutation = mutation
     }
 
@@ -196,7 +210,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
 
     /// Detaches the event-tap run loop and fails queued requests. The current
     /// platform mutation, if any, is never replaced with a caller-thread
-    /// fallback.
+    /// fallback. Cursor isolation is balanced best-effort before teardown.
     func unbind() {
         let (runLoop, source, queued) = pendingLock.withLock {
             let runLoop = ownerRunLoop
@@ -215,6 +229,7 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         } else {
             Diagnostics.log("cursor-mutation serialization timeout")
         }
+        remoteCursorIsolation.forceReset()
         if let runLoop, let source {
             CFRunLoopSourceInvalidate(source)
             CFRunLoopRemoveSource(runLoop, source, .commonModes)
@@ -244,6 +259,18 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
             Diagnostics.log("cursor-mutation serialization timeout")
             return false
         }
+        guard activeGeneration == nil else {
+            ownershipLock.unlock()
+            pendingLock.unlock()
+            Diagnostics.log("cursor-mutation ownership already active")
+            return false
+        }
+        guard remoteCursorIsolation.begin(generation: generation) else {
+            ownershipLock.unlock()
+            pendingLock.unlock()
+            Diagnostics.log("cursor-mutation isolation admission failed")
+            return false
+        }
         latestGeneration = generation
         activeGeneration = generation
         ownershipLock.unlock()
@@ -262,7 +289,8 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
     /// Invalidates an ownership epoch before `InputCapture` releases local
     /// suppression. If an already-admitted platform call is in progress, the
     /// bounded wait lets it finish; the caller then fails safe without a
-    /// caller-thread warp.
+    /// caller-thread warp. Relative cursor isolation must balance before the
+    /// epoch is made inactive.
     @discardableResult
     func endOwnership(generation: UInt64) -> Bool {
         guard ownershipLock.lock(
@@ -273,6 +301,10 @@ internal final class CursorMutationExecutor: @unchecked Sendable {
         }
         defer { ownershipLock.unlock() }
         guard activeGeneration == generation else { return true }
+        guard remoteCursorIsolation.end(generation: generation) else {
+            Diagnostics.log("cursor-mutation isolation cleanup failed")
+            return false
+        }
         activeGeneration = nil
         return true
     }
