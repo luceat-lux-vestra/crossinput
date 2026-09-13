@@ -20,7 +20,7 @@ def fail(message: str) -> None:
 
 
 def swift_sources(path: pathlib.Path) -> list[pathlib.Path]:
-    files = sorted(path.glob("*.swift"))
+    files = sorted(path.rglob("*.swift"))
     if not files:
         fail(f"no Swift sources found under {path.relative_to(ROOT)}")
     return files
@@ -38,6 +38,7 @@ def require_no_pattern(files: list[pathlib.Path], pattern: re.Pattern[str], labe
 def main() -> None:
     domain_files = swift_sources(DOMAIN)
     capture_files = swift_sources(CAPTURE)
+    all_macos_swift = swift_sources(MACOS / "Sources") + swift_sources(MACOS / "Tests")
 
     require_no_pattern(
         domain_files,
@@ -55,6 +56,11 @@ def main() -> None:
         capture_files,
         re.compile(r"\b(?:KEYCODE_|META_|androidKeyCode|androidMetaState)\b"),
         "InputCapture contains Android key/meta semantics",
+    )
+    require_no_pattern(
+        all_macos_swift,
+        re.compile(r"\bCapturedKeyEvent\s*\(\s*keyCode\s*:"),
+        "legacy Android-shaped CapturedKeyEvent constructor remains",
     )
 
     package = PACKAGE.read_text(encoding="utf-8")
