@@ -9,7 +9,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
     case discoveryTimeout
     case clientCreation
     case wrongDevice(String)
-    case noRelativeElements
+    case noXYElements
 
     var description: String {
         switch self {
@@ -21,7 +21,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
             return "HIDDeviceClient creation failed"
         case .wrongDevice(let detail):
             return "matched HID device did not satisfy the built-in trackpad identity contract: \(detail)"
-        case .noRelativeElements:
+        case .noXYElements:
             return "matched device exposes no Generic Desktop X/Y elements"
         }
     }
@@ -29,7 +29,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
 
 private actor ProbeCounters {
     private(set) var inputReports = 0
-    private(set) var relativeElementNotifications = 0
+    private(set) var xyElementNotifications = 0
     private(set) var removed = false
     private(set) var externallySeized = false
 
@@ -37,8 +37,8 @@ private actor ProbeCounters {
         inputReports += 1
     }
 
-    func recordRelativeElementNotification(_ count: Int) {
-        relativeElementNotifications += count
+    func recordXYElementNotification(_ count: Int) {
+        xyElementNotifications += count
     }
 
     func recordRemoved() {
@@ -49,8 +49,8 @@ private actor ProbeCounters {
         externallySeized = true
     }
 
-    func snapshot() -> (inputReports: Int, relativeElementNotifications: Int, removed: Bool, externallySeized: Bool) {
-        (inputReports, relativeElementNotifications, removed, externallySeized)
+    func snapshot() -> (inputReports: Int, xyElementNotifications: Int, removed: Bool, externallySeized: Bool) {
+        (inputReports, xyElementNotifications, removed, externallySeized)
     }
 }
 
@@ -87,6 +87,7 @@ private struct TrackpadSeizeProbe {
         let product = await client.product
         let transport = await client.transport
         let locationID = await client.locationID
+        let descriptorLength = await client.descriptor.count
 
         guard primaryUsage == .genericDesktop(.mouse) else {
             throw ProbeFailure.wrongDevice("primaryUsage=\(primaryUsage)")
@@ -99,11 +100,11 @@ private struct TrackpadSeizeProbe {
         }
 
         let elements = await client.elements
-        let relativeElements = elements.filter {
+        let xyElements = elements.filter {
             $0.usage == .genericDesktop(.x) || $0.usage == .genericDesktop(.y)
         }
-        guard !relativeElements.isEmpty else {
-            throw ProbeFailure.noRelativeElements
+        guard !xyElements.isEmpty else {
+            throw ProbeFailure.noXYElements
         }
 
         print(
@@ -111,7 +112,8 @@ private struct TrackpadSeizeProbe {
                 + "built_in=true usage=generic_desktop_mouse "
                 + "transport=\(String(describing: transport)) "
                 + "location_id_present=\(locationID != nil) "
-                + "relative_element_count=\(relativeElements.count)"
+                + "descriptor_length=\(descriptorLength) "
+                + "xy_element_count=\(xyElements.count)"
         )
 
         // Apple requires no outstanding monitor/get/set/update calls when seizeDevice() is invoked.
@@ -124,28 +126,28 @@ private struct TrackpadSeizeProbe {
         }
 
         print("PROBE_SEIZE_OK")
-        print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_relative_notifications=nonzero")
+        print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_xy_notifications=nonzero")
 
         let counters = ProbeCounters()
         let monitorTask = Task {
             do {
                 for try await notification in await client.monitorNotifications(
                     reportIDsToMonitor: [HIDReportID.allReports],
-                    elementsToMonitor: relativeElements
+                    elementsToMonitor: xyElements
                 ) {
                     if Task.isCancelled { break }
                     switch notification {
                     case .inputReport:
                         await counters.recordInputReport()
                     case .elementUpdates(let values):
-                        let relativeCount = values.reduce(into: 0) { count, value in
+                        let xyCount = values.reduce(into: 0) { count, value in
                             if value.element.usage == .genericDesktop(.x)
                                 || value.element.usage == .genericDesktop(.y) {
                                 count += 1
                             }
                         }
-                        if relativeCount > 0 {
-                            await counters.recordRelativeElementNotification(relativeCount)
+                        if xyCount > 0 {
+                            await counters.recordXYElementNotification(xyCount)
                         }
                     case .deviceSeized:
                         await counters.recordExternalSeizure()
@@ -171,7 +173,7 @@ private struct TrackpadSeizeProbe {
         let snapshot = await counters.snapshot()
         print(
             "PROBE_OBSERVATION input_reports=\(snapshot.inputReports) "
-                + "relative_element_notifications=\(snapshot.relativeElementNotifications) "
+                + "xy_element_notifications=\(snapshot.xyElementNotifications) "
                 + "device_removed=\(snapshot.removed) "
                 + "externally_seized=\(snapshot.externallySeized)"
         )
