@@ -56,7 +56,7 @@ Primary references:
 | AppKit / NSEvent | translated events only | no reliable physical-device ownership | yes, translated | public | rejected as ownership boundary |
 | CGEventTap HID | translated HID event stream | can consume events, but existing confinement still mutates global cursor state | yes | public + Accessibility | keep for edge detection / keyboard only; do not use for pointer confinement |
 | IOHIDManager / IOHIDDevice | device-level | `kIOHIDOptionsTypeSeizeDevice` exists | device-dependent | public legacy IOKit | secondary only; Apple trackpad event delivery has conflicting field evidence |
-| CoreHID `HIDDeviceClient` | device-level, built-in matching supported | **seizure is explicitly the candidate contract** | elements and reports | public | **H1 / probe now** |
+| CoreHID `HIDDeviceClient` | device-level, built-in matching supported | **seizure is explicitly the candidate contract** | elements and reports; relative semantics still require proof | public | **H1 / probe now** |
 | IOHIDEventSystemClient | event-system level | filtering/suppression contract not established | yes | private SPI | not a production candidate |
 | HIDDriverKit DEXT | driver/provider level | could own matched hardware, but built-in matching requires at least a non-public entitlement | raw reports | public framework, unavailable built-in entitlement | reject as shippable built-in-trackpad path |
 | Private MultitouchSupport / private HID filters | lower/private path | potentially | raw touch | unsupported private API | contingency research only after public H1 failure |
@@ -73,12 +73,14 @@ The probe intentionally does not touch production `InputCapture` or `Control` co
 
 - matches only a built-in Generic Desktop Mouse whose product is `Apple Internal Keyboard / Trackpad`;
 - validates the identity again after constructing `HIDDeviceClient`;
-- inspects whether Generic Desktop X/Y elements exist;
+- inspects whether Generic Desktop X/Y elements exist and records only descriptor/element metadata, not descriptor bytes or input values;
 - calls `seizeDevice()` before creating any monitor stream, matching Apple's no-outstanding-call requirement;
 - observes for five seconds;
 - counts report and X/Y element notifications without logging coordinates, deltas, report bytes, buttons, keys, or any other input payload;
 - terminates the client lifetime to release the seizure;
 - calls no Quartz cursor mutation/presentation API.
+
+The presence of X/Y elements is **not** treated as proof that CoreHID exposes relative deltas. CoreHID's public `HIDElement` surface does not expose an `isRelative` property analogous to legacy `IOHIDElementIsRelative`. If H1 proves seizure/isolation and receives X/Y activity, the next bounded probe must prove the report descriptor's relative semantics (or an equivalent safe decoding contract) before any production translator is implemented.
 
 ### H1 physical proof matrix
 
@@ -86,15 +88,15 @@ The probe is only useful if all rows can be classified on the same exact build:
 
 | Gate | Required observation | Failure meaning |
 | --- | --- | --- |
-| D0 discovery | exactly the expected built-in mouse component is selected | capability unsupported/ambiguous; fail closed |
-| D1 relative surface | X/Y elements exist, or a later descriptor-backed decoder is proven | no usable relative source yet |
+| D0 discovery | the expected built-in Generic Desktop Mouse component is selected and revalidated | capability unsupported/ambiguous; fail closed |
+| D1 X/Y surface | Generic Desktop X/Y elements exist and descriptor metadata is present | no candidate pointer data surface yet |
 | S1 seize | `PROBE_SEIZE_OK` as an ordinary product user | public seizure unavailable in required deployment context |
 | S2 isolation | physical built-in trackpad movement does **not** move the macOS pointer during the five-second lease | seizure does not provide the required host ownership boundary |
-| S3 capture | the same physical movement produces non-zero report and/or relative-element notification counts | seizure suppresses host but does not expose usable movement if zero |
+| S3 capture | the same physical movement produces non-zero report and/or X/Y element notification counts | seizure suppresses host but does not expose observable movement if zero |
 | R1 release | process exit immediately restores ordinary trackpad control without click/focus/reset action | lease release is not fail-safe enough |
 | R2 cursor health | native directional/resize cursor remains HEALTHY immediately after release | H1 does not solve #96 if BROKEN |
 
-`S1` alone is not PASS. `S1 + S2 + S3 + R1 + R2` is the minimum evidence to proceed to a real Host Capture backend.
+`S1` alone is not PASS. `D0 + D1 + S1 + S2 + S3 + R1 + R2` is the minimum evidence to continue. Even if all seven pass, **relative-delta semantics remain a separate proof obligation** before the backend can deliver `SemanticPointerEvent.move`.
 
 Screenshots/screen recording are not the cursor-health oracle because prior #96 evidence indicates they may perturb presentation. Human visual observation plus metadata-only probe output is the initial physical oracle.
 
@@ -112,7 +114,7 @@ CoreHIDBuiltInPointerBackend
     |
     +--> Capability: discover and validate built-in mouse component
     +--> acquire(): create generation-owned HIDDeviceClient, seize synchronously
-    +--> remote lease: translate relative HID X/Y/button/scroll into InputDomain
+    +--> remote lease: decode proven relative HID movement/button/scroll semantics into InputDomain
     +--> release(): synchronously end monitor/client lifetime
 
 HostSuppressionController
@@ -124,13 +126,13 @@ Control must not become remote until the pointer seizure is confirmed. Return mu
 
 The known-broken P0 warp backend must not be a silent fallback for a HEALTHY-qualified session. If CoreHID capability discovery or seizure fails, acquisition fails closed to local ownership.
 
-A production backend also needs separate proof for built-in trackpad click and scroll semantics, device removal, sleep/wake, hot-plug of additional pointing devices, watchdog/emergency release, permission changes, and concurrent Control/Session/Target replacement. The five-second H1 probe does not claim those properties.
+A production backend also needs separate proof for relative-delta decoding, built-in trackpad click and scroll semantics, device removal, sleep/wake, hot-plug of additional pointing devices, watchdog/emergency release, permission changes, and concurrent Control/Session/Target replacement. The five-second H1 probe does not claim those properties.
 
 ## If H1 fails
 
 Classify the failure before choosing another architecture:
 
-- discovery/X-Y absent but seizure works: inspect the report descriptor and CoreHID raw-report availability without logging payloads; determine whether a descriptor-backed relative decoder is possible;
+- discovery/X-Y absent but seizure works: inspect the report descriptor and CoreHID raw-report availability without logging payloads; determine whether a descriptor-backed pointer decoder is possible;
 - seizure denied for ordinary user: test whether the denial is permission/entitlement/policy versus built-in-device exclusivity, with exact `HIDDeviceError` metadata;
 - seizure succeeds but macOS pointer still moves: CoreHID seizure is not the required pre-pointer suppression boundary on this hardware/OS; do not integrate it;
 - host is isolated but no movement data reaches CoreHID: legacy/private multitouch routing becomes the next research question;
@@ -143,9 +145,11 @@ Only after that classification should legacy IOHID or private MultitouchSupport 
 As of this research commit:
 
 - architecture evidence: strong enough to justify H1 probe;
-- compilation against repository CI SDK: pending;
+- initial compilation against repository macOS 15 CI SDK: passed on pre-review HEAD `b87af36ba81cea711fb6c51d06b0344eef2f16a9`;
+- current exact-head CI after adversarial terminology correction: pending;
 - ordinary-user built-in-trackpad seizure: UNVERIFIED;
 - host pointer isolation: UNVERIFIED;
-- relative notification delivery: UNVERIFIED;
+- X/Y notification delivery: UNVERIFIED;
+- relative-delta semantics: UNVERIFIED;
 - release cursor HEALTHY: UNVERIFIED;
 - #146: **FAIL / blocker remains open**.
