@@ -19,7 +19,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -40,6 +40,7 @@ private enum ProbeMode: String {
     case identityOnly = "identity-only"
     case metadataOnly = "metadata-only"
     case descriptorSemantics = "descriptor-semantics"
+    case synchronousRelease = "synchronous-release"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -120,6 +121,11 @@ private struct TrackpadSeizeProbe {
 
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         print("PROBE_DISCOVERY_OK")
+
+        if mode == .synchronousRelease {
+            try await runSynchronousReleaseProbe(reference: reference)
+            return
+        }
 
         if mode == .discoveryOnly {
             await liveHealthCheck(boundary: "manager_discovery_lifecycle")
@@ -242,9 +248,113 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runSynchronousReleaseProbe(
+        reference: HIDDeviceClient.DeviceReference
+    ) async throws {
+        var client: HIDDeviceClient? = HIDDeviceClient(deviceReference: reference)
+        guard client != nil else {
+            throw ProbeFailure.clientCreation
+        }
+
+        let xyElements: [HIDElement]
+        let stream: AsyncThrowingStream<HIDDeviceClient.Notification, any Error>
+
+        do {
+            guard let activeClient = client else {
+                throw ProbeFailure.clientCreation
+            }
+
+            let primaryUsage = await activeClient.primaryUsage
+            let isBuiltIn = await activeClient.isBuiltIn
+            let product = await activeClient.product
+            guard primaryUsage == .genericDesktop(.mouse), isBuiltIn,
+                  product == "Apple Internal Keyboard / Trackpad" else {
+                throw ProbeFailure.wrongDevice(
+                    "synchronous-release identity validation failed"
+                )
+            }
+
+            let elements = await activeClient.elements
+            xyElements = elements.filter {
+                $0.usage == .genericDesktop(.x) || $0.usage == .genericDesktop(.y)
+            }
+            guard !xyElements.isEmpty else {
+                throw ProbeFailure.noXYElements
+            }
+
+            try await activeClient.seizeDevice()
+            print("PROBE_SEIZE_OK")
+            stream = await activeClient.monitorNotifications(
+                reportIDsToMonitor: [HIDReportID.allReports],
+                elementsToMonitor: xyElements
+            )
+        }
+
+        let counters = ProbeCounters()
+        let monitorTask = Task {
+            do {
+                for try await notification in stream {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .inputReport:
+                        await counters.recordInputReport()
+                    case .elementUpdates(let values):
+                        let xyCount = values.reduce(into: 0) { count, value in
+                            if value.element.usage == .genericDesktop(.x)
+                                || value.element.usage == .genericDesktop(.y) {
+                                count += 1
+                            }
+                        }
+                        if xyCount > 0 {
+                            await counters.recordXYElementNotification(xyCount)
+                        }
+                    case .deviceSeized:
+                        await counters.recordExternalSeizure()
+                    case .deviceUnseized:
+                        await counters.recordUnseized()
+                    case .deviceRemoved:
+                        await counters.recordRemoved()
+                    @unknown default:
+                        break
+                    }
+                }
+            } catch is CancellationError {
+                // Expected on release.
+            } catch {
+                fputs("PROBE_MONITOR_FAIL error=\(String(describing: error))\n", stderr)
+            }
+        }
+
+        print("PROBE_CONTROL seize=true monitor=true duration_seconds=5")
+        print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_xy_notifications=nonzero")
+        try await Task.sleep(for: .seconds(5))
+
+        let snapshot = await counters.snapshot()
+        printObservation(snapshot)
+
+        // Critical production-shape experiment: cancellation is requested and
+        // the final explicit HIDDeviceClient reference is dropped without
+        // awaiting monitorTask completion. If local pointer ownership resumes
+        // immediately, local return does not require an async stream-drain
+        // barrier. The task is awaited only after the human observation window
+        // to clean up this bounded probe.
+        print("PROBE_SYNCHRONOUS_RELEASE_BEGIN cancel_monitor=true await_monitor_before_client_drop=false")
+        monitorTask.cancel()
+        client = nil
+        print("PROBE_SYNCHRONOUS_RELEASE_CLIENT_DROPPED")
+        print("PROBE_RELEASE_CHECK_NOW expected_local_pointer=immediate expected_cursor_health=HEALTHY duration_seconds=8")
+        try await Task.sleep(for: .seconds(8))
+        print("PROBE_RELEASE_CHECK_END")
+
+        _ = await monitorTask.result
+        print("PROBE_MONITOR_RETIRED_AFTER_OBSERVATION=true")
+        print("PROBE_END boundary=synchronous_release_without_stream_await")
     }
 
     private static func liveHealthCheck(boundary: String) async {
