@@ -19,7 +19,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -41,6 +41,7 @@ private enum ProbeMode: String {
     case metadataOnly = "metadata-only"
     case descriptorSemantics = "descriptor-semantics"
     case synchronousRelease = "synchronous-release"
+    case inputSurface = "input-surface"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -81,6 +82,58 @@ private actor ProbeCounters {
         unseized: Bool
     ) {
         (inputReports, xyElementNotifications, removed, externallySeized, unseized)
+    }
+}
+
+
+private struct SurfaceBucket: Sendable {
+    var updates = 0
+    var positive = 0
+    var negative = 0
+    var zero = 0
+    var decodeFailures = 0
+}
+
+private actor InputSurfaceCounters {
+    private var inputReports = 0
+    private var byUsage: [String: SurfaceBucket] = [:]
+
+    func reset() {
+        inputReports = 0
+        byUsage.removeAll(keepingCapacity: true)
+    }
+
+    func recordInputReport() {
+        inputReports += 1
+    }
+
+    func record(_ values: [HIDElement.Value]) {
+        for value in values {
+            let usage = String(describing: value.element.usage)
+            var bucket = byUsage[usage] ?? SurfaceBucket()
+            bucket.updates += 1
+
+            if let logical = value.logicalValue(asTypeTruncatingIfNeeded: Int64.self) {
+                if logical > 0 {
+                    bucket.positive += 1
+                } else if logical < 0 {
+                    bucket.negative += 1
+                } else {
+                    bucket.zero += 1
+                }
+            } else {
+                bucket.decodeFailures += 1
+            }
+
+            byUsage[usage] = bucket
+        }
+    }
+
+    func snapshot() -> (inputReports: Int, usages: [(String, SurfaceBucket)]) {
+        (
+            inputReports,
+            byUsage.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+        )
     }
 }
 
@@ -222,6 +275,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .inputSurface {
+            try await runInputSurfaceProbe(client: client, elements: elements)
+            return
+        }
+
         switch mode {
         case .monitorOnly:
             print("PROBE_CONTROL no_seize=true monitor=true duration_seconds=5")
@@ -248,9 +306,91 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runInputSurfaceProbe(
+        client: HIDDeviceClient,
+        elements: [HIDElement]
+    ) async throws {
+        try await client.seizeDevice()
+        print("PROBE_SEIZE_OK")
+        print("PROBE_INPUT_SURFACE payload_logging=false logical_signs_only=true")
+        print("PROBE_INPUT_SURFACE element_count=\(elements.count)")
+
+        let counters = InputSurfaceCounters()
+        let monitorTask = Task {
+            do {
+                for try await notification in await client.monitorNotifications(
+                    reportIDsToMonitor: [HIDReportID.allReports],
+                    elementsToMonitor: elements
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .inputReport:
+                        await counters.recordInputReport()
+                    case .elementUpdates(let values):
+                        await counters.record(values)
+                    case .deviceRemoved:
+                        print("PROBE_INPUT_SURFACE_DEVICE_REMOVED")
+                    case .deviceSeized, .deviceUnseized:
+                        break
+                    @unknown default:
+                        break
+                    }
+                }
+            } catch is CancellationError {
+                // Expected when the bounded probe ends.
+            } catch {
+                fputs("PROBE_INPUT_SURFACE_MONITOR_FAIL error=\(String(describing: error))\n", stderr)
+            }
+        }
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("MOVE_RIGHT", "move_one_finger_right_only", 3),
+            ("MOVE_DOWN", "move_one_finger_down_only", 3),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("SCROLL_VERTICAL", "two_finger_scroll_vertically", 4),
+            ("SCROLL_HORIZONTAL", "two_finger_scroll_horizontally", 4)
+        ]
+
+        for phase in phases {
+            await counters.reset()
+            print(
+                "PROBE_INPUT_SURFACE_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+            let snapshot = await counters.snapshot()
+            print(
+                "PROBE_INPUT_SURFACE_PHASE_END name=\(phase.name) "
+                    + "input_reports=\(snapshot.inputReports) "
+                    + "usage_bucket_count=\(snapshot.usages.count)"
+            )
+            for (usage, bucket) in snapshot.usages {
+                let safeUsage = usage
+                    .replacingOccurrences(of: " ", with: "_")
+                    .replacingOccurrences(of: "\n", with: "_")
+                print(
+                    "PROBE_INPUT_SURFACE_USAGE phase=\(phase.name) "
+                        + "usage=\(safeUsage) "
+                        + "updates=\(bucket.updates) "
+                        + "positive=\(bucket.positive) "
+                        + "negative=\(bucket.negative) "
+                        + "zero=\(bucket.zero) "
+                        + "decode_failures=\(bucket.decodeFailures)"
+                )
+            }
+        }
+
+        monitorTask.cancel()
+        _ = await monitorTask.result
+        print("PROBE_RELEASE client_lifetime_ending=true")
+        print("PROBE_END boundary=input_surface_characterization")
     }
 
     @available(macOS 15.0, *)
