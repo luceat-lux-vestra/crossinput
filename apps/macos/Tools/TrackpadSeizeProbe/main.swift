@@ -1,4 +1,5 @@
 import Foundation
+import HIDDescriptorSemantics
 
 #if canImport(CoreHID)
 import CoreHID
@@ -11,13 +12,14 @@ private enum ProbeFailure: Error, CustomStringConvertible {
     case clientCreation
     case wrongDevice(String)
     case noXYElements
+    case descriptorSemantics(String)
 
     var description: String {
         switch self {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -26,6 +28,8 @@ private enum ProbeFailure: Error, CustomStringConvertible {
             return "matched HID device did not satisfy the built-in trackpad identity contract: \(detail)"
         case .noXYElements:
             return "matched device exposes no Generic Desktop X/Y elements"
+        case .descriptorSemantics(let detail):
+            return "descriptor did not prove unambiguous relative X/Y semantics: \(detail)"
         }
     }
 }
@@ -35,6 +39,7 @@ private enum ProbeMode: String {
     case clientOnly = "client-only"
     case identityOnly = "identity-only"
     case metadataOnly = "metadata-only"
+    case descriptorSemantics = "descriptor-semantics"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -157,7 +162,8 @@ private struct TrackpadSeizeProbe {
 
         let transport = await client.transport
         let locationID = await client.locationID
-        let descriptorLength = await client.descriptor.count
+        let descriptor = await client.descriptor
+        let descriptorLength = descriptor.count
         let elements = await client.elements
         let xyElements = elements.filter {
             $0.usage == .genericDesktop(.x) || $0.usage == .genericDesktop(.y)
@@ -177,6 +183,36 @@ private struct TrackpadSeizeProbe {
         if mode == .metadataOnly {
             await liveHealthCheck(boundary: "metadata_reads")
             print("PROBE_END boundary=metadata_reads expected_post_cursor_health=HEALTHY")
+            return
+        }
+
+        if mode == .descriptorSemantics {
+            let semantics: HIDPointerXYSemantics
+            do {
+                semantics = try HIDReportDescriptorSemantics.analyzePointerXY(descriptor: descriptor)
+            } catch {
+                throw ProbeFailure.descriptorSemantics(String(describing: error))
+            }
+
+            let x = semantics.xDataVariableDeclarations
+            let y = semantics.yDataVariableDeclarations
+            print(
+                "PROBE_DESCRIPTOR_SEMANTICS "
+                    + "x_data_variable_count=\(x.count) "
+                    + "y_data_variable_count=\(y.count) "
+                    + "x_relative_count=\(x.filter { $0.isRelative }.count) "
+                    + "y_relative_count=\(y.filter { $0.isRelative }.count) "
+                    + "strict_relative_xy=\(semantics.provesUnambiguousRelativeXY)"
+            )
+
+            guard semantics.provesUnambiguousRelativeXY else {
+                throw ProbeFailure.descriptorSemantics(
+                    "x_data_variable_count=\(x.count) y_data_variable_count=\(y.count)"
+                )
+            }
+
+            print("PROBE_DESCRIPTOR_RELATIVE_XY_OK")
+            print("PROBE_END boundary=descriptor_semantics result=PASS")
             return
         }
 
@@ -206,7 +242,7 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
     }
