@@ -94,6 +94,7 @@ private struct SurfaceBucket: Sendable {
     var decodeFailures = 0
 }
 
+@available(macOS 15.0, *)
 private actor InputSurfaceCounters {
     private var inputReports = 0
     private var byUsage: [String: SurfaceBucket] = [:]
