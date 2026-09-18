@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+@preconcurrency import ApplicationServices
 import HIDDescriptorSemantics
 
 #if canImport(CoreHID)
@@ -19,7 +21,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -42,6 +44,7 @@ private enum ProbeMode: String {
     case descriptorSemantics = "descriptor-semantics"
     case synchronousRelease = "synchronous-release"
     case inputSurface = "input-surface"
+    case hybridSurface = "hybrid-surface"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -92,6 +95,107 @@ private struct SurfaceBucket: Sendable {
     var negative = 0
     var zero = 0
     var decodeFailures = 0
+}
+
+private final class EventTypeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [UInt32: Int] = [:]
+
+    func reset() {
+        lock.withLock {
+            counts.removeAll(keepingCapacity: true)
+        }
+    }
+
+    func record(_ type: CGEventType) {
+        lock.withLock {
+            counts[type.rawValue, default: 0] += 1
+        }
+    }
+
+    func snapshot() -> [(UInt32, Int)] {
+        lock.withLock {
+            counts.sorted { lhs, rhs in lhs.key < rhs.key }
+        }
+    }
+}
+
+private final class ListenOnlyEventTap: @unchecked Sendable {
+    private let counter: EventTypeCounter
+    private let queue = DispatchQueue(label: "crossinput.trackpad-probe.event-tap", qos: .userInteractive)
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private var runLoop: CFRunLoop?
+
+    init(counter: EventTypeCounter) {
+        self.counter = counter
+    }
+
+    func start() -> Bool {
+        var mask: CGEventMask = 0
+        let eventTypes: [CGEventType] = [
+            .mouseMoved,
+            .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+            .leftMouseDown, .leftMouseUp,
+            .rightMouseDown, .rightMouseUp,
+            .otherMouseDown, .otherMouseUp,
+            .scrollWheel
+        ]
+        for type in eventTypes {
+            mask |= CGEventMask(1 << type.rawValue)
+        }
+
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else {
+                return Unmanaged.passUnretained(event)
+            }
+            let owner = Unmanaged<ListenOnlyEventTap>.fromOpaque(refcon).takeUnretainedValue()
+            owner.counter.record(type)
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            return false
+        }
+
+        self.tap = tap
+        self.source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+
+        queue.async { [weak self] in
+            guard let self, let source = self.source else { return }
+            let runLoop = CFRunLoopGetCurrent()
+            self.runLoop = runLoop
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            CFRunLoopRun()
+        }
+        return true
+    }
+
+    func stop() {
+        if let tap {
+            CFMachPortInvalidate(tap)
+            self.tap = nil
+        }
+        if let source, let runLoop {
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        }
+        source = nil
+        if let runLoop {
+            CFRunLoopStop(runLoop)
+            self.runLoop = nil
+        }
+    }
+
+    deinit {
+        stop()
+    }
 }
 
 @available(macOS 15.0, *)
@@ -281,6 +385,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .hybridSurface {
+            try await runHybridSurfaceProbe(client: client)
+            return
+        }
+
         switch mode {
         case .monitorOnly:
             print("PROBE_CONTROL no_seize=true monitor=true duration_seconds=5")
@@ -307,9 +416,61 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runHybridSurfaceProbe(
+        client: HIDDeviceClient
+    ) async throws {
+        let counter = EventTypeCounter()
+        let tap = ListenOnlyEventTap(counter: counter)
+
+        guard tap.start() else {
+            print("PROBE_HYBRID_TAP_FAIL reason=cg_event_tap_creation_failed")
+            throw ProbeFailure.wrongDevice("listen-only CGEventTap creation failed")
+        }
+        defer { tap.stop() }
+
+        print("PROBE_HYBRID_TAP_OK mode=listen_only payload_logging=false")
+        try await client.seizeDevice()
+        print("PROBE_SEIZE_OK")
+        print("PROBE_HYBRID_EXPECTATION host_pointer_stationary=true")
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("MOVE_RIGHT", "move_one_finger_right_only", 3),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("SCROLL_VERTICAL", "two_finger_scroll_vertically", 4),
+            ("SCROLL_HORIZONTAL", "two_finger_scroll_horizontally", 4)
+        ]
+
+        for phase in phases {
+            counter.reset()
+            print(
+                "PROBE_HYBRID_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+
+            let snapshot = counter.snapshot()
+            print(
+                "PROBE_HYBRID_PHASE_END name=\(phase.name) "
+                    + "event_type_count=\(snapshot.count)"
+            )
+            for (rawType, count) in snapshot {
+                print(
+                    "PROBE_HYBRID_EVENT phase=\(phase.name) "
+                        + "type_raw=\(rawType) "
+                        + "count=\(count)"
+                )
+            }
+        }
+
+        print("PROBE_RELEASE client_lifetime_ending=true")
+        print("PROBE_END boundary=corehid_seize_plus_listen_only_event_tap")
     }
 
     @available(macOS 15.0, *)
