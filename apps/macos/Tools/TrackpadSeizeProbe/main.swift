@@ -6,6 +6,7 @@ import CoreHID
 
 private enum ProbeFailure: Error, CustomStringConvertible {
     case unsupportedOS
+    case invalidMode(String?)
     case discoveryTimeout
     case clientCreation
     case wrongDevice(String)
@@ -15,6 +16,8 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         switch self {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
+        case .invalidMode(let value):
+            return "invalid or missing mode=\(value ?? "nil"); use --mode monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -27,11 +30,18 @@ private enum ProbeFailure: Error, CustomStringConvertible {
     }
 }
 
+private enum ProbeMode: String {
+    case monitorOnly = "monitor-only"
+    case seizeOnly = "seize-only"
+    case seizeMonitor = "seize-monitor"
+}
+
 private actor ProbeCounters {
     private(set) var inputReports = 0
     private(set) var xyElementNotifications = 0
     private(set) var removed = false
     private(set) var externallySeized = false
+    private(set) var unseized = false
 
     func recordInputReport() {
         inputReports += 1
@@ -49,8 +59,18 @@ private actor ProbeCounters {
         externallySeized = true
     }
 
-    func snapshot() -> (inputReports: Int, xyElementNotifications: Int, removed: Bool, externallySeized: Bool) {
-        (inputReports, xyElementNotifications, removed, externallySeized)
+    func recordUnseized() {
+        unseized = true
+    }
+
+    func snapshot() -> (
+        inputReports: Int,
+        xyElementNotifications: Int,
+        removed: Bool,
+        externallySeized: Bool,
+        unseized: Bool
+    ) {
+        (inputReports, xyElementNotifications, removed, externallySeized, unseized)
     }
 }
 
@@ -60,7 +80,8 @@ private struct TrackpadSeizeProbe {
         do {
             #if canImport(CoreHID)
             if #available(macOS 15.0, *) {
-                try await runCoreHIDProbe()
+                let mode = try parseMode()
+                try await runCoreHIDProbe(mode: mode)
                 return
             }
             #endif
@@ -71,11 +92,21 @@ private struct TrackpadSeizeProbe {
         }
     }
 
+    private static func parseMode() throws -> ProbeMode {
+        let arguments = CommandLine.arguments
+        guard arguments.count == 3,
+              arguments[1] == "--mode",
+              let mode = ProbeMode(rawValue: arguments[2]) else {
+            throw ProbeFailure.invalidMode(arguments.dropFirst().last)
+        }
+        return mode
+    }
+
     #if canImport(CoreHID)
     @available(macOS 15.0, *)
-    private static func runCoreHIDProbe() async throws {
-        print("PROBE_BEGIN backend=CoreHID target=built-in-trackpad duration_seconds=5")
-        print("PROBE_SAFETY pointer-only seizure; built-in keyboard remains available; process exit releases the seizure")
+    private static func runCoreHIDProbe(mode: ProbeMode) async throws {
+        print("PROBE_BEGIN backend=CoreHID target=built-in-trackpad mode=\(mode.rawValue) duration_seconds=5")
+        print("PROBE_PRECONDITION native_directional_cursor_must_be_HEALTHY_before_start=true")
 
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         guard let client = HIDDeviceClient(deviceReference: reference) else {
@@ -116,18 +147,56 @@ private struct TrackpadSeizeProbe {
                 + "xy_element_count=\(xyElements.count)"
         )
 
-        // Apple requires no outstanding monitor/get/set/update calls when seizeDevice() is invoked.
-        // Keep discovery and descriptor inspection complete before taking exclusive ownership.
+        switch mode {
+        case .monitorOnly:
+            print("PROBE_CONTROL no_seize=true monitor=true")
+            print("PROBE_MOVE_NOW expected_host_pointer=moving expected_xy_notifications=nonzero")
+            let snapshot = await monitor(client: client, xyElements: xyElements, duration: .seconds(5))
+            printObservation(snapshot)
+            print("PROBE_END expected_post_cursor_health=HEALTHY")
+
+        case .seizeOnly:
+            try await seize(client)
+            print("PROBE_CONTROL seize=true monitor=false")
+            print("PROBE_MOVE_NOW expected_host_pointer=stationary")
+            try await Task.sleep(for: .seconds(5))
+            print("PROBE_RELEASE client_lifetime_ending=true")
+            print("PROBE_END expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
+
+        case .seizeMonitor:
+            try await seize(client)
+            print("PROBE_CONTROL seize=true monitor=true")
+            print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_xy_notifications=nonzero")
+            let snapshot = await monitor(client: client, xyElements: xyElements, duration: .seconds(5))
+            printObservation(snapshot)
+            print("PROBE_RELEASE client_lifetime_ending=true")
+            print("PROBE_END expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
+        }
+    }
+
+    @available(macOS 15.0, *)
+    private static func seize(_ client: HIDDeviceClient) async throws {
         do {
             try await client.seizeDevice()
         } catch {
             print("PROBE_SEIZE_FAIL error=\(String(describing: error))")
             throw error
         }
-
         print("PROBE_SEIZE_OK")
-        print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_xy_notifications=nonzero")
+    }
 
+    @available(macOS 15.0, *)
+    private static func monitor(
+        client: HIDDeviceClient,
+        xyElements: [HIDElement],
+        duration: Duration
+    ) async -> (
+        inputReports: Int,
+        xyElementNotifications: Int,
+        removed: Bool,
+        externallySeized: Bool,
+        unseized: Bool
+    ) {
         let counters = ProbeCounters()
         let monitorTask = Task {
             do {
@@ -151,10 +220,10 @@ private struct TrackpadSeizeProbe {
                         }
                     case .deviceSeized:
                         await counters.recordExternalSeizure()
+                    case .deviceUnseized:
+                        await counters.recordUnseized()
                     case .deviceRemoved:
                         await counters.recordRemoved()
-                    case .deviceUnseized:
-                        break
                     @unknown default:
                         break
                     }
@@ -166,23 +235,32 @@ private struct TrackpadSeizeProbe {
             }
         }
 
-        try await Task.sleep(for: .seconds(5))
+        do {
+            try await Task.sleep(for: duration)
+        } catch {
+            monitorTask.cancel()
+        }
         monitorTask.cancel()
         _ = await monitorTask.result
+        return await counters.snapshot()
+    }
 
-        let snapshot = await counters.snapshot()
+    private static func printObservation(
+        _ snapshot: (
+            inputReports: Int,
+            xyElementNotifications: Int,
+            removed: Bool,
+            externallySeized: Bool,
+            unseized: Bool
+        )
+    ) {
         print(
             "PROBE_OBSERVATION input_reports=\(snapshot.inputReports) "
                 + "xy_element_notifications=\(snapshot.xyElementNotifications) "
                 + "device_removed=\(snapshot.removed) "
-                + "externally_seized=\(snapshot.externallySeized)"
+                + "externally_seized=\(snapshot.externallySeized) "
+                + "unseized=\(snapshot.unseized)"
         )
-        print("PROBE_RELEASE client_lifetime_ending=true")
-
-        // CoreHID exposes seizure as a client-lifetime lease. Returning from this
-        // function drops the final client reference after the monitor is cancelled;
-        // no cursor warp/association/visibility API is touched by this probe.
-        print("PROBE_END judge_native_cursor_health_after_process_exit=true")
     }
 
     @available(macOS 15.0, *)
