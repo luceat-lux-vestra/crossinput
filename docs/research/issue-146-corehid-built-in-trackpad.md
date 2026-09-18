@@ -1,12 +1,14 @@
 # Issue #146 — CoreHID built-in trackpad ownership research
 
-Status: **physical ownership/capture PASS; native cursor health UNVERIFIED**
+Status: **physical ownership/capture/cursor-health PASS; relative semantics UNVERIFIED**
 
 This note supersedes the external-mouse premise of closed PR #147. The required pointing device is the MacBook built-in trackpad.
 
 ## Proven physical facts
 
-On exact tested HEAD `9eed72ea3b267a48adb392521facf734244ec679`:
+The CoreHID probe has physically established all ownership and native-cursor-health gates on the built-in trackpad.
+
+Original capture evidence on exact tested HEAD `9eed72ea3b267a48adb392521facf734244ec679`:
 
 ```text
 PROBE_DEVICE_MATCH product=Apple_Internal_Keyboard_Trackpad built_in=true usage=generic_desktop_mouse transport=Optional(CoreHID.HIDDeviceTransport.spi) location_id_present=true descriptor_length=78 xy_element_count=2
@@ -14,137 +16,142 @@ PROBE_SEIZE_OK
 PROBE_OBSERVATION input_reports=389 xy_element_notifications=778 device_removed=false externally_seized=false
 ```
 
-The following observations remain valid:
+Corrected cursor-health retest used the same active/key resizable Terminal window as the oracle.
 
 | Gate | Result |
 | --- | --- |
 | built-in Generic Desktop Mouse discovery | PASS |
 | descriptor/X/Y surface present | PASS |
 | ordinary-user CoreHID seizure | PASS |
-| physical built-in trackpad movement does not move macOS host pointer while seized | PASS |
-| same movement produces CoreHID input/X-Y activity | PASS |
+| physical trackpad movement does not move the macOS host pointer while seized | PASS |
+| the same physical movement produces CoreHID input/X-Y activity | PASS |
 | local pointer control returns immediately after client lifetime ends | PASS |
+| `seize-monitor` native directional/resize cursor after return | **HEALTHY / PASS** |
+| `monitor-only` live and post-exit native directional/resize cursor | **HEALTHY / PASS** |
+| `seize-only` native directional/resize cursor after return | **HEALTHY / PASS** |
 
-These results prove that public CoreHID provides a real pre-local-pointer ownership boundary for the built-in trackpad.
+The earlier BROKEN observations were invalid false negatives caused by using an inactive window as the resize-cursor oracle. They must not be used in root-cause analysis.
 
-## Cursor-health evidence invalidation
+The older standalone Stage E evidence remains independently valid: repeated edge-hold `CGWarpMouseCursorPosition()` is a sufficient trigger for BROKEN.
 
-The previous HEALTHY/BROKEN cursor judgments were made against an **inactive window**.
+## Architectural consequence
 
-That is not a valid oracle for native directional/resize cursor presentation. Inactive-window cursor behavior cannot be treated as equivalent to an active/key resizable window.
-
-Therefore all previous cursor-health conclusions are invalidated and return to **UNVERIFIED**:
-
-- original H1 post-release `BROKEN`;
-- H1.1 `monitor-only` post-run `BROKEN`;
-- H1.1 `seize-only` post-run `BROKEN`;
-- all downstream claims that CoreHID monitoring, seizure, deinit, or teardown is sufficient to break native cursor presentation;
-- the claim that repeated Quartz warp is not a necessary condition, insofar as that claim depended on the invalid CoreHID BROKEN observations.
-
-The older standalone Stage E result still independently proves that repeated edge-hold `CGWarpMouseCursorPosition()` is a sufficient trigger for BROKEN. Nothing here changes that evidence.
-
-## Correct physical oracle
-
-Every corrected trial must use the same known **active/key resizable window**.
-
-Recommended oracle:
-
-1. keep the Terminal window launching the probe as the active/key window;
-2. before starting each trial, verify that its left/right/bottom resize edge shows the expected directional resize cursor;
-3. do not click another window, Cmd-Tab, open a menu, take a screenshot/recording, reconnect, or perform any recovery action during the trial;
-4. after the process exits, keep the same Terminal window active and immediately verify the same resize edge again.
-
-A trial where the oracle window was inactive, not key, ambiguous, or changed during the trial is **INSUFFICIENT EVIDENCE**.
-
-## Corrected retest order
-
-Use one exact current HEAD and rerun the original logical cases in this order:
-
-### 1. seize-monitor
-
-```bash
-.build/release/trackpad-seize-probe --mode seize-monitor
-```
-
-Purpose: reproduce the original H1 lifecycle under a valid active/key cursor oracle.
-
-Required observations:
-
-- during seizure: built-in-trackpad movement does not move host cursor;
-- CoreHID activity is non-zero;
-- after process exit: local pointer control returns immediately;
-- same active/key Terminal resize cursor is HEALTHY or BROKEN.
-
-### 2. monitor-only
-
-```bash
-.build/release/trackpad-seize-probe --mode monitor-only
-```
-
-Purpose: determine whether non-exclusive CoreHID monitoring preserves native cursor health.
-
-Required observations:
-
-- host pointer moves normally;
-- X/Y activity is non-zero;
-- same active/key Terminal resize cursor is HEALTHY or BROKEN after the trial.
-
-### 3. seize-only
-
-```bash
-.build/release/trackpad-seize-probe --mode seize-only
-```
-
-Purpose: determine whether exclusive ownership transition without notification monitoring preserves native cursor health.
-
-Required observations:
-
-- host pointer is stationary during the five-second lease;
-- local pointer returns immediately after process exit;
-- same active/key Terminal resize cursor is HEALTHY or BROKEN.
-
-Only after these three corrected trials are classified may the smaller H1.2 cumulative modes be used.
-
-## H1.2 minimal-trigger modes
-
-Current probe also supports:
-
-- `discovery-only`
-- `client-only`
-- `identity-only`
-- `metadata-only`
-
-These modes exist only to isolate a smaller trigger **if a valid active/key-window retest first reproduces BROKEN**.
-
-Do not use H1.2 results to infer anything from the invalid inactive-window trials.
-
-## Architecture status
-
-CoreHID production integration remains blocked, but it is **not rejected**.
-
-If corrected cursor-health trials are all HEALTHY, the candidate architecture becomes viable again:
+Public CoreHID now satisfies the required built-in-trackpad ownership boundary:
 
 ```text
-MacEventTap (listening)
+built-in trackpad
+    |
+    v
+CoreHID HIDDeviceClient
+    |
+    +-- LOCAL: ordinary macOS ownership
+    |
+    +-- REMOTE:
+           seizeDevice()
+           |
+           +--> macOS host pointer receives no movement
+           +--> process receives HID activity
+           |
+           release by ending client lifetime
+           |
+           +--> local pointer immediately resumes
+           +--> native cursor remains HEALTHY
+```
+
+No per-move cursor warp, cursor hide/show, cursor association lifecycle, synthetic recovery event, focus steal, or menu-bar recovery belongs in this candidate architecture.
+
+## Current proof obligation — descriptor-backed relative X/Y semantics
+
+The observed X/Y activity is not by itself enough to emit `SemanticPointerEvent.move`.
+
+Apple exposes the physical device's HID-spec-compliant raw report descriptor through `HIDDeviceClient.descriptor`. HID 1.11 defines the Input item flags so that bit 2 distinguishes Absolute from Relative data. The probe therefore must prove that the matched Generic Desktop X and Y fields are unambiguously declared as **Data, Variable, Relative** in the report descriptor.
+
+The current branch adds a dedicated pure parser and adversarial tests.
+
+New probe mode:
+
+```bash
+.build/release/trackpad-seize-probe --mode descriptor-semantics
+```
+
+Required PASS output:
+
+```text
+PROBE_DESCRIPTOR_SEMANTICS ... strict_relative_xy=true
+PROBE_DESCRIPTOR_RELATIVE_XY_OK
+PROBE_END boundary=descriptor_semantics result=PASS
+```
+
+Strict proof requires:
+
+- exactly one Data/Variable X declaration;
+- exactly one Data/Variable Y declaration;
+- both declarations have the Relative flag;
+- X and Y belong to the same report ID;
+- malformed or ambiguous descriptors fail closed.
+
+The parser tests include:
+
+- canonical relative HID mouse descriptor;
+- absolute X/Y rejection;
+- Usage Minimum/Maximum range handling;
+- local-usage reset after a Main item;
+- mixed relative/absolute rejection;
+- different report-ID rejection;
+- extended Usage decoding;
+- truncated descriptor rejection;
+- unmatched global Pop rejection.
+
+## Candidate production architecture after semantics PASS
+
+```text
+MacEventTap (listen-only)
     |
     +--> EdgeDetector
-    +--> keyboard capture/suppression
+    +--> keyboard suppression while remote
 
 CoreHIDBuiltInPointerBackend
     |
-    +--> Capability: discover exact built-in mouse component
-    +--> acquire(): generation-owned HIDDeviceClient + confirmed seizure
-    +--> remote lease: descriptor-proven pointer decoding
-    +--> release(): synchronously end monitor/client lifetime
+    +--> Capability
+    |      discover/revalidate exact built-in Generic Desktop Mouse
+    |
+    +--> acquire(controlGeneration)
+    |      create generation-owned HIDDeviceClient
+    |      seizeDevice()
+    |      only then acknowledge remote pointer ownership
+    |
+    +--> remote lease
+    |      descriptor-proven relative X/Y
+    |      -> InputDomain SemanticPointerEvent
+    |
+    +--> release(controlGeneration)
+           stop delivery admission
+           cancel monitor
+           end generation-owned client lifetime
+           verify no stale generation retains ownership
 
 HostSuppressionController
     |
-    +--> owns pointer lease + keyboard suppression for one Control generation
+    +--> owns CoreHID pointer lease + keyboard suppression as one Control epoch
 ```
 
-Control must not become remote until pointer seizure is confirmed. The known-broken repeated-warp backend must not be a silent fallback for a HEALTHY-qualified session.
+The known-broken repeated-warp backend must not be a silent fallback. If CoreHID discovery or seizure cannot establish the required capability, remote acquisition fails closed to local ownership.
 
-Relative-delta semantics remain a separate proof obligation after cursor health passes.
+## Remaining production proof after relative semantics
+
+Relative X/Y is necessary but not sufficient for merge. Production work still needs proof for:
+
+- element-value decoding and sign handling;
+- click/button semantics;
+- scroll semantics;
+- device removal while remote;
+- sleep/wake;
+- additional pointing-device hot-plug and leakage policy;
+- synchronous release / stale-generation exclusion;
+- watchdog or emergency-release behavior;
+- permission/capability changes;
+- repeated Mac -> DeX -> Mac cycles on the exact production backend;
+- physical HEALTHY native cursor after those production cycles.
 
 ## Current proof status
 
@@ -153,7 +160,7 @@ Relative-delta semantics remain a separate proof obligation after cursor health 
 - host pointer isolation during seizure: **PASS**
 - process receives physical movement activity: **PASS**
 - immediate local pointer return: **PASS**
-- native cursor HEALTHY after corrected active/key-window trial: **UNVERIFIED**
-- relative-delta semantics: **UNVERIFIED**
-- production CoreHID backend: **BLOCKED**
-- #146: **UNVERIFIED / blocker remains open**
+- native cursor HEALTHY with valid active/key-window oracle: **PASS**
+- descriptor-backed relative X/Y semantics: **UNVERIFIED**
+- production CoreHID backend: **BLOCKED pending semantics + integration proof**
+- #146: **open**
