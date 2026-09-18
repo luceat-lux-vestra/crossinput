@@ -239,3 +239,39 @@ Control must never become remote until pointer ownership is confirmed. The known
 - relative-delta semantics: UNVERIFIED
 - production CoreHID backend: **BLOCKED**
 - #146: **FAIL / blocker remains open**
+
+
+## H1.1 physical result — CoreHID monitor path also breaks cursor
+
+Physical trials were rerun from a visibly HEALTHY native directional/resize cursor state before each process start.
+
+| Mode | Host pointer during trial | Local pointer return | Post-trial native cursor |
+| --- | --- | --- | --- |
+| `monitor-only` | moved normally | n/a | **BROKEN** |
+| `seize-only` | stationary | immediate | **BROKEN** |
+
+This rules out seizure as a necessary trigger and rules out the seizure+monitor combination as the sole trigger. A CoreHID notification-monitoring path without exclusive ownership is already sufficient to reproduce BROKEN on the tested machine/OS.
+
+The H1 production architecture is therefore rejected unless a smaller CoreHID operation boundary can be found that preserves HEALTHY cursor presentation.
+
+## H1.2 minimal-trigger isolation
+
+The probe now exposes cumulative boundaries, each of which must begin from a visibly HEALTHY native directional/resize cursor:
+
+1. `discovery-only` — `HIDDeviceManager.monitorNotifications` until the built-in mouse component is discovered; no `HIDDeviceClient`.
+2. `client-only` — discovery plus `HIDDeviceClient(deviceReference:)`; no property reads.
+3. `identity-only` — client construction plus only `primaryUsage`, `isBuiltIn`, and `product` reads.
+4. `metadata-only` — identity reads plus transport, location, descriptor, and elements.
+5. `monitor-only` — metadata plus device notification monitoring.
+6. `seize-only` — metadata plus seizure, without device notification monitoring.
+
+The purpose is not to rescue the existing CoreHID implementation by cursor-reset workarounds. The purpose is to identify the first public CoreHID operation that perturbs native cursor presentation and decide whether any lower-level supported capture path can avoid that boundary.
+
+Strict decision rule:
+
+- if `discovery-only` is BROKEN, the CoreHID manager discovery/notification path itself is disqualified for #96;
+- if discovery is HEALTHY but `client-only` is BROKEN, `HIDDeviceClient` construction is the first implicated boundary;
+- if client construction is HEALTHY but later cumulative modes break, the first failing mode names the smallest currently known trigger surface;
+- UNKNOWN or a trial that did not begin HEALTHY is FAIL / insufficient evidence.
+
+No production backend work proceeds until this classification is complete.
