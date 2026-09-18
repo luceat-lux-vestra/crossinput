@@ -1,6 +1,6 @@
 # Issue #146 — CoreHID built-in trackpad ownership research
 
-Status: **H1 probe only / production feasibility UNVERIFIED**
+Status: **H1 physical split result / production feasibility FAIL until cursor-health cause is isolated**
 
 This note supersedes the external-mouse premise of closed PR #147. The required pointing device is the MacBook built-in trackpad.
 
@@ -8,38 +8,33 @@ This note supersedes the external-mouse premise of closed PR #147. The required 
 
 The current production host path consumes `CGEvent` pointer events and repeatedly calls `CGWarpMouseCursorPosition()` while remote ownership is active. Issue #96 standalone evidence proves that repeated edge-hold warping is sufficient to produce the BROKEN native cursor state. Previous hide/show, `CGAssociateMouseAndMouseCursorPosition(false)`, synthetic-event, focus, AppKit invalidation, and private cursor-presentation candidates did not establish a HEALTHY return baseline.
 
-The desired boundary is therefore below cursor presentation:
+The desired boundary remains below cursor presentation:
 
 ```text
 built-in trackpad
     |
     v
 physical HID ownership lease
-    +---- remote-owned ----> relative semantic pointer input ----> DeX
+    +---- remote-owned ----> pointer input ----> DeX
     |
     X---- macOS local pointer pipeline
 
 lease release
     |
-    +---- macOS owns the untouched native pointer pipeline again
+    +---- macOS owns the native pointer pipeline again
 ```
 
 No per-move cursor warp, cursor visibility lifecycle, cursor association lifecycle, or synthetic recovery action belongs in this architecture.
 
-## New primary evidence
+## Primary API evidence
 
 Apple's current public CoreHID API exposes `HIDDeviceClient.seizeDevice()`. Apple documents the operation as making the caller the device's only active client for notifications/interactions until that client is deinitialized.
 
 Apple's `hidutil` discovery documentation shows `Apple Internal Keyboard / Trackpad` as multiple HID components. In particular, a built-in `AppleHIDTransportHIDDevice` appears with Generic Desktop usage page `1`, usage `2` (Mouse), separately from the keyboard component at usage `6`.
 
-More importantly, an Apple DTS CoreOS/Hardware engineer described the intended architecture in March 2026 as:
+Apple DTS described the intended seizure architecture in March 2026 as routing HID activity to the process instead of the system, with a virtual HID device only if replacement local events are required. Ampersand does not need replacement local pointer events while remote ownership is active.
 
-1. use CoreHID to seize a HID device, routing HID activity to the process instead of the system;
-2. optionally emit replacement local events through a virtual HID device when local reinjection is desired.
-
-Ampersand does **not** need step 2 while remote ownership is active. The captured relative movement should go to DeX, not back into macOS.
-
-The same DTS discussion about the built-in MacBook trackpad states that a third-party DriverKit extension cannot use the non-public `com.apple.developer.driverkit.builtin` entitlement required at minimum to match the built-in interface. DTS distinguishes DriverKit filtering from device seizure and explicitly points back toward seizure as the potentially shippable direction.
+The same DTS discussion about the built-in MacBook trackpad states that a third-party DriverKit extension cannot use the non-public `com.apple.developer.driverkit.builtin` entitlement required at minimum to match the built-in interface. DriverKit therefore remains an unattractive shipping path for this hardware.
 
 Primary references:
 
@@ -51,105 +46,196 @@ Primary references:
 
 ## Capture-layer disposition
 
-| Layer | Built-in trackpad visibility | Consume before local pointer processing | Relative data | Supportability | Issue #146 disposition |
+| Layer | Built-in trackpad visibility | Consume before local pointer processing | Pointer data | Supportability | Issue #146 disposition |
 | --- | --- | --- | --- | --- | --- |
-| AppKit / NSEvent | translated events only | no reliable physical-device ownership | yes, translated | public | rejected as ownership boundary |
-| CGEventTap HID | translated HID event stream | can consume events, but existing confinement still mutates global cursor state | yes | public + Accessibility | keep for edge detection / keyboard only; do not use for pointer confinement |
-| IOHIDManager / IOHIDDevice | device-level | `kIOHIDOptionsTypeSeizeDevice` exists | device-dependent | public legacy IOKit | secondary only; Apple trackpad event delivery has conflicting field evidence |
-| CoreHID `HIDDeviceClient` | device-level, built-in matching supported | **seizure is explicitly the candidate contract** | elements and reports; relative semantics still require proof | public | **H1 / probe now** |
+| AppKit / NSEvent | translated events only | no reliable physical-device ownership | translated | public | rejected as ownership boundary |
+| CGEventTap HID | translated HID event stream | can consume events, but existing confinement mutates global cursor state | relative deltas available | public + Accessibility | keep for edge detection / keyboard only |
+| IOHIDManager / IOHIDDevice | device-level | `kIOHIDOptionsTypeSeizeDevice` exists | device-dependent | public legacy IOKit | secondary only |
+| CoreHID `HIDDeviceClient` | device-level, built-in matching works physically | **YES physically proven** | reports + X/Y activity physically proven; relative semantics still require proof | public | **capture/isolation PASS; cursor-health FAIL** |
 | IOHIDEventSystemClient | event-system level | filtering/suppression contract not established | yes | private SPI | not a production candidate |
-| HIDDriverKit DEXT | driver/provider level | could own matched hardware, but built-in matching requires at least a non-public entitlement | raw reports | public framework, unavailable built-in entitlement | reject as shippable built-in-trackpad path |
-| Private MultitouchSupport / private HID filters | lower/private path | potentially | raw touch | unsupported private API | contingency research only after public H1 failure |
+| HIDDriverKit DEXT | driver/provider level | could own matched hardware | raw reports | built-in entitlement unavailable to third parties | reject as shippable built-in-trackpad path |
+| Private MultitouchSupport / private HID filters | lower/private path | potentially | raw touch | unsupported private API | contingency research only |
 
-DriverKit is therefore **not** the next implementation target. A system extension would add deployment and entitlement cost without first proving that it can bind to the required built-in hardware; current Apple DTS evidence says the minimum built-in entitlement is non-public.
+## Physical H1 result — exact HEAD 9eed72e
 
-## H1 bounded probe
+Exact tested HEAD:
 
-Branch: `research/issue-146-corehid-built-in-trackpad`
+`9eed72ea3b267a48adb392521facf734244ec679`
 
-Executable: `trackpad-seize-probe`
+Observed probe output:
 
-The probe intentionally does not touch production `InputCapture` or `Control` code. It:
+```text
+PROBE_DEVICE_MATCH product=Apple_Internal_Keyboard_Trackpad built_in=true usage=generic_desktop_mouse transport=Optional(CoreHID.HIDDeviceTransport.spi) location_id_present=true descriptor_length=78 xy_element_count=2
+PROBE_SEIZE_OK
+PROBE_OBSERVATION input_reports=389 xy_element_notifications=778 device_removed=false externally_seized=false
+```
 
-- matches only a built-in Generic Desktop Mouse whose product is `Apple Internal Keyboard / Trackpad`;
-- validates the identity again after constructing `HIDDeviceClient`;
-- inspects whether Generic Desktop X/Y elements exist and records only descriptor/element metadata, not descriptor bytes or input values;
-- calls `seizeDevice()` before creating any monitor stream, matching Apple's no-outstanding-call requirement;
-- observes for five seconds;
-- counts report and X/Y element notifications without logging coordinates, deltas, report bytes, buttons, keys, or any other input payload;
-- terminates the client lifetime to release the seizure;
-- calls no Quartz cursor mutation/presentation API.
+Human physical observations on MacBook built-in trackpad:
 
-The presence of X/Y elements is **not** treated as proof that CoreHID exposes relative deltas. CoreHID's public `HIDElement` surface does not expose an `isRelative` property analogous to legacy `IOHIDElementIsRelative`. If H1 proves seizure/isolation and receives X/Y activity, the next bounded probe must prove the report descriptor's relative semantics (or an equivalent safe decoding contract) before any production translator is implemented.
+| Gate | Result |
+| --- | --- |
+| D0 expected built-in Generic Desktop Mouse selected | PASS |
+| D1 descriptor/X/Y surface present | PASS |
+| S1 ordinary-user CoreHID seizure | PASS |
+| S2 host pointer remains stationary during physical trackpad movement | **PASS** |
+| S3 CoreHID receives physical movement activity during seizure | **PASS** |
+| R1 local pointer control returns immediately after client lifetime ends | **PASS** |
+| R2 native directional/resize cursor remains HEALTHY | **FAIL — BROKEN** |
 
-### H1 physical proof matrix
+This materially changes the root-cause boundary.
 
-The probe is only useful if all rows can be classified on the same exact build:
+### What this proves
 
-| Gate | Required observation | Failure meaning |
-| --- | --- | --- |
-| D0 discovery | the expected built-in Generic Desktop Mouse component is selected and revalidated | capability unsupported/ambiguous; fail closed |
-| D1 X/Y surface | Generic Desktop X/Y elements exist and descriptor metadata is present | no candidate pointer data surface yet |
-| S1 seize | `PROBE_SEIZE_OK` as an ordinary product user | public seizure unavailable in required deployment context |
-| S2 isolation | physical built-in trackpad movement does **not** move the macOS pointer during the five-second lease | seizure does not provide the required host ownership boundary |
-| S3 capture | the same physical movement produces non-zero report and/or X/Y element notification counts | seizure suppresses host but does not expose observable movement if zero |
-| R1 release | process exit immediately restores ordinary trackpad control without click/focus/reset action | lease release is not fail-safe enough |
-| R2 cursor health | native directional/resize cursor remains HEALTHY immediately after release | H1 does not solve #96 if BROKEN |
+CoreHID seizure is a real, public, pre-local-pointer ownership boundary for the MacBook built-in trackpad. It can simultaneously:
 
-`S1` alone is not PASS. `D0 + D1 + S1 + S2 + S3 + R1 + R2` is the minimum evidence to continue. Even if all seven pass, **relative-delta semantics remain a separate proof obligation** before the backend can deliver `SemanticPointerEvent.move`.
+- prevent physical trackpad movement from moving the macOS pointer;
+- expose the movement to the process;
+- release local pointer control immediately when the client lifetime ends.
 
-Screenshots/screen recording are not the cursor-health oracle because prior #96 evidence indicates they may perturb presentation. Human visual observation plus metadata-only probe output is the initial physical oracle.
+Therefore the old statement that Ampersand must move the macOS pointer and repeatedly warp it back is false.
 
-## If H1 passes
+### What this disproves
 
-The Architecture Leap target should become:
+Repeated `CGWarpMouseCursorPosition()` remains a proven sufficient trigger for BROKEN from the standalone Stage E matrix, but it is **not a necessary condition**.
+
+This CoreHID probe never invoked:
+
+- `CGWarpMouseCursorPosition()`;
+- `CGAssociateMouseAndMouseCursorPosition()`;
+- cursor hide/show;
+- synthetic pointer input;
+- production `InputCapture`;
+- DeX delivery.
+
+Yet post-release native cursor presentation was BROKEN.
+
+Therefore production integration of CoreHID is blocked until the seizure/release cursor side effect is isolated.
+
+## Phase H1.1 — isolate seizure vs monitoring
+
+The probe now requires an explicit mode and fails closed if no mode is supplied:
+
+```text
+--mode monitor-only
+--mode seize-only
+--mode seize-monitor
+```
+
+Every physical trial has a mandatory precondition:
+
+> Before starting the process, native macOS directional/resize cursor presentation must be visibly HEALTHY.
+
+A manual recovery action may be used **before** a trial only to establish that precondition. No recovery action may occur after the trial starts until the HEALTHY/BROKEN result has been recorded.
+
+### Trial A — monitor-only control
+
+```bash
+.build/release/trackpad-seize-probe --mode monitor-only
+```
+
+Purpose:
+
+- construct and validate the same CoreHID client;
+- monitor reports/X/Y activity;
+- do **not** seize the device.
+
+Expected behavior:
+
+- macOS pointer continues moving normally;
+- notifications are non-zero;
+- post-trial native cursor remains HEALTHY.
+
+Interpretation:
+
+- BROKEN here means CoreHID monitoring/client activity itself is enough to perturb cursor presentation;
+- HEALTHY here removes monitoring-only as the trigger.
+
+### Trial B — seize-only
+
+```bash
+.build/release/trackpad-seize-probe --mode seize-only
+```
+
+Purpose:
+
+- construct/validate the same client;
+- seize the built-in mouse component;
+- do **not** create a notification monitor after seizure;
+- hold the seizure for five seconds, then end client lifetime.
+
+During the five-second lease, move the built-in trackpad.
+
+Expected behavior:
+
+- host pointer remains stationary;
+- local pointer resumes immediately after process exit;
+- native directional/resize cursor remains HEALTHY.
+
+Interpretation:
+
+- BROKEN after this trial means the **exclusive ownership transition itself** is sufficient to break native cursor presentation;
+- HEALTHY here, combined with the already-BROKEN seize+monitor result, points at the seized-monitoring/data path as the trigger.
+
+### Trial C — seize-monitor reference
+
+```bash
+.build/release/trackpad-seize-probe --mode seize-monitor
+```
+
+This reproduces the original H1 shape and is not needed again unless A/B produce an ambiguous result.
+
+## Decision table after H1.1
+
+| Monitor-only | Seize-only | Seize+monitor | Interpretation |
+| --- | --- | --- | --- |
+| HEALTHY | BROKEN | BROKEN | exclusive ownership transition itself is sufficient; CoreHID seize architecture fails #96 unless Apple provides a clean ownership-return primitive |
+| HEALTHY | HEALTHY | BROKEN | monitor-after-seize path is the trigger; investigate CoreHID monitoring contract/lifetime |
+| BROKEN | HEALTHY | BROKEN | ordinary CoreHID monitoring/client interaction is the trigger |
+| BROKEN | BROKEN | BROKEN | CoreHID client path broadly perturbs cursor presentation; reject as #96 architecture |
+| HEALTHY | HEALTHY | HEALTHY | original BROKEN result had an uncontrolled precondition/contamination; repeat exact-head controlled trial |
+
+UNKNOWN or an unverified pre-trial cursor state does not satisfy any row.
+
+## Relative-delta semantics
+
+The presence of X/Y elements is **not** proof that CoreHID exposes relative deltas. CoreHID's public `HIDElement` surface does not expose an `isRelative` property analogous to legacy `IOHIDElementIsRelative`.
+
+If and only if cursor-health architecture becomes viable, the next bounded proof must establish report-descriptor relative semantics or an equivalent safe decoding contract before any production translator emits `SemanticPointerEvent.move`.
+
+## Production architecture remains blocked
+
+Do not integrate CoreHID into `HostSuppressionController` yet.
+
+If a future candidate preserves HEALTHY cursor state, the target ownership model remains:
 
 ```text
 MacEventTap (listening)
     |
     +--> EdgeDetector
-    +--> keyboard capture/suppression while remote
+    +--> keyboard capture/suppression
 
 CoreHIDBuiltInPointerBackend
     |
-    +--> Capability: discover and validate built-in mouse component
-    +--> acquire(): create generation-owned HIDDeviceClient, seize synchronously
-    +--> remote lease: decode proven relative HID movement/button/scroll semantics into InputDomain
-    +--> release(): synchronously end monitor/client lifetime
+    +--> Capability: discover exact built-in mouse component
+    +--> acquire(): generation-owned HIDDeviceClient + confirmed seizure
+    +--> remote lease: descriptor-proven pointer decoding
+    +--> release(): synchronous ownership release proof
 
 HostSuppressionController
     |
-    +--> owns the CoreHID pointer lease + keyboard suppression as one Control epoch
+    +--> owns pointer lease + keyboard suppression for one Control generation
 ```
 
-Control must not become remote until the pointer seizure is confirmed. Return must invalidate the Control generation first, synchronously stop delivery admission, cancel the HID monitor, end the seizure lease, release keyboard suppression, and only then publish local ownership. No queued/stale generation may own a client or mutate host cursor state after return.
-
-The known-broken P0 warp backend must not be a silent fallback for a HEALTHY-qualified session. If CoreHID capability discovery or seizure fails, acquisition fails closed to local ownership.
-
-A production backend also needs separate proof for relative-delta decoding, built-in trackpad click and scroll semantics, device removal, sleep/wake, hot-plug of additional pointing devices, watchdog/emergency release, permission changes, and concurrent Control/Session/Target replacement. The five-second H1 probe does not claim those properties.
-
-## If H1 fails
-
-Classify the failure before choosing another architecture:
-
-- discovery/X-Y absent but seizure works: inspect the report descriptor and CoreHID raw-report availability without logging payloads; determine whether a descriptor-backed pointer decoder is possible;
-- seizure denied for ordinary user: test whether the denial is permission/entitlement/policy versus built-in-device exclusivity, with exact `HIDDeviceError` metadata;
-- seizure succeeds but macOS pointer still moves: CoreHID seizure is not the required pre-pointer suppression boundary on this hardware/OS; do not integrate it;
-- host is isolated but no movement data reaches CoreHID: legacy/private multitouch routing becomes the next research question;
-- release causes BROKEN: reject H1 for #96 even if capture/isolation works.
-
-Only after that classification should legacy IOHID or private MultitouchSupport be considered. DriverKit is not a default escalation because current Apple evidence blocks third-party matching of the built-in interface for a shippable product.
+Control must never become remote until pointer ownership is confirmed. The known-broken warp backend must not be used as a silent fallback for a HEALTHY-qualified session.
 
 ## Current proof status
 
-As of this research commit:
-
-- architecture evidence: strong enough to justify H1 probe;
-- initial compilation against repository macOS 15 CI SDK: passed on pre-review HEAD `b87af36ba81cea711fb6c51d06b0344eef2f16a9`;
-- current exact-head CI after adversarial terminology correction: pending;
-- ordinary-user built-in-trackpad seizure: UNVERIFIED;
-- host pointer isolation: UNVERIFIED;
-- X/Y notification delivery: UNVERIFIED;
-- relative-delta semantics: UNVERIFIED;
-- release cursor HEALTHY: UNVERIFIED;
-- #146: **FAIL / blocker remains open**.
+- public built-in-trackpad discovery: **PASS**
+- ordinary-user CoreHID seizure: **PASS**
+- host pointer isolation during seizure: **PASS**
+- process receives physical movement activity: **PASS**
+- immediate local pointer return: **PASS**
+- native cursor HEALTHY after seize+monitor release: **FAIL**
+- relative-delta semantics: UNVERIFIED
+- production CoreHID backend: **BLOCKED**
+- #146: **FAIL / blocker remains open**
