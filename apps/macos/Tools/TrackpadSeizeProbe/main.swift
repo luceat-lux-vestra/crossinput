@@ -110,7 +110,8 @@ private struct TrackpadSeizeProbe {
     @available(macOS 15.0, *)
     private static func runCoreHIDProbe(mode: ProbeMode) async throws {
         print("PROBE_BEGIN backend=CoreHID target=built-in-trackpad mode=\(mode.rawValue)")
-        print("PROBE_PRECONDITION native_directional_cursor_must_be_HEALTHY_before_start=true")
+        print("PROBE_PRECONDITION active_key_resizable_window_required=true native_directional_cursor_must_be_HEALTHY_before_start=true")
+        print("PROBE_ORACLE keep_same_window_key=true test_same_resize_edge_before_and_after=true")
 
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         print("PROBE_DISCOVERY_OK")
