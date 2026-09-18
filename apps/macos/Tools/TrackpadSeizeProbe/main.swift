@@ -116,7 +116,8 @@ private struct TrackpadSeizeProbe {
         print("PROBE_DISCOVERY_OK")
 
         if mode == .discoveryOnly {
-            print("PROBE_END boundary=manager_discovery expected_post_cursor_health=HEALTHY")
+            await liveHealthCheck(boundary: "manager_discovery_lifecycle")
+            print("PROBE_END boundary=manager_discovery_lifecycle expected_post_cursor_health=HEALTHY")
             return
         }
 
@@ -126,6 +127,7 @@ private struct TrackpadSeizeProbe {
         print("PROBE_CLIENT_OK")
 
         if mode == .clientOnly {
+            await liveHealthCheck(boundary: "device_client_construction")
             print("PROBE_END boundary=device_client_construction expected_post_cursor_health=HEALTHY")
             return
         }
@@ -147,6 +149,7 @@ private struct TrackpadSeizeProbe {
         print("PROBE_IDENTITY_OK built_in=true usage=generic_desktop_mouse product=Apple_Internal_Keyboard_Trackpad")
 
         if mode == .identityOnly {
+            await liveHealthCheck(boundary: "identity_reads")
             print("PROBE_END boundary=identity_reads expected_post_cursor_health=HEALTHY")
             return
         }
@@ -171,6 +174,7 @@ private struct TrackpadSeizeProbe {
         )
 
         if mode == .metadataOnly {
+            await liveHealthCheck(boundary: "metadata_reads")
             print("PROBE_END boundary=metadata_reads expected_post_cursor_health=HEALTHY")
             return
         }
@@ -181,6 +185,7 @@ private struct TrackpadSeizeProbe {
             print("PROBE_MOVE_NOW expected_host_pointer=moving expected_xy_notifications=nonzero")
             let snapshot = await monitor(client: client, xyElements: xyElements, duration: .seconds(5))
             printObservation(snapshot)
+            await liveHealthCheck(boundary: "device_notification_monitor_cancelled_client_alive")
             print("PROBE_END boundary=device_notification_monitor expected_post_cursor_health=HEALTHY")
 
         case .seizeOnly:
@@ -203,6 +208,17 @@ private struct TrackpadSeizeProbe {
         case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    private static func liveHealthCheck(boundary: String) async {
+        print("PROBE_LIVE_HEALTH_CHECK_NOW boundary=\(boundary) process_alive=true duration_seconds=8")
+        print("PROBE_LIVE_HEALTH_CHECK_ACTION test_native_directional_or_resize_cursor_now=true")
+        do {
+            try await Task.sleep(for: .seconds(8))
+        } catch {
+            // No cancellation is expected in the bounded manual probe.
+        }
+        print("PROBE_LIVE_HEALTH_CHECK_END boundary=\(boundary) process_exit_next=true")
     }
 
     @available(macOS 15.0, *)
