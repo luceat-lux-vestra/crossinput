@@ -17,7 +17,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -31,6 +31,10 @@ private enum ProbeFailure: Error, CustomStringConvertible {
 }
 
 private enum ProbeMode: String {
+    case discoveryOnly = "discovery-only"
+    case clientOnly = "client-only"
+    case identityOnly = "identity-only"
+    case metadataOnly = "metadata-only"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -105,20 +109,30 @@ private struct TrackpadSeizeProbe {
     #if canImport(CoreHID)
     @available(macOS 15.0, *)
     private static func runCoreHIDProbe(mode: ProbeMode) async throws {
-        print("PROBE_BEGIN backend=CoreHID target=built-in-trackpad mode=\(mode.rawValue) duration_seconds=5")
+        print("PROBE_BEGIN backend=CoreHID target=built-in-trackpad mode=\(mode.rawValue)")
         print("PROBE_PRECONDITION native_directional_cursor_must_be_HEALTHY_before_start=true")
 
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
+        print("PROBE_DISCOVERY_OK")
+
+        if mode == .discoveryOnly {
+            print("PROBE_END boundary=manager_discovery expected_post_cursor_health=HEALTHY")
+            return
+        }
+
         guard let client = HIDDeviceClient(deviceReference: reference) else {
             throw ProbeFailure.clientCreation
+        }
+        print("PROBE_CLIENT_OK")
+
+        if mode == .clientOnly {
+            print("PROBE_END boundary=device_client_construction expected_post_cursor_health=HEALTHY")
+            return
         }
 
         let primaryUsage = await client.primaryUsage
         let isBuiltIn = await client.isBuiltIn
         let product = await client.product
-        let transport = await client.transport
-        let locationID = await client.locationID
-        let descriptorLength = await client.descriptor.count
 
         guard primaryUsage == .genericDesktop(.mouse) else {
             throw ProbeFailure.wrongDevice("primaryUsage=\(primaryUsage)")
@@ -130,6 +144,16 @@ private struct TrackpadSeizeProbe {
             throw ProbeFailure.wrongDevice("product=\(product ?? "nil")")
         }
 
+        print("PROBE_IDENTITY_OK built_in=true usage=generic_desktop_mouse product=Apple_Internal_Keyboard_Trackpad")
+
+        if mode == .identityOnly {
+            print("PROBE_END boundary=identity_reads expected_post_cursor_health=HEALTHY")
+            return
+        }
+
+        let transport = await client.transport
+        let locationID = await client.locationID
+        let descriptorLength = await client.descriptor.count
         let elements = await client.elements
         let xyElements = elements.filter {
             $0.usage == .genericDesktop(.x) || $0.usage == .genericDesktop(.y)
@@ -139,38 +163,45 @@ private struct TrackpadSeizeProbe {
         }
 
         print(
-            "PROBE_DEVICE_MATCH product=Apple_Internal_Keyboard_Trackpad "
-                + "built_in=true usage=generic_desktop_mouse "
+            "PROBE_METADATA_OK "
                 + "transport=\(String(describing: transport)) "
                 + "location_id_present=\(locationID != nil) "
                 + "descriptor_length=\(descriptorLength) "
                 + "xy_element_count=\(xyElements.count)"
         )
 
+        if mode == .metadataOnly {
+            print("PROBE_END boundary=metadata_reads expected_post_cursor_health=HEALTHY")
+            return
+        }
+
         switch mode {
         case .monitorOnly:
-            print("PROBE_CONTROL no_seize=true monitor=true")
+            print("PROBE_CONTROL no_seize=true monitor=true duration_seconds=5")
             print("PROBE_MOVE_NOW expected_host_pointer=moving expected_xy_notifications=nonzero")
             let snapshot = await monitor(client: client, xyElements: xyElements, duration: .seconds(5))
             printObservation(snapshot)
-            print("PROBE_END expected_post_cursor_health=HEALTHY")
+            print("PROBE_END boundary=device_notification_monitor expected_post_cursor_health=HEALTHY")
 
         case .seizeOnly:
             try await seize(client)
-            print("PROBE_CONTROL seize=true monitor=false")
+            print("PROBE_CONTROL seize=true monitor=false duration_seconds=5")
             print("PROBE_MOVE_NOW expected_host_pointer=stationary")
             try await Task.sleep(for: .seconds(5))
             print("PROBE_RELEASE client_lifetime_ending=true")
-            print("PROBE_END expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
+            print("PROBE_END boundary=device_seizure expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
         case .seizeMonitor:
             try await seize(client)
-            print("PROBE_CONTROL seize=true monitor=true")
+            print("PROBE_CONTROL seize=true monitor=true duration_seconds=5")
             print("PROBE_MOVE_NOW expected_host_pointer=stationary expected_xy_notifications=nonzero")
             let snapshot = await monitor(client: client, xyElements: xyElements, duration: .seconds(5))
             printObservation(snapshot)
             print("PROBE_RELEASE client_lifetime_ending=true")
-            print("PROBE_END expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
+            print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
+
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly:
+            fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
     }
 
