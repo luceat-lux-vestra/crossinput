@@ -22,7 +22,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|virtual-device-capability|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|gdm-semantic-signature|virtual-device-capability|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -51,6 +51,7 @@ private enum ProbeMode: String {
     case tapLayers = "tap-layers"
     case componentInventory = "component-inventory"
     case componentActivity = "component-activity"
+    case gdmSemanticSignature = "gdm-semantic-signature"
     case virtualDeviceCapability = "virtual-device-capability"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
@@ -184,6 +185,166 @@ private actor ProbeCounters {
     }
 }
 
+
+private struct GDMElementAggregate: Sendable {
+    var updates = 0
+    var logicalPositive = 0
+    var logicalNegative = 0
+    var logicalZero = 0
+    var logicalDecodeFailures = 0
+    var rawZero = 0
+    var rawNonzero = 0
+    var byteLengthCounts: [Int: Int] = [:]
+    var uniqueValues: Set<Data> = []
+    var bitOnes: [Int] = []
+    var bitTransitions: [Int] = []
+    var previousBytes: Data?
+
+    mutating func record(_ value: HIDElement.Value) {
+        updates += 1
+
+        if let logical = value.logicalValue(asTypeTruncatingIfNeeded: Int64.self) {
+            if logical > 0 {
+                logicalPositive += 1
+            } else if logical < 0 {
+                logicalNegative += 1
+            } else {
+                logicalZero += 1
+            }
+        } else {
+            logicalDecodeFailures += 1
+        }
+
+        let raw = value.integerValue(asTypeTruncatingIfNeeded: UInt64.self)
+        if raw == 0 {
+            rawZero += 1
+        } else {
+            rawNonzero += 1
+        }
+
+        let bytes = value.bytes
+        byteLengthCounts[bytes.count, default: 0] += 1
+        uniqueValues.insert(bytes)
+
+        let bitCount = bytes.count * 8
+        if bitOnes.count < bitCount {
+            bitOnes.append(contentsOf: repeatElement(0, count: bitCount - bitOnes.count))
+            bitTransitions.append(
+                contentsOf: repeatElement(0, count: bitCount - bitTransitions.count)
+            )
+        }
+
+        let previous = previousBytes.map(Array.init)
+        let current = Array(bytes)
+        for bitIndex in 0..<bitCount {
+            let byteIndex = bitIndex / 8
+            let mask = UInt8(1 << UInt8(bitIndex % 8))
+            let isOne = (current[byteIndex] & mask) != 0
+            if isOne {
+                bitOnes[bitIndex] += 1
+            }
+
+            if let previous, byteIndex < previous.count {
+                let wasOne = (previous[byteIndex] & mask) != 0
+                if wasOne != isOne {
+                    bitTransitions[bitIndex] += 1
+                }
+            }
+        }
+
+        previousBytes = bytes
+    }
+}
+
+@available(macOS 15.0, *)
+private actor GDMSemanticSignatureCounters {
+    private var inputReports = 0
+    private var reportIDCounts: [String: Int] = [:]
+    private var reportLengthCounts: [Int: Int] = [:]
+    private var byUsage: [String: GDMElementAggregate] = [:]
+
+    func reset() {
+        inputReports = 0
+        reportIDCounts.removeAll(keepingCapacity: true)
+        reportLengthCounts.removeAll(keepingCapacity: true)
+        byUsage.removeAll(keepingCapacity: true)
+    }
+
+    func recordInputReport(id: HIDReportID?, data: Data) {
+        inputReports += 1
+        let reportID = String(describing: id)
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "\n", with: "_")
+        reportIDCounts[reportID, default: 0] += 1
+        reportLengthCounts[data.count, default: 0] += 1
+    }
+
+    func recordElementUpdates(_ values: [HIDElement.Value]) {
+        for value in values {
+            let usage = String(describing: value.element.usage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            var aggregate = byUsage[usage] ?? GDMElementAggregate()
+            aggregate.record(value)
+            byUsage[usage] = aggregate
+        }
+    }
+
+    func summaryLines(phase: String) -> [String] {
+        var lines: [String] = []
+        lines.append(
+            "PROBE_GDM_SIGNATURE_PHASE_END name=\(phase) "
+                + "input_reports=\(inputReports) "
+                + "usage_bucket_count=\(byUsage.count)"
+        )
+
+        for (reportID, count) in reportIDCounts.sorted(by: { $0.key < $1.key }) {
+            lines.append(
+                "PROBE_GDM_REPORT_ID phase=\(phase) id=\(reportID) count=\(count)"
+            )
+        }
+        for (length, count) in reportLengthCounts.sorted(by: { $0.key < $1.key }) {
+            lines.append(
+                "PROBE_GDM_REPORT_LENGTH phase=\(phase) bytes=\(length) count=\(count)"
+            )
+        }
+
+        for (usage, aggregate) in byUsage.sorted(by: { $0.key < $1.key }) {
+            let lengths = aggregate.byteLengthCounts
+                .sorted(by: { $0.key < $1.key })
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            lines.append(
+                "PROBE_GDM_USAGE phase=\(phase) "
+                    + "usage=\(usage) "
+                    + "updates=\(aggregate.updates) "
+                    + "logical_positive=\(aggregate.logicalPositive) "
+                    + "logical_negative=\(aggregate.logicalNegative) "
+                    + "logical_zero=\(aggregate.logicalZero) "
+                    + "logical_decode_failures=\(aggregate.logicalDecodeFailures) "
+                    + "raw_zero=\(aggregate.rawZero) "
+                    + "raw_nonzero=\(aggregate.rawNonzero) "
+                    + "unique_value_count=\(aggregate.uniqueValues.count) "
+                    + "byte_lengths=\(lengths)"
+            )
+
+            if usage.contains("page:_65280,_usage:_12") {
+                for bitIndex in aggregate.bitOnes.indices {
+                    let ones = aggregate.bitOnes[bitIndex]
+                    let transitions = aggregate.bitTransitions[bitIndex]
+                    if ones > 0 || transitions > 0 {
+                        lines.append(
+                            "PROBE_GDM_VENDOR_BIT phase=\(phase) "
+                                + "bit=\(bitIndex) ones=\(ones) transitions=\(transitions)"
+                        )
+                    }
+                }
+            }
+        }
+
+        return lines
+    }
+}
 
 private struct SurfaceBucket: Sendable {
     var updates = 0
@@ -467,6 +628,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .gdmSemanticSignature {
+            try await runGDMSemanticSignatureProbe(client: client, elements: elements)
+            return
+        }
+
         if mode == .descriptorSemantics {
             let semantics: HIDPointerXYSemantics
             do {
@@ -538,9 +704,95 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .virtualDeviceCapability:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .gdmSemanticSignature, .virtualDeviceCapability:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runGDMSemanticSignatureProbe(
+        client: HIDDeviceClient,
+        elements: [HIDElement]
+    ) async throws {
+        print("PROBE_GDM_SIGNATURE_BEGIN seize=false raw_payload_logging=false")
+
+        for element in elements {
+            let usage = String(describing: element.usage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            let reportID = String(describing: element.reportID)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            print(
+                "PROBE_GDM_ELEMENT "
+                    + "usage=\(usage) "
+                    + "report_id=\(reportID) "
+                    + "report_size_bits=\(element.reportSize) "
+                    + "logical_min=\(String(describing: element.logicalMinimum)) "
+                    + "logical_max=\(String(describing: element.logicalMaximum)) "
+                    + "type=\(String(describing: element.type))"
+            )
+        }
+
+        let counters = GDMSemanticSignatureCounters()
+        let monitorTask = Task {
+            do {
+                for try await notification in await client.monitorNotifications(
+                    reportIDsToMonitor: [HIDReportID.allReports],
+                    elementsToMonitor: elements
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .inputReport(let reportID, let reportData, _):
+                        await counters.recordInputReport(id: reportID, data: reportData)
+                    case .elementUpdates(let values):
+                        await counters.recordElementUpdates(values)
+                    case .deviceRemoved:
+                        print("PROBE_GDM_SIGNATURE_DEVICE_REMOVED")
+                    case .deviceSeized:
+                        print("PROBE_GDM_SIGNATURE_EXTERNALLY_SEIZED")
+                    case .deviceUnseized:
+                        print("PROBE_GDM_SIGNATURE_UNSEIZED")
+                    @unknown default:
+                        break
+                    }
+                }
+            } catch is CancellationError {
+                // Expected at the end of this bounded characterization.
+            } catch {
+                fputs(
+                    "PROBE_GDM_SIGNATURE_MONITOR_FAIL error=\(String(describing: error))\n",
+                    stderr
+                )
+            }
+        }
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("IDLE", "do_not_touch_trackpad", 3),
+            ("ONE_FINGER_RIGHT", "move_one_finger_right_only", 3),
+            ("ONE_FINGER_DOWN", "move_one_finger_down_only", 3),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("TWO_FINGER_UP", "move_two_fingers_up_only", 4),
+            ("TWO_FINGER_RIGHT", "move_two_fingers_right_only", 4)
+        ]
+
+        for phase in phases {
+            await counters.reset()
+            print(
+                "PROBE_GDM_SIGNATURE_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+            let lines = await counters.summaryLines(phase: phase.name)
+            for line in lines {
+                print(line)
+            }
+        }
+
+        monitorTask.cancel()
+        _ = await monitorTask.result
+        print("PROBE_END boundary=gdm_semantic_signature")
     }
 
     @available(macOS 15.0, *)
