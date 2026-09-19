@@ -85,7 +85,10 @@ final class AppModel: ObservableObject {
         sender.onDeliveryObservation = { [weak sessionController] observation in
             sessionController?.forwardDeliveryObservation(observation)
         }
-        handoffController = ControlHandoffController(sender: sender)
+        handoffController = ControlHandoffController(
+            sender: sender,
+            hostPointerBackend: HostPointerOwnershipBackends.makeDefault()
+        )
         targetController = TargetSelectionController(session: reference)
 
         // Production telemetry sink (review round 3): a single lock-protected
