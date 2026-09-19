@@ -409,10 +409,15 @@ private func stableBitCandidates(
     let rounds = min(left.count, right.count)
     guard rounds > 0 else { return [] }
 
-    let maxBits = max(
+    // Compare only the 68-byte prefix that exists in every observed
+    // FF00:12 frame. Bits beyond this boundary would merely rediscover
+    // variable report length instead of proving a content discriminator.
+    let commonPrefixBits = 68 * 8
+    let maxObservedBits = max(
         left.map { $0.bitOnes.count }.max() ?? 0,
         right.map { $0.bitOnes.count }.max() ?? 0
     )
+    let maxBits = min(commonPrefixBits, maxObservedBits)
     var candidates: [GDMStableBitCandidate] = []
 
     func rate(_ values: [Int], _ bit: Int, denominator: Int) -> Double {
@@ -946,7 +951,7 @@ private struct TrackpadSeizeProbe {
         elements: [HIDElement]
     ) async throws {
         print(
-            "PROBE_SEIZED_SIGNATURE_BEGIN rounds=3 "
+            "PROBE_SEIZED_SIGNATURE_BEGIN rounds=3 common_prefix_bits=544 "
                 + "raw_payload_logging=false stable_difference_threshold=0.15"
         )
         try await client.seizeDevice()
