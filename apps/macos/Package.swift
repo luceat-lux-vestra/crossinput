@@ -29,7 +29,7 @@ let package = Package(
         .testTarget(name: "AndroidBridgeTests", dependencies: ["AndroidBridge", "Protocol"]),
         .testTarget(name: "InputDomainTests", dependencies: ["InputDomain"]),
         .testTarget(name: "DeliveryTests", dependencies: ["Delivery", "InputDomain"]),
-        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics"]),
+        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics", "InputCapture", "Delivery"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture", "InputDomain"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
         .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"])

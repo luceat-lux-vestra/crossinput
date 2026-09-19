@@ -116,7 +116,15 @@ private final class ExternalControlSourceDiagnostics: @unchecked Sendable {
 public final class InputCapture: @unchecked Sendable {
     public enum Mode: Sendable {
         case listening   // observe only: pointer stays on macOS
-        case suppressed  // consume pointer events and forward them to the device
+        case suppressed  // keyboard + pointer-local-leak suppression is active
+    }
+
+    private enum PointerSuppressionStrategy: Sendable {
+        /// Legacy event-tap pointer forwarding with edge-hold Quartz warps.
+        case eventTapWarp
+        /// Another backend owns pointer semantics and physical pointer seizure.
+        /// Event-tap pointer events are consumed only as a no-leak guard.
+        case externalOwner
     }
 
     public var mode: Mode {
@@ -168,6 +176,7 @@ public final class InputCapture: @unchecked Sendable {
     /// across a gap or out-of-frame event.
     private var currentEventDisplay: DisplayEdgeConfiguration?
     private var isSuppressing = false
+    private var pointerSuppressionStrategy: PointerSuppressionStrategy = .eventTapWarp
     private let externalControlClassifier: ExternalControlEventClassifier
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
@@ -308,11 +317,27 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Mode control
 
-    /// Switches to suppressed mode: pointer events are consumed and forwarded.
+    /// Legacy suppression path retained while the Architecture Leap is staged.
+    /// Pointer semantics come from CGEventTap and movement is edge-held by Quartz.
     public func suppress() -> UInt64? {
+        suppress(pointerStrategy: .eventTapWarp)
+    }
+
+    /// Suppression path used when another backend owns host pointer seizure and
+    /// semantic pointer capture (CoreHID for the built-in trackpad).
+    ///
+    /// CGEventTap remains responsible for keyboard suppression and acts as a
+    /// fail-closed pointer leak guard only. It must not emit pointer semantics
+    /// or mutate native cursor position.
+    public func suppressWithExternalPointerOwner() -> UInt64? {
+        suppress(pointerStrategy: .externalOwner)
+    }
+
+    private func suppress(pointerStrategy: PointerSuppressionStrategy) -> UInt64? {
         let generation: UInt64? = stateLock.withLock {
             guard !isSuppressing else { return nil }
             isSuppressing = true
+            pointerSuppressionStrategy = pointerStrategy
             suppressionGeneration &+= 1
             keysDown.removeAll()
             keysDownGeneration = suppressionGeneration
@@ -320,7 +345,10 @@ public final class InputCapture: @unchecked Sendable {
         }
         guard let generation else { return nil }
         startWatchdog(for: generation)
-        Diagnostics.log("suppression started generation=\(generation)")
+        Diagnostics.log(
+            "suppression started generation=\(generation) pointerStrategy="
+                + "\(pointerStrategy)"
+        )
         return generation
     }
 
@@ -329,21 +357,32 @@ public final class InputCapture: @unchecked Sendable {
         release(reason: reason, expectedGeneration: nil)
     }
 
+    /// Releases exactly one known suppression generation. Stale lifecycle
+    /// work must use this overload so it can never release a newer epoch.
+    public func release(
+        reason: SuppressionReleaseReason,
+        generation: UInt64
+    ) {
+        release(reason: reason, expectedGeneration: generation)
+    }
+
     /// Releases only the suppression session that admitted the callback. This
     /// prevents a stale watchdog, external-control probe, or emergency event
     /// from releasing a newer suppression generation after re-entry.
     private func release(reason: SuppressionReleaseReason, expectedGeneration: UInt64?) {
-        let (wasSuppressing, generation) = stateLock.withLock {
+        let (wasSuppressing, generation, pointerStrategy) = stateLock.withLock {
             if let expectedGeneration,
                (!isSuppressing || suppressionGeneration != expectedGeneration) {
-                return (false, suppressionGeneration)
+                return (false, suppressionGeneration, pointerSuppressionStrategy)
             }
             let was = isSuppressing
             let gen = suppressionGeneration
+            let strategy = pointerSuppressionStrategy
             isSuppressing = false
+            pointerSuppressionStrategy = .eventTapWarp
             watchdog?.cancel()
             watchdog = nil
-            return (was, gen)
+            return (was, gen, strategy)
         }
         if wasSuppressing {
             Diagnostics.log(
@@ -351,17 +390,18 @@ public final class InputCapture: @unchecked Sendable {
             )
             flushStuckKeys(for: generation)
             if reason == .externalControl {
-                // External control owns the pointer position. Do not warp it
-                // back to the edge or center; the triggering event is returned
-                // to macOS immediately after this synchronous cleanup.
+                // External control owns the pointer position. Do not warp it.
+                // The triggering event is returned to macOS after cleanup.
                 onPointerStateReset?()
-                stateLock.withLock {
-                    edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-                }
+                armEdgeExitGate()
+            } else if pointerStrategy == .externalOwner {
+                // CoreHID release restores native pointer ownership in place.
+                // Any Quartz warp/synthetic move here would reintroduce the
+                // cursor-corruption trigger proven by issue #96.
+                armEdgeExitGate()
             } else {
-                // Physically return the pointer to the crossing edge point the user
-                // pushed through, so Android->macOS continues seamlessly instead of
-                // jumping to the screen center.
+                // Legacy path only: restore the crossing point while the old
+                // event-tap ownership implementation remains staged.
                 if let pointerRestoreOverride {
                     pointerRestoreOverride()
                 } else {
@@ -396,9 +436,12 @@ public final class InputCapture: @unchecked Sendable {
         // a callback that began in epoch A be relabelled as epoch B after a
         // return and re-entry. The controller would then forward stale input
         // to the new remote epoch.
-        let suppressedGeneration = stateLock.withLock {
-            isSuppressing ? suppressionGeneration : nil
-        }
+        let suppressionSnapshot: (generation: UInt64, pointerStrategy: PointerSuppressionStrategy)? =
+            stateLock.withLock {
+                guard isSuppressing else { return nil }
+                return (suppressionGeneration, pointerSuppressionStrategy)
+            }
+        let suppressedGeneration = suppressionSnapshot?.generation
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -423,19 +466,31 @@ public final class InputCapture: @unchecked Sendable {
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    // CoreHID owns built-in-trackpad semantics. Any CG pointer
+                    // event here is not allowed to leak to macOS or duplicate
+                    // the CoreHID semantic stream. Consume it without warping.
+                    return nil
+                }
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)), generation: suppressedGeneration)
-                holdPointerAtEdge(generation: suppressedGeneration)
-                return nil // consume: pointer held at the edge
+                emitPointerEvent(
+                    PointerEvent(.move(dx: dx, dy: dy)),
+                    generation: snapshot.generation
+                )
+                holdPointerAtEdge(generation: snapshot.generation)
+                return nil
             }
             detectEdge()
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    return nil
+                }
                 let button = Self.buttonIndex(for: type)
                 let down: Bool
                 switch type {
@@ -443,16 +498,25 @@ public final class InputCapture: @unchecked Sendable {
                 default: down = false
                 }
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.button(button: button, down: down)), generation: suppressedGeneration)
+                emitPointerEvent(
+                    PointerEvent(.button(button: button, down: down)),
+                    generation: snapshot.generation
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .scrollWheel:
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    return nil
+                }
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
                 let horizontal = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)), generation: suppressedGeneration)
+                emitPointerEvent(
+                    PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)),
+                    generation: snapshot.generation
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
@@ -668,6 +732,18 @@ public final class InputCapture: @unchecked Sendable {
         onScreenEdge?(candidate.edge)
     }
 
+    private func armEdgeExitGate() {
+        stateLock.withLock {
+            edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+            requireEdgeExit = true
+        }
+    }
+
+    /// Test-only state probe for the no-retrap invariant after local return.
+    internal var isAwaitingEdgeExitForTesting: Bool {
+        stateLock.withLock { requireEdgeExit }
+    }
+
     private func centerPointer() {
         let frame = CGDisplayBounds(CGMainDisplayID())
         CGWarpMouseCursorPosition(CGPoint(x: frame.midX, y: frame.midY))
@@ -703,10 +779,7 @@ public final class InputCapture: @unchecked Sendable {
             // Arm the gates even on the unresolved-display path: without them
             // a subsequent event near any configured edge can instantly
             // re-arm handoff after a fail-safe return (issue #50).
-            stateLock.withLock {
-                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-                requireEdgeExit = true
-            }
+            armEdgeExitGate()
             return
         }
         let hold = DisplayEdgeResolver.pointerPosition(
@@ -721,10 +794,7 @@ public final class InputCapture: @unchecked Sendable {
         // leave-zone gate. The synthetic move posted above arrives through
         // the tap with the pointer still inside the zone, so only physical
         // movement away from the edge may re-arm handoff (issue #50).
-        stateLock.withLock {
-            edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-            requireEdgeExit = true
-        }
+        armEdgeExitGate()
     }
 
     /// macOS drops the first real movement deltas after a warp (the pointer

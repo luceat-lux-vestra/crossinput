@@ -4,6 +4,163 @@ import EdgeSwitch
 import Diagnostics
 import Delivery
 
+final class HostPointerLeaseSlot: @unchecked Sendable {
+    private struct Entry {
+        let lease: any HostPointerOwnershipLease
+        let captureGeneration: UInt64
+    }
+
+    private let lock = NSLock()
+    private var pendingCaptureGeneration: UInt64?
+    private var entry: Entry?
+
+    /// Reserves the capture generation before asynchronous host acquisition.
+    /// A return can invalidate this pending generation before a lease exists.
+    func begin(captureGeneration: UInt64) -> Bool {
+        lock.withLock {
+            guard pendingCaptureGeneration == nil, entry == nil else {
+                return false
+            }
+            pendingCaptureGeneration = captureGeneration
+            return true
+        }
+    }
+
+    func install(
+        _ lease: any HostPointerOwnershipLease,
+        captureGeneration: UInt64
+    ) -> Bool {
+        guard lease.isActive else { return false }
+        return lock.withLock {
+            guard pendingCaptureGeneration == captureGeneration,
+                  entry == nil else {
+                return false
+            }
+            pendingCaptureGeneration = nil
+            entry = Entry(lease: lease, captureGeneration: captureGeneration)
+            return true
+        }
+    }
+
+    func isCurrent(hostGeneration: UInt64) -> Bool {
+        let lease = lock.withLock { entry?.lease }
+        guard let lease, lease.generation == hostGeneration else { return false }
+        return lease.isActive
+    }
+
+    /// Invalidates pending or active ownership and returns its capture epoch.
+    /// Lease release happens outside the lock because it may touch CoreHID.
+    @discardableResult
+    func releaseCurrent() -> UInt64? {
+        let result = lock.withLock {
+            let captureGeneration =
+                entry?.captureGeneration ?? pendingCaptureGeneration
+            let lease = entry?.lease
+            entry = nil
+            pendingCaptureGeneration = nil
+            return (captureGeneration, lease)
+        }
+        result.1?.release()
+        return result.0
+    }
+
+    @discardableResult
+    func release(captureGeneration: UInt64) -> Bool {
+        let result = lock.withLock {
+            let pendingMatches =
+                pendingCaptureGeneration == captureGeneration
+            if pendingMatches {
+                pendingCaptureGeneration = nil
+            }
+
+            let entryMatches =
+                entry?.captureGeneration == captureGeneration
+            let lease = entryMatches ? entry?.lease : nil
+            if entryMatches {
+                entry = nil
+            }
+            return (pendingMatches || entryMatches, lease)
+        }
+        result.1?.release()
+        return result.0
+    }
+
+    /// Releases only the active host generation; stale host failure callbacks
+    /// cannot touch a newer lease.
+    @discardableResult
+    func release(hostGeneration: UInt64) -> UInt64? {
+        let result = lock.withLock {
+            guard entry?.lease.generation == hostGeneration else {
+                return (nil as UInt64?, nil as (any HostPointerOwnershipLease)?)
+            }
+            let captureGeneration = entry?.captureGeneration
+            let lease = entry?.lease
+            entry = nil
+            return (captureGeneration, lease)
+        }
+        result.1?.release()
+        return result.0
+    }
+}
+
+private final class HostPointerAcquisitionTaskSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captureGeneration: UInt64?
+    private var task: Task<Void, Never>?
+
+    /// Reserves a generation before the Task is created, closing the race
+    /// where local return happens between Task creation and registration.
+    func prepare(captureGeneration: UInt64) -> Bool {
+        lock.withLock {
+            guard self.captureGeneration == nil else { return false }
+            self.captureGeneration = captureGeneration
+            return true
+        }
+    }
+
+    /// Returns false if the generation was already cancelled or completed.
+    func attach(_ task: Task<Void, Never>, captureGeneration: UInt64) -> Bool {
+        lock.withLock {
+            guard self.captureGeneration == captureGeneration else {
+                return false
+            }
+            self.task = task
+            return true
+        }
+    }
+
+    func finish(captureGeneration: UInt64) {
+        lock.withLock {
+            guard self.captureGeneration == captureGeneration else { return }
+            self.captureGeneration = nil
+            task = nil
+        }
+    }
+
+    func cancel(captureGeneration: UInt64) {
+        let task = lock.withLock { () -> Task<Void, Never>? in
+            guard self.captureGeneration == captureGeneration else {
+                return nil
+            }
+            self.captureGeneration = nil
+            let task = self.task
+            self.task = nil
+            return task
+        }
+        task?.cancel()
+    }
+
+    func cancelCurrent() {
+        let task = lock.withLock { () -> Task<Void, Never>? in
+            captureGeneration = nil
+            let task = self.task
+            self.task = nil
+            return task
+        }
+        task?.cancel()
+    }
+}
+
 /// Thin composition boundary between capture and the control-handoff machine.
 /// It owns pointer safety and movement accounting, but has no session or ADB
 /// vocabulary. Session failures arrive as `remoteUnavailable()`.
@@ -14,6 +171,9 @@ final class ControlHandoffController: @unchecked Sendable {
     var onStateChange: ((ControlState) -> Void)?
 
     private let sender: InputSender
+    private let hostPointerBackend: (any HostPointerOwnershipBackend)?
+    private let hostPointerLeaseSlot = HostPointerLeaseSlot()
+    private let hostPointerAcquisitionTaskSlot = HostPointerAcquisitionTaskSlot()
     private var transitionGate = TransitionSequenceGate()
     private var currentSuppressionGeneration: UInt64 = 0
     /// Serializes the control enable gate with capture callbacks. A callback
@@ -25,12 +185,16 @@ final class ControlHandoffController: @unchecked Sendable {
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
 
-    init(sender: InputSender,
-         capture: InputCapture = InputCapture(),
-         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine()) {
+    init(
+        sender: InputSender,
+        capture: InputCapture = InputCapture(),
+        switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
+        hostPointerBackend: (any HostPointerOwnershipBackend)? = nil
+    ) {
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
+        self.hostPointerBackend = hostPointerBackend
 
         switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
@@ -74,8 +238,16 @@ final class ControlHandoffController: @unchecked Sendable {
             self?.sender.resetCapturedInputState()
         }
         capture.onSuppressionReleased = { [weak self] reason, generation in
+            guard let self else { return }
+            // Local pointer ownership must not wait for the main actor.
+            // The capture generation pair prevents a stale callback from
+            // releasing a newer host-pointer lease.
+            self.hostPointerAcquisitionTaskSlot.cancel(
+                captureGeneration: generation
+            )
+            self.hostPointerLeaseSlot.release(captureGeneration: generation)
             Task { @MainActor in
-                guard let self, generation == self.currentSuppressionGeneration else { return }
+                guard generation == self.currentSuppressionGeneration else { return }
                 self.switchMachine.forceReturn(reason: self.transitionReason(for: reason))
             }
         }
@@ -108,26 +280,35 @@ final class ControlHandoffController: @unchecked Sendable {
         endControlEpoch(stopCapture: true)
     }
 
+    /// Synchronous local-return gate shared by every controller-originated
+    /// return path. Pending acquisition is cancelled before an active lease is
+    /// dropped; capture release is generation-scoped when possible.
+    private func releaseHostOwnershipAndCapture(
+        reason: SuppressionReleaseReason
+    ) {
+        hostPointerAcquisitionTaskSlot.cancelCurrent()
+        if let generation = hostPointerLeaseSlot.releaseCurrent() {
+            capture.release(reason: reason, generation: generation)
+        } else {
+            // Legacy compatibility/test seam has no host lease generation.
+            capture.release(reason: reason)
+        }
+    }
+
     @MainActor
     private func endControlEpoch(stopCapture: Bool) {
-        // Release while the session reference is still live so held keys and
-        // buttons get their best-effort cleanup before the caller tears down
-        // the transport.
         lifecycleLock.withLock {
             lifecycleStarted = true
             edgeSwitchEnabled = false
             controlEpoch &+= 1
             activeSuppressionGeneration = nil
-            // An event callback that wins this lock before Disable is admitted
-            // before the generation barrier and is cancelled below. Anything
-            // after the barrier sees the disabled gate and cannot be forwarded.
             sender.cancelPendingPointerEvents()
         }
 
-        // Deactivate before releasing suppression so an edge callback already
-        // queued in the state machine cannot create a new remote epoch. The
-        // deactivation transition itself remains observable; older callbacks
-        // are invalidated by the sequence gate.
+        // Host ownership and keyboard suppression return locally before any
+        // remote drain/cleanup. Neither may depend on transport progress.
+        releaseHostOwnershipAndCapture(reason: .captureStopped)
+
         let deactivation = switchMachine.deactivate()
         if let deactivation {
             transitionGate.advance(to: deactivation.sequence &- 1)
@@ -135,18 +316,19 @@ final class ControlHandoffController: @unchecked Sendable {
             transitionGate.advance(to: switchMachine.latestSequence)
         }
 
-        capture.release(reason: .captureStopped)
         sender.waitForDrain()
         sender.releaseRemotelyHeldButtonsAndWait()
         if stopCapture { capture.stop() }
     }
 
     func emergencyReturn() {
+        releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
+        releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
@@ -159,6 +341,12 @@ final class ControlHandoffController: @unchecked Sendable {
         lifecycleLock.withLock {
             edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
         }
+    }
+
+    func hasActiveHostPointerLeaseForTesting(
+        generation: UInt64
+    ) -> Bool {
+        hostPointerLeaseSlot.isCurrent(hostGeneration: generation)
     }
     /// Production capture→sender wiring: one captured event, one admission
     /// decision, and — only when the event became a new batch owner — one
@@ -204,6 +392,34 @@ final class ControlHandoffController: @unchecked Sendable {
         }
     }
 
+    private func enqueueHostPointer(
+        _ event: PointerEvent,
+        hostGeneration: UInt64
+    ) {
+        guard hostPointerLeaseSlot.isCurrent(hostGeneration: hostGeneration) else {
+            return
+        }
+
+        let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? =
+            lifecycleLock.withLock {
+                guard edgeSwitchEnabled, activeSuppressionGeneration != nil else {
+                    return nil
+                }
+                let epoch = controlEpoch
+                let outcome = sender.enqueuePointer(event) { [weak self] result in
+                    Task { @MainActor in
+                        self?.apply(delivery: result, controlEpoch: epoch)
+                    }
+                }
+                return (outcome, epoch)
+            }
+
+        guard let admission, admission.outcome == .safetyRejected else { return }
+        Task { @MainActor in
+            self.handleButtonSafetyRejection(controlEpoch: admission.controlEpoch)
+        }
+    }
+
     private func enqueue(key event: CapturedKeyEvent) {
         lifecycleLock.withLock {
             guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled) else { return }
@@ -228,6 +444,7 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func handleButtonSafetyRejection(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
+        releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
         sender.cancelPendingPointerEvents()
         // A rejected button transition means remote button state can no longer
         // be trusted: release whatever was previously accepted by the helper
@@ -252,11 +469,18 @@ final class ControlHandoffController: @unchecked Sendable {
                                        requestedDy: CGFloat(requestedDy),
                                        deliveredDx: CGFloat(deliveredDx),
                                        deliveredDy: CGFloat(deliveredDy))
+            if switchMachine.state != .remoteActive {
+                // Boundary return is decided synchronously by the machine.
+                // Do not wait for its async transition callback to restore
+                // native host pointer and keyboard ownership.
+                releaseHostOwnershipAndCapture(reason: .normalReturn)
+            }
         case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
             switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
                                        requestedDy: CGFloat(requestedDy),
                                        deliveredDx: CGFloat(deliveredDx),
                                        deliveredDy: CGFloat(deliveredDy))
+            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:
@@ -265,9 +489,9 @@ final class ControlHandoffController: @unchecked Sendable {
             capture.pokeWatchdog()
             logUsableSessionOnce()
         case .failed:
-            // A helper-side failure is a control-oriented availability loss;
-            // the state machine does not need to know whether ADB, UHID, or
-            // InputManager was the underlying cause.
+            // A helper-side failure is a control-oriented availability loss.
+            // Restore host ownership synchronously before state-machine/UI work.
+            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
@@ -307,43 +531,247 @@ final class ControlHandoffController: @unchecked Sendable {
     /// cleared on every entry to remoteActive (issue #68).
     private var usableSessionLogged = false
 
+    @MainActor
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
             guard isEdgeSwitchEnabled else {
+                releaseHostOwnershipAndCapture(reason: .captureStopped)
                 sender.cancelPendingPointerEvents()
-                capture.release(reason: .captureStopped)
+                switchMachine.forceReturn(reason: .deactivated)
                 return
             }
-            // The usable-session confirmation is exactly-once per entry:
-            // cleared here so the first confirmed delivery after re-entering
-            // arms a fresh marker (issue #68).
             usableSessionLogged = false
-            if let generation = capture.suppress() {
-                currentSuppressionGeneration = generation
-                lifecycleLock.withLock { activeSuppressionGeneration = generation }
+
+            if hostPointerBackend == nil {
+                // Compatibility seam for the pre-Leap regression suite only.
+                // Production AppModel always injects makeDefault(), including
+                // an unavailable fail-closed backend on unsupported systems.
+                if let generation = capture.suppress() {
+                    currentSuppressionGeneration = generation
+                    lifecycleLock.withLock {
+                        activeSuppressionGeneration = generation
+                    }
+                }
+                return
             }
+
+            beginHostPointerAcquisition()
+
         case .localActive, .returning, .disabled:
-            // Lifecycle invariant (issue #62 code-gate): when local suppression
-            // ends for ANY reason — normal boundary return, remote failure,
-            // emergency return, takeover, disable — the pending-pointer
-            // barrier is armed (cancels queued and in-flight deliveries so a
-            // late completion from session A can never credit session B with a
-            // usable-session marker or stale movement) and no button
-            // previously accepted by the helper may stay held remotely. Best
-            // effort and session-generation-scoped; external-control takeovers
-            // arrive here via the same transition after InputCapture's
-            // synchronous onPointerStateReset.
             lifecycleLock.withLock {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
             }
+
+            // Local-return gate: host ownership first, transport cleanup later.
+            releaseHostOwnershipAndCapture(reason: releaseReason(for: reason))
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
-            capture.release(reason: releaseReason(for: reason))
+
         case .edgeArmed:
             break
         }
+    }
+
+    @MainActor
+    private func beginHostPointerAcquisition() {
+        guard let backend = hostPointerBackend else {
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+            return
+        }
+
+        let epoch = lifecycleLock.withLock { controlEpoch }
+        guard let captureGeneration =
+                capture.suppressWithExternalPointerOwner() else {
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+            return
+        }
+
+        currentSuppressionGeneration = captureGeneration
+        lifecycleLock.withLock {
+            activeSuppressionGeneration = captureGeneration
+        }
+
+        guard hostPointerLeaseSlot.begin(
+            captureGeneration: captureGeneration
+        ), hostPointerAcquisitionTaskSlot.prepare(
+            captureGeneration: captureGeneration
+        ) else {
+            lifecycleLock.withLock { activeSuppressionGeneration = nil }
+            hostPointerLeaseSlot.release(captureGeneration: captureGeneration)
+            capture.release(
+                reason: .remoteUnavailable,
+                generation: captureGeneration
+            )
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+            return
+        }
+
+        let task = Task { [weak self, backend] in
+            guard let self else { return }
+            defer {
+                self.hostPointerAcquisitionTaskSlot.finish(
+                    captureGeneration: captureGeneration
+                )
+            }
+
+            do {
+                try Task.checkCancellation()
+                let lease = try await backend.acquire(
+                    onEvent: { [weak self] event, generation in
+                        self?.enqueueHostPointer(
+                            event,
+                            hostGeneration: generation
+                        )
+                    },
+                    onFailure: { [weak self] generation in
+                        self?.handleHostPointerFailure(
+                            hostGeneration: generation,
+                            acquisitionEpoch: epoch
+                        )
+                    }
+                )
+
+                do {
+                    try Task.checkCancellation()
+                } catch {
+                    lease.release()
+                    return
+                }
+
+                // Publish directly from the acquisition task. This removes the
+                // former MainActor gap between successful seizure and a
+                // synchronously releasable lease.
+                guard self.hostPointerLeaseSlot.install(
+                    lease,
+                    captureGeneration: captureGeneration
+                ) else {
+                    lease.release()
+
+                    // Publication can lose for two different reasons:
+                    // local return already invalidated this capture epoch, or
+                    // the backend failed after seizure but before publication.
+                    // The first case is already safe; the second must return
+                    // locally now instead of waiting for the watchdog.
+                    let stillOwnsCapture = self.lifecycleLock.withLock {
+                        self.activeSuppressionGeneration
+                            == captureGeneration
+                    }
+                    if stillOwnsCapture,
+                       self.isControlEpochCurrent(epoch),
+                       self.isEdgeSwitchEnabled,
+                       self.capture.isSuppressed,
+                       self.switchMachine.state == .remoteActive {
+                        self.lifecycleLock.withLock {
+                            if self.activeSuppressionGeneration
+                                == captureGeneration {
+                                self.activeSuppressionGeneration = nil
+                            }
+                        }
+                        self.capture.release(
+                            reason: .remoteUnavailable,
+                            generation: captureGeneration
+                        )
+                        self.sender.cancelPendingPointerEvents()
+                        self.switchMachine.forceReturn(
+                            reason: .remoteUnavailable
+                        )
+                    }
+                    return
+                }
+
+                guard lease.isActive,
+                      self.isControlEpochCurrent(epoch),
+                      self.isEdgeSwitchEnabled,
+                      self.capture.isSuppressed,
+                      self.lifecycleLock.withLock({
+                          self.activeSuppressionGeneration
+                              == captureGeneration
+                      }),
+                      self.switchMachine.state == .remoteActive else {
+                    self.hostPointerLeaseSlot.release(
+                        captureGeneration: captureGeneration
+                    )
+                    self.capture.release(
+                        reason: .remoteUnavailable,
+                        generation: captureGeneration
+                    )
+                    self.sender.cancelPendingPointerEvents()
+                    self.switchMachine.forceReturn(
+                        reason: .remoteUnavailable
+                    )
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+
+                self.hostPointerLeaseSlot.release(
+                    captureGeneration: captureGeneration
+                )
+                self.capture.release(
+                    reason: .remoteUnavailable,
+                    generation: captureGeneration
+                )
+
+                guard self.isControlEpochCurrent(epoch),
+                      self.isEdgeSwitchEnabled,
+                      self.switchMachine.state == .remoteActive else {
+                    return
+                }
+                self.sender.cancelPendingPointerEvents()
+                self.switchMachine.forceReturn(reason: .remoteUnavailable)
+            }
+        }
+
+        if !hostPointerAcquisitionTaskSlot.attach(
+            task,
+            captureGeneration: captureGeneration
+        ) {
+            // Local return raced Task registration. Cancellation checks in the
+            // backend prevent a late acquisition from becoming persistent.
+            task.cancel()
+        }
+    }
+
+    private func handleHostPointerFailure(
+        hostGeneration: UInt64,
+        acquisitionEpoch: UInt64
+    ) {
+        guard let captureGeneration =
+                hostPointerLeaseSlot.release(
+                    hostGeneration: hostGeneration
+                ) else {
+            // A failure before lease publication is handled by acquire()
+            // returning an inactive lease or throwing.
+            return
+        }
+
+        hostPointerAcquisitionTaskSlot.cancel(
+            captureGeneration: captureGeneration
+        )
+        lifecycleLock.withLock {
+            if activeSuppressionGeneration == captureGeneration {
+                activeSuppressionGeneration = nil
+            }
+        }
+        capture.release(
+            reason: .remoteUnavailable,
+            generation: captureGeneration
+        )
+
+        guard isControlEpochCurrent(acquisitionEpoch),
+              isEdgeSwitchEnabled,
+              switchMachine.state == .remoteActive else {
+            return
+        }
+        sender.cancelPendingPointerEvents()
+        switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
     private func controlState(for state: HandoffState) -> ControlState {
