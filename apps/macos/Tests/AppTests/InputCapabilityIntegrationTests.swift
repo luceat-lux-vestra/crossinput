@@ -26,6 +26,39 @@ private final class AppTestCapabilitySystem: InputCapabilitySystem, @unchecked S
     }
 }
 
+private final class AppTestCaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var canStartStorage: Bool
+    private var startCountStorage = 0
+    private var stopCountStorage = 0
+
+    init(canStart: Bool) {
+        canStartStorage = canStart
+    }
+
+    func start() -> Bool {
+        lock.withLock {
+            startCountStorage += 1
+            return canStartStorage
+        }
+    }
+
+    func stop() {
+        lock.withLock {
+            stopCountStorage += 1
+        }
+    }
+
+    func setCanStart(_ canStart: Bool) {
+        lock.withLock {
+            canStartStorage = canStart
+        }
+    }
+
+    var startCount: Int { lock.withLock { startCountStorage } }
+    var stopCount: Int { lock.withLock { stopCountStorage } }
+}
+
 @MainActor
 final class InputCapabilityIntegrationTests: XCTestCase {
     private let selectedTarget = RemoteTarget(
@@ -92,23 +125,23 @@ final class InputCapabilityIntegrationTests: XCTestCase {
     func testAccessibilityLossStopsListeningCaptureWhenEdgeSwitchAlreadyDisabled() {
         let system = AppTestCapabilitySystem(accessibility: true, monitoring: false)
         let capabilities = InputCapabilityController(system: system)
-        var stopCount = 0
+        let captureState = AppTestCaptureState(canStart: true)
         let model = AppModel(
             inputCapabilityController: capabilities,
-            captureStart: { true },
-            captureStop: { stopCount += 1 }
+            captureStart: { captureState.start() },
+            captureStop: { captureState.stop() }
         )
         model.sessionState = .ready
         model.targetState = .selected(selectedTarget.id)
 
         XCTAssertEqual(model.enable(), .enabled)
         model.disableEdgeSwitch()
-        XCTAssertEqual(stopCount, 0)
+        XCTAssertEqual(captureState.stopCount, 0)
 
         system.set(accessibility: false)
         _ = capabilities.refresh()
 
-        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(captureState.stopCount, 1)
         XCTAssertEqual(model.sessionState, .ready)
         XCTAssertEqual(model.controlState, .disabled)
     }
@@ -116,34 +149,29 @@ final class InputCapabilityIntegrationTests: XCTestCase {
     func testRequiredInputMonitoringLossStopsCaptureAndAllowsFreshRetry() {
         let system = AppTestCapabilitySystem(accessibility: true, monitoring: false)
         let capabilities = InputCapabilityController(system: system)
-        var captureCanStart = false
-        var startCount = 0
-        var stopCount = 0
+        let captureState = AppTestCaptureState(canStart: false)
         let model = AppModel(
             inputCapabilityController: capabilities,
-            captureStart: {
-                startCount += 1
-                return captureCanStart
-            },
-            captureStop: { stopCount += 1 }
+            captureStart: { captureState.start() },
+            captureStop: { captureState.stop() }
         )
         model.sessionState = .ready
         model.targetState = .selected(selectedTarget.id)
 
         XCTAssertEqual(model.enable(), .missingInputMonitoring)
-        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(captureState.startCount, 1)
         XCTAssertTrue(model.inputMonitoringRequired)
 
         system.set(monitoring: true)
         _ = capabilities.refresh()
-        captureCanStart = true
+        captureState.setCanStart(true)
         XCTAssertEqual(model.enable(), .enabled)
-        XCTAssertEqual(startCount, 2)
+        XCTAssertEqual(captureState.startCount, 2)
 
         system.set(monitoring: false)
         _ = capabilities.refresh()
 
-        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(captureState.stopCount, 1)
         XCTAssertEqual(model.sessionState, .ready)
         XCTAssertEqual(model.controlState, .disabled)
         XCTAssertEqual(model.inputControlStatusText,
@@ -152,7 +180,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
         system.set(monitoring: true)
         _ = capabilities.refresh()
         XCTAssertEqual(model.enable(), .enabled)
-        XCTAssertEqual(startCount, 3)
+        XCTAssertEqual(captureState.startCount, 3)
         XCTAssertEqual(model.sessionState, .ready)
     }
 
