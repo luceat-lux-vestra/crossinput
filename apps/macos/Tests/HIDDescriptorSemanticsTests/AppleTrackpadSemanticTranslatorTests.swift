@@ -101,7 +101,7 @@ struct AppleTrackpadSemanticTranslatorTests {
     @Test("three-contact gestures fail closed")
     func rejectsThreeContactGesture() throws {
         var translator = AppleTrackpadSemanticTranslator()
-        let report = decode(pointerX: 1, contactCount: 3)
+        let report = try decode(pointerX: 1, contactCount: 3)
 
         #expect(
             throws: AppleTrackpadSemanticTranslator.TranslationError
