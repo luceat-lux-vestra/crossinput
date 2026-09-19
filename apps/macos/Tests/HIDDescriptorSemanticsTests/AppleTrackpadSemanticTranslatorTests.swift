@@ -9,79 +9,47 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         let events = try translator.translate(
-            decode(
-                physicalClicked: false,
-                pointerX: 12,
-                pointerY: -7,
-                contacts: [.init()]
-            )
+            decode(pointerX: 12, pointerY: -7, contactCount: 1)
         )
 
         #expect(events == [.move(dx: 12, dy: -7)])
     }
 
-    @Test("two contacts translate to averaged raw scroll delta")
+    @Test("two contacts translate standard HID axes to scroll")
     func twoContactsScroll() throws {
         var translator = AppleTrackpadSemanticTranslator()
 
         let events = try translator.translate(
-            decode(
-                physicalClicked: false,
-                pointerX: 8,
-                pointerY: -6,
-                contacts: [.init(), .init()]
-            )
+            decode(pointerX: 8, pointerY: -6, contactCount: 2)
         )
 
         #expect(events == [.scroll(horizontal: 8, vertical: -6)])
     }
 
-    @Test("single-contact physical click maps to primary down and up")
+    @Test("one-contact Button1 maps to primary down and up")
     func primaryClickTransitions() throws {
         var translator = AppleTrackpadSemanticTranslator()
 
         let down = try translator.translate(
-            decode(
-                physicalClicked: true,
-                pointerX: 3,
-                pointerY: 2,
-                contacts: [.init()]
-            )
+            decode(buttons: 0b001, contactCount: 1)
         )
         let up = try translator.translate(
-            decode(
-                physicalClicked: false,
-                pointerX: 1,
-                pointerY: 1,
-                contacts: [.init()]
-            )
+            decode(buttons: 0, contactCount: 1)
         )
 
         #expect(down == [.button(.primary, down: true)])
         #expect(up == [.button(.primary, down: false)])
     }
 
-    @Test("two-contact physical click maps to secondary down and up")
+    @Test("two-contact Button1 maps to secondary down and up")
     func secondaryClickTransitions() throws {
         var translator = AppleTrackpadSemanticTranslator()
 
         let down = try translator.translate(
-            decode(
-                physicalClicked: true,
-                contacts: [
-                    .init(),
-                    .init()
-                ]
-            )
+            decode(buttons: 0b001, contactCount: 2)
         )
         let up = try translator.translate(
-            decode(
-                physicalClicked: false,
-                contacts: [
-                    .init(),
-                    .init()
-                ]
-            )
+            decode(buttons: 0, contactCount: 2)
         )
 
         #expect(down == [.button(.secondary, down: true)])
@@ -93,27 +61,14 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         _ = try translator.translate(
-            decode(
-                physicalClicked: true,
-                contacts: [
-                    .init(),
-                    .init()
-                ]
-            )
+            decode(buttons: 0b001, contactCount: 2)
         )
 
         let held = try translator.translate(
-            decode(
-                physicalClicked: true,
-                pointerX: 5,
-                contacts: [.init()]
-            )
+            decode(buttons: 0b001, pointerX: 5, contactCount: 1)
         )
         let release = try translator.translate(
-            decode(
-                physicalClicked: false,
-                contacts: [.init()]
-            )
+            decode(buttons: 0, contactCount: 1)
         )
 
         #expect(held == [.move(dx: 5, dy: 0)])
@@ -125,12 +80,7 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         let down = try translator.translate(
-            decode(
-                physicalClicked: true,
-                pointerX: 30,
-                pointerY: -20,
-                contacts: [.init()]
-            )
+            decode(buttons: 0b001, pointerX: 30, pointerY: -20, contactCount: 1)
         )
 
         #expect(down == [.button(.primary, down: true)])
@@ -141,10 +91,7 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         _ = try translator.translate(
-            decode(
-                physicalClicked: true,
-                contacts: [.init()]
-            )
+            decode(buttons: 0b001, contactCount: 1)
         )
 
         #expect(translator.reset() == [.button(.primary, down: false)])
@@ -154,14 +101,7 @@ struct AppleTrackpadSemanticTranslatorTests {
     @Test("three-contact gestures fail closed")
     func rejectsThreeContactGesture() throws {
         var translator = AppleTrackpadSemanticTranslator()
-        let report = decode(
-            physicalClicked: false,
-            contacts: [
-                .init(),
-                .init(),
-                .init()
-            ]
-        )
+        let report = decode(pointerX: 1, contactCount: 3)
 
         #expect(
             throws: AppleTrackpadSemanticTranslator.TranslationError
@@ -176,27 +116,37 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         _ = try translator.translate(
-            decode(
-                physicalClicked: true,
-                contacts: [
-                    .init(),
-                    .init()
-                ]
-            )
+            decode(buttons: 0b001, contactCount: 2)
         )
 
         let release = try translator.translate(
-            decode(
-                physicalClicked: false,
-                contacts: [
-                    .init(),
-                    .init(),
-                    .init()
-                ]
-            )
+            decode(buttons: 0, contactCount: 3)
         )
 
         #expect(release == [.button(.secondary, down: false)])
+    }
+
+    @Test("Button2 or Button3 fail closed")
+    func rejectsUnprovenButtonBits() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            throws: AppleTrackpadSemanticTranslator.TranslationError
+                .unsupportedButtonBits
+        ) {
+            try translator.translate(
+                decode(buttons: 0b010, contactCount: 1)
+            )
+        }
+
+        #expect(
+            throws: AppleTrackpadSemanticTranslator.TranslationError
+                .unsupportedButtonBits
+        ) {
+            try translator.translate(
+                decode(buttons: 0b100, contactCount: 1)
+            )
+        }
     }
 
     @Test("zero delta does not emit movement")
@@ -204,35 +154,25 @@ struct AppleTrackpadSemanticTranslatorTests {
         var translator = AppleTrackpadSemanticTranslator()
 
         let events = try translator.translate(
-            decode(
-                physicalClicked: false,
-                contacts: [.init()]
-            )
+            decode(contactCount: 1)
         )
 
         #expect(events.isEmpty)
     }
 
-    private struct ContactFixture {
-        init() {}
-    }
-
     private func decode(
-        physicalClicked: Bool,
+        buttons: UInt8 = 0,
         pointerX: Int8 = 0,
         pointerY: Int8 = 0,
-        contacts: [ContactFixture]
+        contactCount: Int
     ) throws -> AppleTrackpadRawReportDecoder.Report {
-        precondition(!contacts.isEmpty)
-
-        let length = 46 + (30 * contacts.count)
+        let length = 46 + (30 * contactCount)
         var bytes = [UInt8](repeating: 0, count: length)
         bytes[0] = 2
+        bytes[1] = buttons
         bytes[2] = UInt8(bitPattern: pointerX)
         bytes[3] = UInt8(bitPattern: pointerY)
-        bytes[30] = UInt8(contacts.count)
-        bytes[31] = physicalClicked ? 1 : 0
-
+        bytes[30] = UInt8(contactCount)
         return try AppleTrackpadRawReportDecoder.decode(Data(bytes))
     }
 }
