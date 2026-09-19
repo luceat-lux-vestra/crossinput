@@ -106,7 +106,7 @@ final class InputSenderTests: XCTestCase {
         let sender = InputSender(session: reference, pointerRequestTimeout: 1)
 
         sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in }
-        sender.enqueueKey(CapturedKeyEvent(keyCode: 29, metaState: 0, action: 1, repeatCount: 0))
+        sender.enqueueKey(CapturedKeyEvent(key: .a, modifiers: [], transition: .up, repeatCount: 0))
 
         XCTAssertEqual(session.sendStarted.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(session.sendCount, 1)
@@ -150,7 +150,7 @@ final class InputSenderTests: XCTestCase {
         let reference = SessionReference()
         reference.set(oldSession)
         let sender = InputSender(session: reference)
-        let key = CapturedKeyEvent(keyCode: 29, metaState: 0, action: 1, repeatCount: 0)
+        let key = CapturedKeyEvent(key: .a, modifiers: [], transition: .up, repeatCount: 0)
 
         sender.enqueueKey(key)
         XCTAssertEqual(oldSession.sendStarted.wait(timeout: .now() + 1), .success)
@@ -193,8 +193,7 @@ final class InputSenderTests: XCTestCase {
         reference.set(session)
         let sender = InputSender(session: reference)
 
-        sender.enqueueKey(CapturedKeyEvent(keyCode: 29, metaState: 0,
-                                           action: 1, repeatCount: 0))
+        sender.enqueueKey(CapturedKeyEvent(key: .a, modifiers: [], transition: .up, repeatCount: 0))
         XCTAssertEqual(session.sendStarted.wait(timeout: .now() + 1), .success)
 
         let started = CFAbsoluteTimeGetCurrent()
