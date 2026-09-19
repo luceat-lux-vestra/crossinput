@@ -47,7 +47,7 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
         var events: [Event] = []
         let wasClicked = activeButton != nil
 
-        if report.clicked && !wasClicked {
+        if report.physicalClicked && !wasClicked {
             let button: Button
             switch report.contactCount {
             case 1:
@@ -65,7 +65,7 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
             return events
         }
 
-        if !report.clicked && wasClicked {
+        if !report.physicalClicked && wasClicked {
             guard let button = activeButton else {
                 throw TranslationError.invalidState
             }
