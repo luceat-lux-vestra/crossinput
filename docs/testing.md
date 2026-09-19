@@ -177,8 +177,8 @@ physically connected SM-G977N + DeX and collects evidence under
 Prerequisites: ADB device connected (`adb devices` shows exactly one usable
 device, or set `ANDROID_SERIAL`), DeX active on the external display,
 `python3`, `jq`; optional `scrcpy >= 4.1` for the DeX-display recording.
-A JDK 17 is selected automatically when the default JVM is too new for the
-helper build.
+JDK 25 LTS is required for helper builds. The verification driver keeps an existing
+Java 25 `JAVA_HOME` or selects an installed Java 25 automatically.
 
 Invocation (SSH into the home Mac; the caller controls checkout state — the
 script never mutates history):
