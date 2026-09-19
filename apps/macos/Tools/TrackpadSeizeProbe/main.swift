@@ -238,7 +238,7 @@ private struct GDMElementAggregate: Sendable {
         let current = Array(bytes)
         for bitIndex in 0..<bitCount {
             let byteIndex = bitIndex / 8
-            let mask = UInt8(1 << UInt8(bitIndex % 8))
+            let mask = UInt8(1) << UInt8(bitIndex % 8)
             let isOne = (current[byteIndex] & mask) != 0
             if isOne {
                 bitOnes[bitIndex] += 1
