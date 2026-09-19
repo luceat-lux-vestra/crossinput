@@ -89,6 +89,73 @@ final class InputCapabilityIntegrationTests: XCTestCase {
         XCTAssertNil(model.inputControlStatusText)
     }
 
+    func testAccessibilityLossStopsListeningCaptureWhenEdgeSwitchAlreadyDisabled() {
+        let system = AppTestCapabilitySystem(accessibility: true, monitoring: false)
+        let capabilities = InputCapabilityController(system: system)
+        var stopCount = 0
+        let model = AppModel(
+            inputCapabilityController: capabilities,
+            captureStart: { true },
+            captureStop: { stopCount += 1 }
+        )
+        model.sessionState = .ready
+        model.targetState = .selected(selectedTarget.id)
+
+        XCTAssertEqual(model.enable(), .enabled)
+        model.disableEdgeSwitch()
+        XCTAssertEqual(stopCount, 0)
+
+        system.set(accessibility: false)
+        _ = capabilities.refresh()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(model.sessionState, .ready)
+        XCTAssertEqual(model.controlState, .disabled)
+    }
+
+    func testRequiredInputMonitoringLossStopsCaptureAndAllowsFreshRetry() {
+        let system = AppTestCapabilitySystem(accessibility: true, monitoring: false)
+        let capabilities = InputCapabilityController(system: system)
+        var captureCanStart = false
+        var startCount = 0
+        var stopCount = 0
+        let model = AppModel(
+            inputCapabilityController: capabilities,
+            captureStart: {
+                startCount += 1
+                return captureCanStart
+            },
+            captureStop: { stopCount += 1 }
+        )
+        model.sessionState = .ready
+        model.targetState = .selected(selectedTarget.id)
+
+        XCTAssertEqual(model.enable(), .missingInputMonitoring)
+        XCTAssertEqual(startCount, 1)
+        XCTAssertTrue(model.inputMonitoringRequired)
+
+        system.set(monitoring: true)
+        _ = capabilities.refresh()
+        captureCanStart = true
+        XCTAssertEqual(model.enable(), .enabled)
+        XCTAssertEqual(startCount, 2)
+
+        system.set(monitoring: false)
+        _ = capabilities.refresh()
+
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(model.sessionState, .ready)
+        XCTAssertEqual(model.controlState, .disabled)
+        XCTAssertEqual(model.inputControlStatusText,
+                       "Input Monitoring is required on this Mac configuration")
+
+        system.set(monitoring: true)
+        _ = capabilities.refresh()
+        XCTAssertEqual(model.enable(), .enabled)
+        XCTAssertEqual(startCount, 3)
+        XCTAssertEqual(model.sessionState, .ready)
+    }
+
     func testRuntimeAccessibilityLossDisablesControlButPreservesSession() {
         let (model, system, capabilities) = readyModel(accessibility: true, monitoring: false,
                                                        captureStarts: true)

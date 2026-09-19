@@ -25,6 +25,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private let sender: InputSender
     private let capabilityController: InputCapabilityController
     private let captureStart: @MainActor () -> Bool
+    private let captureStop: @MainActor () -> Void
     private var transitionGate = TransitionSequenceGate()
     private var currentSuppressionGeneration: UInt64 = 0
     /// Serializes the control enable gate with capture callbacks. A callback
@@ -41,12 +42,14 @@ final class ControlHandoffController: @unchecked Sendable {
          capture: InputCapture = InputCapture(),
          switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
          capabilityController: InputCapabilityController = InputCapabilityController(),
-         captureStart: (@MainActor () -> Bool)? = nil) {
+         captureStart: (@MainActor () -> Bool)? = nil,
+         captureStop: (@MainActor () -> Void)? = nil) {
         self.sender = sender
         self.capture = capture
         self.switchMachine = switchMachine
         self.capabilityController = capabilityController
         self.captureStart = captureStart ?? { capture.startTrusted() }
+        self.captureStop = captureStop ?? { capture.stop() }
 
         switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
@@ -127,8 +130,16 @@ final class ControlHandoffController: @unchecked Sendable {
     /// selected Target untouched for a later safe retry.
     @MainActor
     func inputCapabilityLost() {
-        guard isEdgeSwitchEnabled || capture.isSuppressed else { return }
-        endControlEpoch(stopCapture: true)
+        if isEdgeSwitchEnabled || capture.isSuppressed {
+            endControlEpoch(stopCapture: true)
+            return
+        }
+
+        // Edge Switch may already be disabled while the modifying event tap
+        // remains installed in listening mode. TCC revocation can invalidate
+        // that tap; keeping it would let startTrusted() later accept a stale
+        // non-nil tap without recreating a valid capture path.
+        captureStop()
     }
 
     /// Disables only edge-switch acquisition. The capture tap remains
@@ -176,7 +187,7 @@ final class ControlHandoffController: @unchecked Sendable {
         capture.release(reason: .captureStopped)
         sender.waitForDrain()
         sender.releaseRemotelyHeldButtonsAndWait()
-        if stopCapture { capture.stop() }
+        if stopCapture { captureStop() }
     }
 
     func emergencyReturn() {

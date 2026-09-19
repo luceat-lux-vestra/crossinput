@@ -92,7 +92,8 @@ final class AppModel: ObservableObject {
     var capture: InputCapture { handoffController.capture }
 
     init(inputCapabilityController: InputCapabilityController = InputCapabilityController(),
-         captureStart: (@MainActor () -> Bool)? = nil) {
+         captureStart: (@MainActor () -> Bool)? = nil,
+         captureStop: (@MainActor () -> Void)? = nil) {
         self.inputCapabilityController = inputCapabilityController
         self.inputCapabilities = inputCapabilityController.snapshot
 
@@ -107,7 +108,8 @@ final class AppModel: ObservableObject {
         handoffController = ControlHandoffController(
             sender: sender,
             capabilityController: inputCapabilityController,
-            captureStart: captureStart
+            captureStart: captureStart,
+            captureStop: captureStop
         )
         targetController = TargetSelectionController(session: reference)
 
