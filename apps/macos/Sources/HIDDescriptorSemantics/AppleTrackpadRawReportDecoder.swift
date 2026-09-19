@@ -1,24 +1,28 @@
 import Foundation
 
-/// Fail-closed decoder for the Apple built-in trackpad raw report shape
-/// observed through CoreHID.
+/// Fail-closed decoder for the Apple built-in trackpad CoreHID report shape.
 ///
-/// This layout is research-only until target-device fixtures prove every
-/// invariant. The shape matches the upstream Linux Apple SPI touchpad
-/// protocol structurally:
+/// Evidence basis:
+/// - the public HID descriptor for Apple Internal Keyboard / Trackpad report 2
+///   exposes: 3 button bits, 5 bits padding, X, Y, 4 constant bytes, then
+///   vendor page 0xFF00 usage 0x0C;
+/// - therefore the vendor payload begins 8 bytes into the complete report
+///   (including the report-ID byte);
+/// - upstream Linux applespi defines the multitouch payload with
+///   number_of_fingers at byte 30, clicked2 at byte 31, first finger at byte 48,
+///   and 30 bytes per finger;
+/// - observed CoreHID report lengths 76 / 106 / 136 and vendor lengths
+///   68 / 98 / 128 satisfy that layout with the final transport CRC16 stripped.
 ///
-/// - 48-byte fixed touchpad prefix
-/// - 30 bytes per reported finger
-/// - the transport-level trailing 16-bit CRC is not present in the CoreHID
-///   input-report data observed by the probe
-///
-/// Therefore an N-contact CoreHID report is expected to be:
-///
-///     48 + (30 * N) - 2 bytes
-///
-/// The decoder rejects any report that does not satisfy both the structural
-/// length and the embedded contact-count/click-mirror invariants.
+/// This decoder still treats the mapping as research-only. Any structural
+/// disagreement is rejected rather than guessed.
 public enum AppleTrackpadRawReportDecoder {
+    public struct Buttons: Equatable, Sendable {
+        public let primary: Bool
+        public let secondary: Bool
+        public let other: Bool
+    }
+
     public struct Contact: Equatable, Sendable {
         public let origin: Int16
         public let absoluteX: Int16
@@ -35,7 +39,11 @@ public enum AppleTrackpadRawReportDecoder {
     }
 
     public struct Report: Equatable, Sendable {
-        public let clicked: Bool
+        public let reportID: UInt8
+        public let buttons: Buttons
+        public let pointerX: Int8
+        public let pointerY: Int8
+        public let physicalClicked: Bool
         public let contactCount: Int
         public let contacts: [Contact]
         public let rawLength: Int
@@ -43,32 +51,37 @@ public enum AppleTrackpadRawReportDecoder {
 
     public enum DecodeError: Error, Equatable, Sendable {
         case unsupportedLength(Int)
+        case unexpectedReportID(UInt8)
         case unsupportedContactCount(Int)
         case embeddedContactCountMismatch(inferred: Int, embedded: Int)
-        case invalidClickValue(offset: Int, value: UInt8)
-        case clickMirrorMismatch(primary: UInt8, mirror: UInt8)
+        case invalidPhysicalClickValue(UInt8)
         case truncatedContact(index: Int, requiredEndOffset: Int, actualLength: Int)
     }
 
-    static let fixedPrefixBytes = 48
+    static let expectedReportID: UInt8 = 2
+    static let fixedTouchpadPrefixBytes = 48
     static let fingerStrideBytes = 30
     static let strippedTrailingCRCBytes = 2
     static let maximumSupportedContacts = 16
 
-    static let clickedOffset = 1
+    // Complete CoreHID report offsets.
+    static let reportIDOffset = 0
+    static let buttonsOffset = 1
+    static let pointerXOffset = 2
+    static let pointerYOffset = 3
     static let contactCountOffset = 30
-    static let clickedMirrorOffset = 31
+    static let physicalClickOffset = 31
     static let firstFingerOffset = 48
 
     public static func decode(_ data: Data) throws -> Report {
         let bytes = Array(data)
 
         let adjustedLength = bytes.count + strippedTrailingCRCBytes
-        guard adjustedLength >= fixedPrefixBytes + fingerStrideBytes else {
+        guard adjustedLength >= fixedTouchpadPrefixBytes + fingerStrideBytes else {
             throw DecodeError.unsupportedLength(bytes.count)
         }
 
-        let fingerBytes = adjustedLength - fixedPrefixBytes
+        let fingerBytes = adjustedLength - fixedTouchpadPrefixBytes
         guard fingerBytes.isMultiple(of: fingerStrideBytes) else {
             throw DecodeError.unsupportedLength(bytes.count)
         }
@@ -76,6 +89,11 @@ public enum AppleTrackpadRawReportDecoder {
         let inferredCount = fingerBytes / fingerStrideBytes
         guard (1...maximumSupportedContacts).contains(inferredCount) else {
             throw DecodeError.unsupportedContactCount(inferredCount)
+        }
+
+        let reportID = bytes[reportIDOffset]
+        guard reportID == expectedReportID else {
+            throw DecodeError.unexpectedReportID(reportID)
         }
 
         let embeddedCount = Int(bytes[contactCountOffset])
@@ -86,23 +104,17 @@ public enum AppleTrackpadRawReportDecoder {
             )
         }
 
-        let clicked = bytes[clickedOffset]
-        let clickedMirror = bytes[clickedMirrorOffset]
-        guard clicked <= 1 else {
-            throw DecodeError.invalidClickValue(offset: clickedOffset, value: clicked)
+        let physicalClickByte = bytes[physicalClickOffset]
+        guard physicalClickByte <= 1 else {
+            throw DecodeError.invalidPhysicalClickValue(physicalClickByte)
         }
-        guard clickedMirror <= 1 else {
-            throw DecodeError.invalidClickValue(
-                offset: clickedMirrorOffset,
-                value: clickedMirror
-            )
-        }
-        guard clicked == clickedMirror else {
-            throw DecodeError.clickMirrorMismatch(
-                primary: clicked,
-                mirror: clickedMirror
-            )
-        }
+
+        let buttonBits = bytes[buttonsOffset]
+        let buttons = Buttons(
+            primary: (buttonBits & 0b001) != 0,
+            secondary: (buttonBits & 0b010) != 0,
+            other: (buttonBits & 0b100) != 0
+        )
 
         var contacts: [Contact] = []
         contacts.reserveCapacity(inferredCount)
@@ -110,8 +122,9 @@ public enum AppleTrackpadRawReportDecoder {
         for index in 0..<inferredCount {
             let base = firstFingerOffset + (index * fingerStrideBytes)
 
-            // The final report omits only the trailing CRC16. Every semantic
-            // field used below ends at byte 27 of the 30-byte finger record.
+            // The complete CoreHID report omits the final transport CRC16.
+            // Every semantic field consumed here ends at byte 27 in the
+            // 30-byte finger record, so the final contact still has all fields.
             let requiredEnd = base + 28
             guard requiredEnd <= bytes.count else {
                 throw DecodeError.truncatedContact(
@@ -140,7 +153,11 @@ public enum AppleTrackpadRawReportDecoder {
         }
 
         return Report(
-            clicked: clicked == 1,
+            reportID: reportID,
+            buttons: buttons,
+            pointerX: Int8(bitPattern: bytes[pointerXOffset]),
+            pointerY: Int8(bitPattern: bytes[pointerYOffset]),
+            physicalClicked: physicalClickByte == 1,
             contactCount: inferredCount,
             contacts: contacts,
             rawLength: bytes.count
