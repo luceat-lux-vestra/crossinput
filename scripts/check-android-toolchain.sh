@@ -34,19 +34,20 @@ from pathlib import Path
 import sys
 
 build = Path(sys.argv[1])
-candidates = []
-for root in (
-    build / "tmp" / "kotlin-classes" / "debug",
-    build / "tmp" / "kotlin-classes" / "debugUnitTest",
-):
-    if root.is_dir():
-        candidates.extend(
-            p for p in root.rglob("*.class")
-            if "com/crossinput/helper" in p.as_posix()
-        )
+candidates = [
+    p for p in build.rglob("*.class")
+    if "/com/crossinput/helper/" in p.as_posix()
+]
 
 if not candidates:
-    raise SystemExit("ERROR: no compiled helper Kotlin classes found")
+    searched = "\n".join(
+        str(p.relative_to(build))
+        for p in sorted(build.rglob("*.class"))[:50]
+    )
+    raise SystemExit(
+        "ERROR: no compiled helper Kotlin classes found under app/build"
+        + (f"\nObserved classfiles:\n{searched}" if searched else "")
+    )
 
 bad = []
 for path in candidates:
