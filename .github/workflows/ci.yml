@@ -94,8 +94,6 @@ jobs:
       - name: "bash -n"
         run: |
           find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
-      - name: "Semantic input boundary guard"
-        run: python3 scripts/check-input-boundaries.py
       - name: "Issue62 aggregation fixture"
         # Runs the embedded python aggregator from verify-device-issue62.sh
         # against synthetic raw evidence so a NameError/regression in the

@@ -82,6 +82,7 @@ jobs:
           cd android/helper
           chmod +x gradlew
           ./gradlew test assembleDebug --console=plain
+
       - name: Verify Java 25 / Android 17 toolchain
         if: matrix.language == 'java-kotlin'
         run: scripts/check-android-toolchain.sh
