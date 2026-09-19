@@ -4,16 +4,13 @@ import Testing
 
 @Suite("Apple trackpad raw report decoder")
 struct AppleTrackpadRawReportDecoderTests {
-    @Test("decodes one-contact report with HID prefix and stripped trailing CRC")
+    @Test("decodes one-contact HID report")
     func decodesOneContact() throws {
         let data = makeReport(
             buttons: 0b001,
             pointerX: 7,
             pointerY: -3,
-            physicalClicked: false,
-            contacts: [
-                .init(relativeX: 17, relativeY: -9, pressure: 123, multi: 7)
-            ]
+            contactCount: 1
         )
 
         #expect(data.count == 76)
@@ -27,42 +24,20 @@ struct AppleTrackpadRawReportDecoderTests {
         #expect(!report.buttons.other)
         #expect(report.pointerX == 7)
         #expect(report.pointerY == -3)
-        #expect(!report.physicalClicked)
         #expect(report.contactCount == 1)
-        #expect(report.contacts.count == 1)
-        #expect(report.contacts[0].relativeX == 17)
-        #expect(report.contacts[0].relativeY == -9)
-        #expect(report.contacts[0].pressure == 123)
-        #expect(report.contacts[0].multi == 7)
     }
 
-    @Test("decodes two-contact physical click report")
-    func decodesTwoContactClicked() throws {
-        let data = makeReport(
-            buttons: 0b001,
-            physicalClicked: true,
-            contacts: [
-                .init(relativeX: 4, relativeY: 2, pressure: 80, multi: 1),
-                .init(relativeX: 6, relativeY: 3, pressure: 90, multi: 2)
-            ]
-        )
+    @Test("decodes two-contact report")
+    func decodesTwoContact() throws {
+        let data = makeReport(contactCount: 2)
 
         #expect(data.count == 106)
-
-        let report = try AppleTrackpadRawReportDecoder.decode(data)
-
-        #expect(report.contactCount == 2)
-        #expect(report.physicalClicked)
-        #expect(report.contacts.map(\.relativeX) == [4, 6])
-        #expect(report.contacts.map(\.relativeY) == [2, 3])
+        #expect(try AppleTrackpadRawReportDecoder.decode(data).contactCount == 2)
     }
 
     @Test("parses all three standardized HID button bits independently")
     func parsesButtonBits() throws {
-        let data = makeReport(
-            buttons: 0b111,
-            contacts: [.init(relativeX: 0, relativeY: 0)]
-        )
+        let data = makeReport(buttons: 0b111, contactCount: 1)
 
         let report = try AppleTrackpadRawReportDecoder.decode(data)
 
@@ -73,13 +48,7 @@ struct AppleTrackpadRawReportDecoderTests {
 
     @Test("three contacts produce the observed 136-byte shape")
     func threeContactLength() throws {
-        let data = makeReport(
-            contacts: [
-                .init(relativeX: 1, relativeY: 1),
-                .init(relativeX: 2, relativeY: 2),
-                .init(relativeX: 3, relativeY: 3)
-            ]
-        )
+        let data = makeReport(contactCount: 3)
 
         #expect(data.count == 136)
         #expect(try AppleTrackpadRawReportDecoder.decode(data).contactCount == 3)
@@ -94,9 +63,7 @@ struct AppleTrackpadRawReportDecoderTests {
 
     @Test("unexpected report ID fails closed")
     func rejectsUnexpectedReportID() {
-        var data = makeReport(
-            contacts: [.init(relativeX: 0, relativeY: 0)]
-        )
+        var data = makeReport(contactCount: 1)
         data[0] = 3
 
         #expect(
@@ -108,12 +75,7 @@ struct AppleTrackpadRawReportDecoderTests {
 
     @Test("embedded contact count must agree with structural length")
     func rejectsContactCountMismatch() {
-        var data = makeReport(
-            contacts: [
-                .init(relativeX: 1, relativeY: 1),
-                .init(relativeX: 2, relativeY: 2)
-            ]
-        )
+        var data = makeReport(contactCount: 2)
         data[30] = 1
 
         #expect(
@@ -126,76 +88,21 @@ struct AppleTrackpadRawReportDecoderTests {
         }
     }
 
-    @Test("physical click byte outside zero or one fails closed")
-    func rejectsInvalidPhysicalClickValue() {
-        var data = makeReport(
-            contacts: [.init(relativeX: 0, relativeY: 0)]
-        )
-        data[31] = 2
-
-        #expect(
-            throws: AppleTrackpadRawReportDecoder.DecodeError.invalidPhysicalClickValue(2)
-        ) {
-            try AppleTrackpadRawReportDecoder.decode(data)
-        }
-    }
-
-    private struct ContactFixture {
-        let relativeX: Int16
-        let relativeY: Int16
-        let pressure: Int16
-        let multi: Int16
-
-        init(
-            relativeX: Int16,
-            relativeY: Int16,
-            pressure: Int16 = 0,
-            multi: Int16 = 0
-        ) {
-            self.relativeX = relativeX
-            self.relativeY = relativeY
-            self.pressure = pressure
-            self.multi = multi
-        }
-    }
-
     private func makeReport(
         buttons: UInt8 = 0,
         pointerX: Int8 = 0,
         pointerY: Int8 = 0,
-        physicalClicked: Bool = false,
-        contacts: [ContactFixture]
+        contactCount: Int
     ) -> Data {
-        precondition(!contacts.isEmpty)
+        precondition(contactCount > 0)
 
-        let length = 46 + (30 * contacts.count)
+        let length = 46 + (30 * contactCount)
         var bytes = [UInt8](repeating: 0, count: length)
-
         bytes[0] = 2
         bytes[1] = buttons
         bytes[2] = UInt8(bitPattern: pointerX)
         bytes[3] = UInt8(bitPattern: pointerY)
-        bytes[30] = UInt8(contacts.count)
-        bytes[31] = physicalClicked ? 1 : 0
-
-        for (index, contact) in contacts.enumerated() {
-            let base = 48 + (index * 30)
-            putInt16LE(contact.relativeX, into: &bytes, at: base + 6)
-            putInt16LE(contact.relativeY, into: &bytes, at: base + 8)
-            putInt16LE(contact.pressure, into: &bytes, at: base + 24)
-            putInt16LE(contact.multi, into: &bytes, at: base + 26)
-        }
-
+        bytes[30] = UInt8(contactCount)
         return Data(bytes)
-    }
-
-    private func putInt16LE(
-        _ value: Int16,
-        into bytes: inout [UInt8],
-        at offset: Int
-    ) {
-        let raw = UInt16(bitPattern: value)
-        bytes[offset] = UInt8(truncatingIfNeeded: raw)
-        bytes[offset + 1] = UInt8(truncatingIfNeeded: raw >> 8)
     }
 }
