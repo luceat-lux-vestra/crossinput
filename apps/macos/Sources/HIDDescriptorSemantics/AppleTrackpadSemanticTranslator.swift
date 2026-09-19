@@ -4,13 +4,13 @@ import Foundation
 ///
 /// This intentionally implements only the pointer surface currently required
 /// by Ampersand:
-/// - exactly one contact -> relative pointer movement
-/// - exactly two contacts -> raw two-finger scroll delta
+/// - exactly one contact -> standard HID relative X/Y pointer movement
+/// - exactly two contacts -> standard HID relative X/Y as scroll delta
 /// - click transition with one contact -> primary button
 /// - click transition with two contacts -> secondary button
 ///
 /// Three-or-more-contact gestures are rejected rather than guessed.
-/// Scroll sign/scaling is preserved from the raw relative axes and must be
+/// Scroll sign/scaling is preserved from the standard HID relative axes and must be
 /// calibrated at the production bridge, not hidden in this decoder.
 ///
 /// Button identity is latched on press so a contact-count change cannot turn a
@@ -75,8 +75,8 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
             return events
         }
 
-        let dx = average(report.contacts.map(\.relativeX))
-        let dy = average(report.contacts.map(\.relativeY))
+        let dx = Int32(report.pointerX)
+        let dy = Int32(report.pointerY)
 
         guard dx != 0 || dy != 0 else {
             return events
@@ -102,11 +102,5 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
         }
         activeButton = nil
         return [.button(button, down: false)]
-    }
-
-    private func average(_ values: [Int16]) -> Int32 {
-        guard !values.isEmpty else { return 0 }
-        let sum = values.reduce(Int64(0)) { $0 + Int64($1) }
-        return Int32(sum / Int64(values.count))
     }
 }
