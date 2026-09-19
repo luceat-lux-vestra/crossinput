@@ -44,22 +44,22 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
             throw TranslationError.invalidState
         }
 
-        let buttonForCurrentContacts: Button
-        switch report.contactCount {
-        case 1:
-            buttonForCurrentContacts = .primary
-        case 2:
-            buttonForCurrentContacts = .secondary
-        default:
-            throw TranslationError.unsupportedContactCount(report.contactCount)
-        }
-
         var events: [Event] = []
         let wasClicked = activeButton != nil
 
         if report.clicked && !wasClicked {
-            activeButton = buttonForCurrentContacts
-            events.append(.button(buttonForCurrentContacts, down: true))
+            let button: Button
+            switch report.contactCount {
+            case 1:
+                button = .primary
+            case 2:
+                button = .secondary
+            default:
+                throw TranslationError.unsupportedContactCount(report.contactCount)
+            }
+
+            activeButton = button
+            events.append(.button(button, down: true))
             // Do not translate movement from the transition packet. Mechanical
             // click-down frequently carries incidental contact jitter.
             return events
