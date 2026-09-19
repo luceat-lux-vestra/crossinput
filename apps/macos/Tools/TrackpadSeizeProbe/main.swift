@@ -22,7 +22,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|gdm-semantic-signature|virtual-device-capability|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|gdm-semantic-signature|gdm-seized-classifier|virtual-device-capability|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -52,6 +52,7 @@ private enum ProbeMode: String {
     case componentInventory = "component-inventory"
     case componentActivity = "component-activity"
     case gdmSemanticSignature = "gdm-semantic-signature"
+    case gdmSeizedClassifier = "gdm-seized-classifier"
     case virtualDeviceCapability = "virtual-device-capability"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
@@ -254,6 +255,104 @@ private struct GDMElementAggregate: Sendable {
         }
 
         previousBytes = bytes
+    }
+}
+
+@available(macOS 15.0, *)
+private struct GDMClassifierBucket: Sendable {
+    var updates = 0
+    var positive = 0
+    var negative = 0
+    var zero = 0
+    var decodeFailures = 0
+    var byteLengthCounts: [Int: Int] = [:]
+
+    mutating func record(_ value: HIDElement.Value) {
+        updates += 1
+        if let logical = value.logicalValue(asTypeTruncatingIfNeeded: Int64.self) {
+            if logical > 0 {
+                positive += 1
+            } else if logical < 0 {
+                negative += 1
+            } else {
+                zero += 1
+            }
+        } else {
+            decodeFailures += 1
+        }
+        byteLengthCounts[value.bytes.count, default: 0] += 1
+    }
+}
+
+@available(macOS 15.0, *)
+private actor GDMSeizedClassifierCounters {
+    private var inputReports = 0
+    private var reportLengthCounts: [Int: Int] = [:]
+    private var byUsage: [String: GDMClassifierBucket] = [:]
+
+    func reset() {
+        inputReports = 0
+        reportLengthCounts.removeAll(keepingCapacity: true)
+        byUsage.removeAll(keepingCapacity: true)
+    }
+
+    func recordInputReport(data: Data) {
+        inputReports += 1
+        reportLengthCounts[data.count, default: 0] += 1
+    }
+
+    func recordElementUpdates(_ values: [HIDElement.Value]) {
+        for value in values {
+            let usage = String(describing: value.element.usage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            var bucket = byUsage[usage] ?? GDMClassifierBucket()
+            bucket.record(value)
+            byUsage[usage] = bucket
+        }
+    }
+
+    func summaryLines(phase: String) -> [String] {
+        var lines: [String] = []
+        let short = reportLengthCounts[76, default: 0]
+        let extended = reportLengthCounts[106, default: 0]
+        let other = inputReports - short - extended
+        lines.append(
+            "PROBE_SEIZED_CLASSIFIER_PHASE_END name=\(phase) "
+                + "input_reports=\(inputReports) short76=\(short) "
+                + "extended106=\(extended) other=\(other)"
+        )
+
+        let interesting = [
+            "CoreHID.HIDUsage(page:_1,_usage:_48)",
+            "CoreHID.HIDUsage(page:_1,_usage:_49)",
+            "CoreHID.HIDUsage(page:_9,_usage:_1)",
+            "CoreHID.HIDUsage(page:_9,_usage:_2)",
+            "CoreHID.HIDUsage(page:_9,_usage:_3)",
+            "CoreHID.HIDUsage(page:_65280,_usage:_12)"
+        ]
+
+        for usage in interesting {
+            guard let bucket = byUsage[usage] else {
+                lines.append(
+                    "PROBE_SEIZED_CLASSIFIER_USAGE phase=\(phase) "
+                        + "usage=\(usage) updates=0"
+                )
+                continue
+            }
+            let lengths = bucket.byteLengthCounts
+                .sorted(by: { $0.key < $1.key })
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ",")
+            lines.append(
+                "PROBE_SEIZED_CLASSIFIER_USAGE phase=\(phase) "
+                    + "usage=\(usage) updates=\(bucket.updates) "
+                    + "positive=\(bucket.positive) negative=\(bucket.negative) "
+                    + "zero=\(bucket.zero) decode_failures=\(bucket.decodeFailures) "
+                    + "byte_lengths=\(lengths)"
+            )
+        }
+        return lines
     }
 }
 
@@ -634,6 +733,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .gdmSeizedClassifier {
+            try await runGDMSeizedClassifierProbe(client: client, elements: elements)
+            return
+        }
+
         if mode == .descriptorSemantics {
             let semantics: HIDPointerXYSemantics
             do {
@@ -705,9 +809,79 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .gdmSemanticSignature, .virtualDeviceCapability:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .gdmSemanticSignature, .gdmSeizedClassifier, .virtualDeviceCapability:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runGDMSeizedClassifierProbe(
+        client: HIDDeviceClient,
+        elements: [HIDElement]
+    ) async throws {
+        print("PROBE_SEIZED_CLASSIFIER_BEGIN raw_payload_logging=false")
+        try await client.seizeDevice()
+        print("PROBE_SEIZE_OK")
+
+        let counters = GDMSeizedClassifierCounters()
+        let monitorTask = Task {
+            do {
+                for try await notification in await client.monitorNotifications(
+                    reportIDsToMonitor: [HIDReportID.allReports],
+                    elementsToMonitor: elements
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .inputReport(_, let reportData, _):
+                        await counters.recordInputReport(data: reportData)
+                    case .elementUpdates(let values):
+                        await counters.recordElementUpdates(values)
+                    case .deviceRemoved:
+                        print("PROBE_SEIZED_CLASSIFIER_DEVICE_REMOVED")
+                    case .deviceSeized:
+                        print("PROBE_SEIZED_CLASSIFIER_EXTERNALLY_SEIZED")
+                    case .deviceUnseized:
+                        print("PROBE_SEIZED_CLASSIFIER_UNSEIZED")
+                    @unknown default:
+                        break
+                    }
+                }
+            } catch is CancellationError {
+                // Expected after the bounded characterization window.
+            } catch {
+                fputs(
+                    "PROBE_SEIZED_CLASSIFIER_MONITOR_FAIL error=\(String(describing: error))\n",
+                    stderr
+                )
+            }
+        }
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("IDLE", "do_not_touch_trackpad", 2),
+            ("ONE_FINGER_RIGHT", "move_one_finger_right_only", 3),
+            ("TWO_FINGER_RIGHT", "move_two_fingers_right_only", 4),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("TWO_FINGER_UP", "move_two_fingers_up_only", 4)
+        ]
+
+        for phase in phases {
+            await counters.reset()
+            print(
+                "PROBE_SEIZED_CLASSIFIER_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+            let lines = await counters.summaryLines(phase: phase.name)
+            for line in lines {
+                print(line)
+            }
+        }
+
+        monitorTask.cancel()
+        _ = await monitorTask.result
+        print("PROBE_RELEASE client_lifetime_ending=true")
+        print("PROBE_END boundary=gdm_seized_classifier")
     }
 
     @available(macOS 15.0, *)
