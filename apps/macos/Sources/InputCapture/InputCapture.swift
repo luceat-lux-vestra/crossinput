@@ -3,6 +3,7 @@ import CoreGraphics
 @preconcurrency import ApplicationServices
 import AppKit
 import Carbon.HIToolbox
+import InputDomain
 import EdgeSwitch
 import Diagnostics
 
@@ -19,35 +20,10 @@ public enum SuppressionReleaseReason: String, Sendable {
     case externalControl
 }
 
-/// A single pointer event captured from the system, ready to become a CXI message.
-public struct PointerEvent: Sendable {
-    public enum Kind: Sendable, Equatable {
-        case move(dx: Int32, dy: Int32)
-        case button(button: UInt32, down: Bool) // 0=left 1=right 2=middle
-        case scroll(horizontal: Float, vertical: Float)
-    }
-    public let kind: Kind
-    public init(_ kind: Kind) { self.kind = kind }
-}
-
-/// A single keyboard transition captured while suppressed (ADR-0007).
-/// Fields carry Android KeyEvent semantics so the app can build KEY_EVENT directly.
-public struct CapturedKeyEvent: Sendable {
-    /// Android KeyEvent.KEYCODE_* (translated from the macOS virtual key code).
-    public let keyCode: Int
-    /// Android KeyEvent.META_* bits.
-    public let metaState: UInt32
-    /// 0=KEY_ACTION_DOWN, 1=KEY_ACTION_UP.
-    public let action: UInt8
-    /// Repeat count (0 = first press).
-    public let repeatCount: UInt8
-    public init(keyCode: Int, metaState: UInt32, action: UInt8, repeatCount: UInt8) {
-        self.keyCode = keyCode
-        self.metaState = metaState
-        self.action = action
-        self.repeatCount = repeatCount
-    }
-}
+/// Compatibility names for the host-facing capture API. Their underlying
+/// definitions live in the platform-neutral InputDomain target.
+public typealias PointerEvent = SemanticPointerEvent
+public typealias CapturedKeyEvent = SemanticKeyEvent
 
 private final class ProcessIdentityCache: @unchecked Sendable {
     private struct Entry {
@@ -220,10 +196,10 @@ public final class InputCapture: @unchecked Sendable {
     /// crossing point re-trap into a dead remote session (issue #50).
     /// Guarded by stateLock.
     private var requireEdgeExit = false
-    /// Android key codes currently down on the device; on release (fail-safe,
-    /// timeout, disconnect) every stuck key is sent UP so the device never
-    /// keeps a key pressed (AGENTS.md rule 5: suppression requires fail-safe).
-    private var keysDown: Set<Int> = []
+    /// Semantic keys currently down for this suppression ownership period. On
+    /// release every held key is emitted as semantic UP so the remote adapter
+    /// can perform terminal cleanup without host-side Android constants.
+    private var keysDown: Set<SemanticKey> = []
     /// The suppression generation that owns `keysDown`. Held-key bookkeeping
     /// must not let a delayed callback from an older remote epoch mutate the
     /// next epoch's cleanup state.
@@ -497,10 +473,10 @@ public final class InputCapture: @unchecked Sendable {
     /// Handles keyboard events while suppressed. When suppressed, key events are
     /// consumed (never reach the macOS system) — this is what blocks Cmd+Tab,
     /// Spotlight, Mission Control, etc. while the user is typing on the Android
-    /// side. The events are forwarded as Android key CODE transitions.
-    /// Non-ANSI keys (media, brightness, etc.) are consumed but not forwarded.
-    /// The event is forwarded with the current modifier state so the Android IME
-    /// can compose (e.g. Korean 2-set does its own mod mapping).
+    /// side. The host adapter emits platform-neutral semantic key transitions;
+    /// Delivery owns conversion to Android/CXI values. Unsupported keys are
+    /// consumed but not forwarded. Current modifier state is preserved so the
+    /// remote IME can compose exactly as before.
     ///
     /// Emergency fail-safe: ⌘⇧X is detected here inside the tap, because this
     /// tap consumes every keyboard event before the window server can match
@@ -518,34 +494,40 @@ public final class InputCapture: @unchecked Sendable {
             release(reason: .emergencyHotkey, expectedGeneration: suppressionGeneration)
             return nil
         }
-        let metaState = KeyCodeMapper.androidMetaState(ofFlags: event.flags)
-        let keyCode = KeyCodeMapper.androidKeyCode(ofVirtualKey: virtualKey)
+        let modifiers = KeyCodeMapper.semanticModifiers(ofFlags: event.flags)
+        let key = KeyCodeMapper.semanticKey(ofVirtualKey: virtualKey)
         switch type {
         case .flagsChanged:
-            // Modifier-only change. Track it in the repeat/down state via its
-            // translated key code if known; otherwise ignore (consume anyway).
+            // Modifier-only transitions remain represented in modifier state;
+            // current production behavior does not emit standalone modifier keys.
             break
         case .keyDown:
             // Auto-repeat arrives as further .keyDown with the autorepeat bit set.
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-            if let keyCode {
-                guard updateKeysDown(keyCode, action: 0, generation: suppressionGeneration) else {
+            if let key {
+                guard updateKeysDown(key, transition: .down, generation: suppressionGeneration) else {
                     return nil
                 }
                 beforeSuppressedEventEmission?()
-                emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                              action: 0, repeatCount: isRepeat ? 1 : 0),
-                             generation: suppressionGeneration)
+                emitKeyEvent(CapturedKeyEvent(
+                    key: key,
+                    modifiers: modifiers,
+                    transition: .down,
+                    repeatCount: isRepeat ? 1 : 0
+                ), generation: suppressionGeneration)
             }
         case .keyUp:
-            if let keyCode {
-                guard updateKeysDown(keyCode, action: 1, generation: suppressionGeneration) else {
+            if let key {
+                guard updateKeysDown(key, transition: .up, generation: suppressionGeneration) else {
                     return nil
                 }
                 beforeSuppressedEventEmission?()
-                emitKeyEvent(CapturedKeyEvent(keyCode: keyCode, metaState: metaState,
-                                              action: 1, repeatCount: 0),
-                             generation: suppressionGeneration)
+                emitKeyEvent(CapturedKeyEvent(
+                    key: key,
+                    modifiers: modifiers,
+                    transition: .up,
+                    repeatCount: 0
+                ), generation: suppressionGeneration)
             }
         default:
             break
@@ -570,17 +552,23 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     /// Fail-safe: if suppression ends (timeout/disconnect/emergency ⌘⇧X) while
-    /// keys were still held, release them on the device so it never gets stuck.
+    /// keys were still held, emit semantic key-up transitions so remote cleanup
+    /// never depends on host-side Android constants.
     private func flushStuckKeys(for generation: UInt64) {
-        let held: Set<Int> = stateLock.withLock {
+        let held: Set<SemanticKey> = stateLock.withLock {
             guard keysDownGeneration == generation else { return [] }
             let held = keysDown
             keysDown.removeAll()
             keysDownGeneration = nil
             return held
         }
-        for keyCode in held {
-            let release = CapturedKeyEvent(keyCode: keyCode, metaState: 0, action: 1, repeatCount: 0)
+        for key in held {
+            let release = CapturedKeyEvent(
+                key: key,
+                modifiers: [],
+                transition: .up,
+                repeatCount: 0
+            )
             if let onCleanupKeyEvent {
                 onCleanupKeyEvent(release)
             } else {
@@ -596,17 +584,22 @@ public final class InputCapture: @unchecked Sendable {
     /// suppression generation. The check and mutation are one lock operation
     /// so a return/re-entry cannot let an old callback contaminate cleanup for
     /// the new remote epoch.
-    private func updateKeysDown(_ keyCode: Int, action: UInt8, generation: UInt64) -> Bool {
+    private func updateKeysDown(
+        _ key: SemanticKey,
+        transition: KeyTransition,
+        generation: UInt64
+    ) -> Bool {
         stateLock.withLock {
             guard isSuppressing, suppressionGeneration == generation else { return false }
             if keysDownGeneration != generation {
                 keysDown.removeAll()
                 keysDownGeneration = generation
             }
-            if action == 0 {
-                keysDown.insert(keyCode)
-            } else {
-                keysDown.remove(keyCode)
+            switch transition {
+            case .down:
+                keysDown.insert(key)
+            case .up:
+                keysDown.remove(key)
             }
             return true
         }
