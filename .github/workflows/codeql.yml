@@ -50,21 +50,27 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Set up Java
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '25.0.4.1'
 
       - name: Set up Android SDK
         if: matrix.language == 'java-kotlin'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+
+      - name: Install Android 17 SDK
+        if: matrix.language == 'java-kotlin'
+        run: |
+          command -v sdkmanager >/dev/null
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Validate Gradle wrapper
         if: matrix.language == 'java-kotlin'
@@ -76,12 +82,15 @@ jobs:
           cd android/helper
           chmod +x gradlew
           ./gradlew test assembleDebug --console=plain
+      - name: Verify Java 25 / Android 17 toolchain
+        if: matrix.language == 'java-kotlin'
+        run: scripts/check-android-toolchain.sh
 
       - name: Autobuild Swift sources for CodeQL
         if: matrix.language == 'swift'
-        uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           category: /language:${{ matrix.language }}
