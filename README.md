@@ -112,8 +112,10 @@ Development environment:
 | Component | Version |
 |---|---|
 | Xcode | 16+ / Swift 6 |
-| JDK | 17 |
-| Android SDK | platforms;android-35, build-tools;35.0.0 |
+| JDK | 25 LTS (Temurin 25.0.4) |
+| Kotlin | 2.4.10 |
+| Node.js | 26.9.0 (tooling) |
+| Android SDK | platforms;android-37.0, build-tools;37.0.0 |
 | adb | 37.x |
 
 ## Architecture and project docs
