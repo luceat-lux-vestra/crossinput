@@ -21,7 +21,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -45,6 +45,7 @@ private enum ProbeMode: String {
     case synchronousRelease = "synchronous-release"
     case inputSurface = "input-surface"
     case hybridSurface = "hybrid-surface"
+    case tapLayers = "tap-layers"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -122,13 +123,19 @@ private final class EventTypeCounter: @unchecked Sendable {
 
 private final class ListenOnlyEventTap: @unchecked Sendable {
     private let counter: EventTypeCounter
-    private let queue = DispatchQueue(label: "crossinput.trackpad-probe.event-tap", qos: .userInteractive)
+    private let location: CGEventTapLocation
+    private let queue: DispatchQueue
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var runLoop: CFRunLoop?
 
-    init(counter: EventTypeCounter) {
+    init(counter: EventTypeCounter, location: CGEventTapLocation, label: String) {
         self.counter = counter
+        self.location = location
+        self.queue = DispatchQueue(
+            label: "crossinput.trackpad-probe.event-tap.\(label)",
+            qos: .userInteractive
+        )
     }
 
     func start() -> Bool {
@@ -155,7 +162,7 @@ private final class ListenOnlyEventTap: @unchecked Sendable {
         }
 
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: location,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: mask,
@@ -390,6 +397,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .tapLayers {
+            try await runTapLayersProbe(client: client)
+            return
+        }
+
         switch mode {
         case .monitorOnly:
             print("PROBE_CONTROL no_seize=true monitor=true duration_seconds=5")
@@ -416,9 +428,77 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runTapLayersProbe(
+        client: HIDDeviceClient
+    ) async throws {
+        let layers: [(name: String, location: CGEventTapLocation, counter: EventTypeCounter)] = [
+            ("hid", .cghidEventTap, EventTypeCounter()),
+            ("session", .cgSessionEventTap, EventTypeCounter()),
+            ("annotated_session", .cgAnnotatedSessionEventTap, EventTypeCounter())
+        ]
+
+        var taps: [ListenOnlyEventTap] = []
+        for layer in layers {
+            let tap = ListenOnlyEventTap(
+                counter: layer.counter,
+                location: layer.location,
+                label: layer.name
+            )
+            guard tap.start() else {
+                for started in taps { started.stop() }
+                print("PROBE_TAP_LAYERS_FAIL layer=\(layer.name) reason=cg_event_tap_creation_failed")
+                throw ProbeFailure.wrongDevice("listen-only CGEventTap creation failed for \(layer.name)")
+            }
+            taps.append(tap)
+            print("PROBE_TAP_LAYER_OK layer=\(layer.name) mode=listen_only")
+        }
+        defer {
+            for tap in taps { tap.stop() }
+        }
+
+        try await client.seizeDevice()
+        print("PROBE_SEIZE_OK")
+        print("PROBE_TAP_LAYERS payload_logging=false event_types_only=true host_pointer_stationary=true")
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("MOVE_RIGHT", "move_one_finger_right_only", 3),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("SCROLL_VERTICAL", "two_finger_scroll_vertically", 4),
+            ("SCROLL_HORIZONTAL", "two_finger_scroll_horizontally", 4)
+        ]
+
+        for phase in phases {
+            for layer in layers { layer.counter.reset() }
+            print(
+                "PROBE_TAP_LAYERS_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+
+            for layer in layers {
+                let snapshot = layer.counter.snapshot()
+                print(
+                    "PROBE_TAP_LAYERS_PHASE_END name=\(phase.name) "
+                        + "layer=\(layer.name) event_type_count=\(snapshot.count)"
+                )
+                for (rawType, count) in snapshot {
+                    print(
+                        "PROBE_TAP_LAYER_EVENT phase=\(phase.name) "
+                            + "layer=\(layer.name) type_raw=\(rawType) count=\(count)"
+                    )
+                }
+            }
+        }
+
+        print("PROBE_RELEASE client_lifetime_ending=true")
+        print("PROBE_END boundary=corehid_seize_plus_three_listen_only_event_taps")
     }
 
     @available(macOS 15.0, *)
@@ -426,7 +506,11 @@ private struct TrackpadSeizeProbe {
         client: HIDDeviceClient
     ) async throws {
         let counter = EventTypeCounter()
-        let tap = ListenOnlyEventTap(counter: counter)
+        let tap = ListenOnlyEventTap(
+            counter: counter,
+            location: .cghidEventTap,
+            label: "hid"
+        )
 
         guard tap.start() else {
             print("PROBE_HYBRID_TAP_FAIL reason=cg_event_tap_creation_failed")
