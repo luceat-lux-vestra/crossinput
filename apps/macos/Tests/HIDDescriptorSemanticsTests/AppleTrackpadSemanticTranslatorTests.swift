@@ -10,8 +10,10 @@ struct AppleTrackpadSemanticTranslatorTests {
 
         let events = try translator.translate(
             decode(
+                pointerX: 12,
+                pointerY: -7,
                 physicalClicked: false,
-                contacts: [.init(relativeX: 12, relativeY: -7)]
+                contacts: [.init()]
             )
         )
 
@@ -24,11 +26,10 @@ struct AppleTrackpadSemanticTranslatorTests {
 
         let events = try translator.translate(
             decode(
+                pointerX: 8,
+                pointerY: -6,
                 physicalClicked: false,
-                contacts: [
-                    .init(relativeX: 10, relativeY: -4),
-                    .init(relativeX: 6, relativeY: -8)
-                ]
+                contacts: [.init(), .init()]
             )
         )
 
@@ -42,13 +43,17 @@ struct AppleTrackpadSemanticTranslatorTests {
         let down = try translator.translate(
             decode(
                 physicalClicked: true,
-                contacts: [.init(relativeX: 3, relativeY: 2)]
+                pointerX: 3,
+                pointerY: 2,
+                contacts: [.init()]
             )
         )
         let up = try translator.translate(
             decode(
                 physicalClicked: false,
-                contacts: [.init(relativeX: 1, relativeY: 1)]
+                pointerX: 1,
+                pointerY: 1,
+                contacts: [.init()]
             )
         )
 
@@ -64,8 +69,8 @@ struct AppleTrackpadSemanticTranslatorTests {
             decode(
                 physicalClicked: true,
                 contacts: [
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0)
+                    .init(),
+                    .init()
                 ]
             )
         )
@@ -73,8 +78,8 @@ struct AppleTrackpadSemanticTranslatorTests {
             decode(
                 physicalClicked: false,
                 contacts: [
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0)
+                    .init(),
+                    .init()
                 ]
             )
         )
@@ -91,8 +96,8 @@ struct AppleTrackpadSemanticTranslatorTests {
             decode(
                 physicalClicked: true,
                 contacts: [
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0)
+                    .init(),
+                    .init()
                 ]
             )
         )
@@ -100,13 +105,14 @@ struct AppleTrackpadSemanticTranslatorTests {
         let held = try translator.translate(
             decode(
                 physicalClicked: true,
-                contacts: [.init(relativeX: 5, relativeY: 0)]
+                pointerX: 5,
+                contacts: [.init()]
             )
         )
         let release = try translator.translate(
             decode(
                 physicalClicked: false,
-                contacts: [.init(relativeX: 0, relativeY: 0)]
+                contacts: [.init()]
             )
         )
 
@@ -121,7 +127,9 @@ struct AppleTrackpadSemanticTranslatorTests {
         let down = try translator.translate(
             decode(
                 physicalClicked: true,
-                contacts: [.init(relativeX: 30, relativeY: -20)]
+                pointerX: 30,
+                pointerY: -20,
+                contacts: [.init()]
             )
         )
 
@@ -135,7 +143,7 @@ struct AppleTrackpadSemanticTranslatorTests {
         _ = try translator.translate(
             decode(
                 physicalClicked: true,
-                contacts: [.init(relativeX: 0, relativeY: 0)]
+                contacts: [.init()]
             )
         )
 
@@ -149,9 +157,9 @@ struct AppleTrackpadSemanticTranslatorTests {
         let report = decode(
             physicalClicked: false,
             contacts: [
-                .init(relativeX: 1, relativeY: 0),
-                .init(relativeX: 1, relativeY: 0),
-                .init(relativeX: 1, relativeY: 0)
+                .init(),
+                .init(),
+                .init()
             ]
         )
 
@@ -171,8 +179,8 @@ struct AppleTrackpadSemanticTranslatorTests {
             decode(
                 physicalClicked: true,
                 contacts: [
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0)
+                    .init(),
+                    .init()
                 ]
             )
         )
@@ -181,9 +189,9 @@ struct AppleTrackpadSemanticTranslatorTests {
             decode(
                 physicalClicked: false,
                 contacts: [
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0),
-                    .init(relativeX: 0, relativeY: 0)
+                    .init(),
+                    .init(),
+                    .init()
                 ]
             )
         )
@@ -198,7 +206,7 @@ struct AppleTrackpadSemanticTranslatorTests {
         let events = try translator.translate(
             decode(
                 physicalClicked: false,
-                contacts: [.init(relativeX: 0, relativeY: 0)]
+                contacts: [.init()]
             )
         )
 
@@ -206,11 +214,12 @@ struct AppleTrackpadSemanticTranslatorTests {
     }
 
     private struct ContactFixture {
-        let relativeX: Int16
-        let relativeY: Int16
+        init() {}
     }
 
     private func decode(
+        pointerX: Int8 = 0,
+        pointerY: Int8 = 0,
         physicalClicked: Bool,
         contacts: [ContactFixture]
     ) throws -> AppleTrackpadRawReportDecoder.Report {
@@ -219,25 +228,11 @@ struct AppleTrackpadSemanticTranslatorTests {
         let length = 46 + (30 * contacts.count)
         var bytes = [UInt8](repeating: 0, count: length)
         bytes[0] = 2
+        bytes[2] = UInt8(bitPattern: pointerX)
+        bytes[3] = UInt8(bitPattern: pointerY)
         bytes[30] = UInt8(contacts.count)
         bytes[31] = physicalClicked ? 1 : 0
 
-        for (index, contact) in contacts.enumerated() {
-            let base = 48 + (index * 30)
-            putInt16LE(contact.relativeX, into: &bytes, at: base + 6)
-            putInt16LE(contact.relativeY, into: &bytes, at: base + 8)
-        }
-
         return try AppleTrackpadRawReportDecoder.decode(Data(bytes))
-    }
-
-    private func putInt16LE(
-        _ value: Int16,
-        into bytes: inout [UInt8],
-        at offset: Int
-    ) {
-        let raw = UInt16(bitPattern: value)
-        bytes[offset] = UInt8(truncatingIfNeeded: raw)
-        bytes[offset + 1] = UInt8(truncatingIfNeeded: raw >> 8)
     }
 }
