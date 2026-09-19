@@ -505,15 +505,19 @@ fi
 # identifier state, sanitize_stream, publish_sanitized, discard semantics.
 adb -s "$DEVICE" exec-out dumpsys display >"$(ev dumpsys-display.txt)"
 
-# The home Mac default JVM may be newer than this project's Kotlin compiler
-# supports; prefer an explicit 17 like CI (temurin 17).
-if ! { [ -n "${JAVA_HOME:-}" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q '"17\.'; }; then
-    for candidate in "$HOME"/.sdkman/candidates/java/17* /Library/Java/JavaVirtualMachines/*/Contents/Home; do
-        if [ -x "$candidate/bin/java" ] && "$candidate/bin/java" -version 2>&1 | grep -q '"17\.'; then
+# The helper toolchain is Java 25 LTS. Prefer the caller's JAVA_HOME when
+# it is already Java 25; otherwise select an installed Java 25 deterministically.
+if ! { [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q '"25\.'; }; then
+    for candidate in "$HOME"/.sdkman/candidates/java/current "$HOME"/.sdkman/candidates/java/25* /Library/Java/JavaVirtualMachines/*/Contents/Home; do
+        if [ -x "$candidate/bin/java" ] && "$candidate/bin/java" -version 2>&1 | grep -q '"25\.'; then
             export JAVA_HOME="$candidate"
             break
         fi
     done
+fi
+if ! { [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] && "$JAVA_HOME/bin/java" -version 2>&1 | grep -q '"25\.'; }; then
+    echo "Java 25 LTS is required for the Android helper verification build" >&2
+    exit "$EXIT_USAGE"
 fi
 # Record only version/vendor of the selected JVM - absolute toolchain paths
 # are host-identifying and never persist to evidence.
