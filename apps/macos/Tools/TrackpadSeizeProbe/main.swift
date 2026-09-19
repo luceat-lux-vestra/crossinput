@@ -186,6 +186,7 @@ private actor ProbeCounters {
 }
 
 
+@available(macOS 15.0, *)
 private struct GDMElementAggregate: Sendable {
     var updates = 0
     var logicalPositive = 0
