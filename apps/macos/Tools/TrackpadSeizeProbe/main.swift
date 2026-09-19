@@ -373,7 +373,12 @@ private actor GDMSeizedSignatureCounters {
     }
 
     func recordElementUpdates(_ values: [HIDElement.Value]) {
-        for value in values where value.element.usage == HIDUsage(page: 0xFF00, usage: 12) {
+        for value in values {
+            let usage = String(describing: value.element.usage)
+            guard usage.contains("page: 65280, usage: 12")
+                || usage.contains("page:_65280,_usage:_12") else {
+                continue
+            }
             vendor.record(value)
         }
     }
