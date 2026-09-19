@@ -10,9 +10,9 @@ struct AppleTrackpadSemanticTranslatorTests {
 
         let events = try translator.translate(
             decode(
+                physicalClicked: false,
                 pointerX: 12,
                 pointerY: -7,
-                physicalClicked: false,
                 contacts: [.init()]
             )
         )
@@ -26,9 +26,9 @@ struct AppleTrackpadSemanticTranslatorTests {
 
         let events = try translator.translate(
             decode(
+                physicalClicked: false,
                 pointerX: 8,
                 pointerY: -6,
-                physicalClicked: false,
                 contacts: [.init(), .init()]
             )
         )
@@ -218,9 +218,9 @@ struct AppleTrackpadSemanticTranslatorTests {
     }
 
     private func decode(
+        physicalClicked: Bool,
         pointerX: Int8 = 0,
         pointerY: Int8 = 0,
-        physicalClicked: Bool,
         contacts: [ContactFixture]
     ) throws -> AppleTrackpadRawReportDecoder.Report {
         precondition(!contacts.isEmpty)
