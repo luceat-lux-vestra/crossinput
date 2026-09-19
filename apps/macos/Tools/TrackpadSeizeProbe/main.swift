@@ -21,7 +21,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -47,6 +47,7 @@ private enum ProbeMode: String {
     case hybridSurface = "hybrid-surface"
     case tapLayers = "tap-layers"
     case componentInventory = "component-inventory"
+    case componentActivity = "component-activity"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -66,6 +67,56 @@ private actor DeviceReferenceCollector {
     }
 }
 #endif
+
+@available(macOS 15.0, *)
+private actor ComponentActivityCounters {
+    private var inputReports = 0
+    private var byUsage: [String: Int] = [:]
+    private var removed = false
+    private var externallySeized = false
+    private var unseized = false
+
+    func reset() {
+        inputReports = 0
+        byUsage.removeAll(keepingCapacity: true)
+        removed = false
+        externallySeized = false
+        unseized = false
+    }
+
+    func recordInputReport() {
+        inputReports += 1
+    }
+
+    func recordElementUpdates(_ values: [HIDElement.Value]) {
+        for value in values {
+            let usage = String(describing: value.element.usage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            byUsage[usage, default: 0] += 1
+        }
+    }
+
+    func recordRemoved() { removed = true }
+    func recordExternalSeizure() { externallySeized = true }
+    func recordUnseized() { unseized = true }
+
+    func snapshot() -> (
+        inputReports: Int,
+        usages: [(String, Int)],
+        removed: Bool,
+        externallySeized: Bool,
+        unseized: Bool
+    ) {
+        (
+            inputReports,
+            byUsage.sorted { $0.key < $1.key },
+            removed,
+            externallySeized,
+            unseized
+        )
+    }
+}
 
 private actor ProbeCounters {
     private(set) var inputReports = 0
@@ -305,6 +356,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .componentActivity {
+            try await runComponentActivityProbe()
+            return
+        }
+
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         print("PROBE_DISCOVERY_OK")
 
@@ -449,9 +505,170 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runComponentActivityProbe() async throws {
+        let manager = HIDDeviceManager()
+        let criteria = HIDDeviceManager.DeviceMatchingCriteria(
+            product: "Apple Internal Keyboard / Trackpad",
+            isBuiltIn: true
+        )
+        let collector = DeviceReferenceCollector()
+
+        let discoveryTask = Task {
+            do {
+                for try await notification in await manager.monitorNotifications(
+                    matchingCriteria: [criteria]
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .deviceMatched(let reference):
+                        await collector.append(reference)
+                    case .deviceRemoved:
+                        continue
+                    @unknown default:
+                        continue
+                    }
+                }
+            } catch is CancellationError {
+                // Expected when the bounded discovery window ends.
+            } catch {
+                fputs("PROBE_COMPONENT_ACTIVITY_DISCOVERY_FAIL error=\(String(describing: error))\n", stderr)
+            }
+        }
+
+        print("PROBE_COMPONENT_ACTIVITY_DISCOVERY duration_seconds=3")
+        try await Task.sleep(for: .seconds(3))
+        discoveryTask.cancel()
+        _ = await discoveryTask.result
+
+        let references = await collector.snapshot()
+        var monitored: [(
+            label: String,
+            client: HIDDeviceClient,
+            elements: [HIDElement],
+            counters: ComponentActivityCounters
+        )] = []
+
+        for reference in references {
+            guard let client = HIDDeviceClient(deviceReference: reference) else { continue }
+            let primaryUsage = await client.primaryUsage
+            let primary = String(describing: primaryUsage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+
+            // Keyboard activity is unrelated to pointer/gesture semantics and
+            // would add hundreds of inert elements to the monitor set.
+            if primaryUsage == .genericDesktop(.keyboard) {
+                continue
+            }
+
+            let elements = await client.elements
+            let descriptor = await client.descriptor
+            let label = "\(primary)|d\(descriptor.count)|e\(elements.count)"
+            monitored.append(
+                (
+                    label: label,
+                    client: client,
+                    elements: elements,
+                    counters: ComponentActivityCounters()
+                )
+            )
+        }
+
+        print("PROBE_COMPONENT_ACTIVITY_COMPONENTS count=\(monitored.count)")
+        for item in monitored {
+            print("PROBE_COMPONENT_ACTIVITY_COMPONENT label=\(item.label)")
+        }
+
+        let monitorTasks = monitored.map { item in
+            Task {
+                do {
+                    for try await notification in await item.client.monitorNotifications(
+                        reportIDsToMonitor: [HIDReportID.allReports],
+                        elementsToMonitor: item.elements
+                    ) {
+                        if Task.isCancelled { break }
+                        switch notification {
+                        case .inputReport:
+                            await item.counters.recordInputReport()
+                        case .elementUpdates(let values):
+                            await item.counters.recordElementUpdates(values)
+                        case .deviceRemoved:
+                            await item.counters.recordRemoved()
+                        case .deviceSeized:
+                            await item.counters.recordExternalSeizure()
+                        case .deviceUnseized:
+                            await item.counters.recordUnseized()
+                        @unknown default:
+                            break
+                        }
+                    }
+                } catch is CancellationError {
+                    // Expected when characterization ends.
+                } catch {
+                    fputs(
+                        "PROBE_COMPONENT_ACTIVITY_MONITOR_FAIL label=\(item.label) "
+                            + "error=\(String(describing: error))\n",
+                        stderr
+                    )
+                }
+            }
+        }
+
+        let phases: [(name: String, instruction: String, seconds: Int)] = [
+            ("IDLE", "do_not_touch_trackpad", 3),
+            ("MOVE_RIGHT", "move_one_finger_right_only", 3),
+            ("PRIMARY_CLICK", "perform_normal_primary_clicks", 3),
+            ("SECONDARY_CLICK", "perform_normal_secondary_clicks", 3),
+            ("SCROLL_VERTICAL", "two_finger_scroll_vertically", 4),
+            ("SCROLL_HORIZONTAL", "two_finger_scroll_horizontally", 4)
+        ]
+
+        for phase in phases {
+            for item in monitored {
+                await item.counters.reset()
+            }
+
+            print(
+                "PROBE_COMPONENT_ACTIVITY_PHASE_BEGIN name=\(phase.name) "
+                    + "instruction=\(phase.instruction) duration_seconds=\(phase.seconds)"
+            )
+            try await Task.sleep(for: .seconds(phase.seconds))
+
+            for item in monitored {
+                let snapshot = await item.counters.snapshot()
+                print(
+                    "PROBE_COMPONENT_ACTIVITY_PHASE_END name=\(phase.name) "
+                        + "label=\(item.label) "
+                        + "input_reports=\(snapshot.inputReports) "
+                        + "usage_bucket_count=\(snapshot.usages.count) "
+                        + "device_removed=\(snapshot.removed) "
+                        + "externally_seized=\(snapshot.externallySeized) "
+                        + "unseized=\(snapshot.unseized)"
+                )
+                for (usage, count) in snapshot.usages {
+                    print(
+                        "PROBE_COMPONENT_ACTIVITY_USAGE phase=\(phase.name) "
+                            + "label=\(item.label) "
+                            + "usage=\(usage) updates=\(count)"
+                    )
+                }
+            }
+        }
+
+        for task in monitorTasks {
+            task.cancel()
+        }
+        for task in monitorTasks {
+            _ = await task.result
+        }
+
+        print("PROBE_END boundary=component_activity")
     }
 
     @available(macOS 15.0, *)
