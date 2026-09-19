@@ -22,7 +22,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|gdm-semantic-signature|gdm-seized-classifier|virtual-device-capability|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|gdm-semantic-signature|gdm-seized-classifier|gdm-seized-signature|virtual-device-capability|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -53,6 +53,7 @@ private enum ProbeMode: String {
     case componentActivity = "component-activity"
     case gdmSemanticSignature = "gdm-semantic-signature"
     case gdmSeizedClassifier = "gdm-seized-classifier"
+    case gdmSeizedSignature = "gdm-seized-signature"
     case virtualDeviceCapability = "virtual-device-capability"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
@@ -353,6 +354,121 @@ private actor GDMSeizedClassifierCounters {
             )
         }
         return lines
+    }
+}
+
+private struct GDMVendorSignatureSnapshot: Sendable {
+    let updates: Int
+    let bitOnes: [Int]
+    let bitTransitions: [Int]
+    let byteLengthCounts: [Int: Int]
+}
+
+@available(macOS 15.0, *)
+private actor GDMSeizedSignatureCounters {
+    private var vendor = GDMElementAggregate()
+
+    func reset() {
+        vendor = GDMElementAggregate()
+    }
+
+    func recordElementUpdates(_ values: [HIDElement.Value]) {
+        for value in values where value.element.usage == HIDUsage(page: 0xFF00, usage: 12) {
+            vendor.record(value)
+        }
+    }
+
+    func snapshot() -> GDMVendorSignatureSnapshot {
+        GDMVendorSignatureSnapshot(
+            updates: vendor.updates,
+            bitOnes: vendor.bitOnes,
+            bitTransitions: vendor.bitTransitions,
+            byteLengthCounts: vendor.byteLengthCounts
+        )
+    }
+}
+
+private struct GDMStableBitCandidate: Sendable {
+    let bit: Int
+    let metric: String
+    let direction: String
+    let minimumDifference: Double
+    let averageDifference: Double
+}
+
+private func stableBitCandidates(
+    left: [GDMVendorSignatureSnapshot],
+    right: [GDMVendorSignatureSnapshot],
+    minimumPerRoundDifference: Double = 0.15
+) -> [GDMStableBitCandidate] {
+    let rounds = min(left.count, right.count)
+    guard rounds > 0 else { return [] }
+
+    let maxBits = max(
+        left.map { $0.bitOnes.count }.max() ?? 0,
+        right.map { $0.bitOnes.count }.max() ?? 0
+    )
+    var candidates: [GDMStableBitCandidate] = []
+
+    func rate(_ values: [Int], _ bit: Int, denominator: Int) -> Double {
+        guard denominator > 0, bit < values.count else { return 0 }
+        return Double(values[bit]) / Double(denominator)
+    }
+
+    for bit in 0..<maxBits {
+        for metric in ["ones", "transitions"] {
+            var differences: [Double] = []
+            var valid = true
+
+            for round in 0..<rounds {
+                let a = left[round]
+                let b = right[round]
+                guard a.updates > 0, b.updates > 0 else {
+                    valid = false
+                    break
+                }
+
+                let diff: Double
+                if metric == "ones" {
+                    diff = rate(b.bitOnes, bit, denominator: b.updates)
+                        - rate(a.bitOnes, bit, denominator: a.updates)
+                } else {
+                    diff = rate(
+                        b.bitTransitions,
+                        bit,
+                        denominator: max(1, b.updates - 1)
+                    ) - rate(
+                        a.bitTransitions,
+                        bit,
+                        denominator: max(1, a.updates - 1)
+                    )
+                }
+                differences.append(diff)
+            }
+
+            guard valid, differences.count == rounds else { continue }
+            let allPositive = differences.allSatisfy { $0 >= minimumPerRoundDifference }
+            let allNegative = differences.allSatisfy { $0 <= -minimumPerRoundDifference }
+            guard allPositive || allNegative else { continue }
+
+            let absolute = differences.map(abs)
+            candidates.append(
+                GDMStableBitCandidate(
+                    bit: bit,
+                    metric: metric,
+                    direction: allPositive ? "right_gt_left" : "left_gt_right",
+                    minimumDifference: absolute.min() ?? 0,
+                    averageDifference: absolute.reduce(0, +) / Double(absolute.count)
+                )
+            )
+        }
+    }
+
+    return candidates.sorted {
+        if $0.minimumDifference == $1.minimumDifference {
+            return $0.averageDifference > $1.averageDifference
+        }
+        return $0.minimumDifference > $1.minimumDifference
     }
 }
 
@@ -738,6 +854,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .gdmSeizedSignature {
+            try await runGDMSeizedSignatureProbe(client: client, elements: elements)
+            return
+        }
+
         if mode == .descriptorSemantics {
             let semantics: HIDPointerXYSemantics
             do {
@@ -809,9 +930,118 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .gdmSemanticSignature, .gdmSeizedClassifier, .virtualDeviceCapability:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .gdmSemanticSignature, .gdmSeizedClassifier, .gdmSeizedSignature, .virtualDeviceCapability:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runGDMSeizedSignatureProbe(
+        client: HIDDeviceClient,
+        elements: [HIDElement]
+    ) async throws {
+        print(
+            "PROBE_SEIZED_SIGNATURE_BEGIN rounds=3 "
+                + "raw_payload_logging=false stable_difference_threshold=0.15"
+        )
+        try await client.seizeDevice()
+        print("PROBE_SEIZE_OK")
+
+        let counters = GDMSeizedSignatureCounters()
+        let monitorTask = Task {
+            do {
+                for try await notification in await client.monitorNotifications(
+                    reportIDsToMonitor: [HIDReportID.allReports],
+                    elementsToMonitor: elements
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .elementUpdates(let values):
+                        await counters.recordElementUpdates(values)
+                    case .deviceRemoved:
+                        print("PROBE_SEIZED_SIGNATURE_DEVICE_REMOVED")
+                    case .deviceSeized:
+                        print("PROBE_SEIZED_SIGNATURE_EXTERNALLY_SEIZED")
+                    case .deviceUnseized:
+                        print("PROBE_SEIZED_SIGNATURE_UNSEIZED")
+                    default:
+                        break
+                    }
+                }
+            } catch is CancellationError {
+                // Expected when the bounded characterization completes.
+            } catch {
+                fputs(
+                    "PROBE_SEIZED_SIGNATURE_MONITOR_FAIL error=\(String(describing: error))\n",
+                    stderr
+                )
+            }
+        }
+
+        let phases: [(name: String, instruction: String)] = [
+            ("ONE_FINGER_RIGHT", "move_one_finger_right_only"),
+            ("TWO_FINGER_RIGHT", "move_two_fingers_right_only"),
+            ("PRIMARY_CLICK", "perform_multiple_normal_primary_clicks"),
+            ("SECONDARY_CLICK", "perform_multiple_normal_secondary_clicks"),
+            ("TWO_FINGER_UP", "move_two_fingers_up_only")
+        ]
+
+        var snapshots: [String: [GDMVendorSignatureSnapshot]] = [:]
+
+        for round in 1...3 {
+            print("PROBE_SEIZED_SIGNATURE_ROUND_BEGIN round=\(round)")
+            for phase in phases {
+                await counters.reset()
+                print(
+                    "PROBE_SEIZED_SIGNATURE_PHASE_BEGIN round=\(round) "
+                        + "name=\(phase.name) instruction=\(phase.instruction) "
+                        + "duration_seconds=2"
+                )
+                try await Task.sleep(for: .seconds(2))
+                let snapshot = await counters.snapshot()
+                snapshots[phase.name, default: []].append(snapshot)
+
+                let lengths = snapshot.byteLengthCounts
+                    .sorted(by: { $0.key < $1.key })
+                    .map { "\($0.key):\($0.value)" }
+                    .joined(separator: ",")
+                print(
+                    "PROBE_SEIZED_SIGNATURE_PHASE_END round=\(round) "
+                        + "name=\(phase.name) vendor_updates=\(snapshot.updates) "
+                        + "byte_lengths=\(lengths)"
+                )
+            }
+        }
+
+        let comparisons = [
+            ("ONE_VS_TWO_RIGHT", "ONE_FINGER_RIGHT", "TWO_FINGER_RIGHT"),
+            ("PRIMARY_VS_SECONDARY", "PRIMARY_CLICK", "SECONDARY_CLICK"),
+            ("ONE_RIGHT_VS_TWO_UP", "ONE_FINGER_RIGHT", "TWO_FINGER_UP")
+        ]
+
+        for comparison in comparisons {
+            let left = snapshots[comparison.1] ?? []
+            let right = snapshots[comparison.2] ?? []
+            let candidates = stableBitCandidates(left: left, right: right)
+            print(
+                "PROBE_SEIZED_SIGNATURE_COMPARE name=\(comparison.0) "
+                    + "stable_candidate_count=\(candidates.count)"
+            )
+            for candidate in candidates.prefix(8) {
+                print(
+                    "PROBE_SEIZED_SIGNATURE_CANDIDATE compare=\(comparison.0) "
+                        + "bit=\(candidate.bit) metric=\(candidate.metric) "
+                        + "direction=\(candidate.direction) "
+                        + "min_diff=\(String(format: "%.3f", candidate.minimumDifference)) "
+                        + "avg_diff=\(String(format: "%.3f", candidate.averageDifference))"
+                )
+            }
+        }
+
+        monitorTask.cancel()
+        _ = await monitorTask.result
+        print("PROBE_RELEASE client_lifetime_ending=true")
+        print("PROBE_END boundary=gdm_seized_signature")
     }
 
     @available(macOS 15.0, *)
