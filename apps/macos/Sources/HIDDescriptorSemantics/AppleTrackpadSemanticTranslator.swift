@@ -1,21 +1,20 @@
 import Foundation
 
-/// Research semantic translator for decoded Apple built-in trackpad reports.
+/// Research semantic translator for the minimum proven Apple built-in trackpad
+/// CoreHID surface.
 ///
-/// This intentionally implements only the pointer surface currently required
-/// by Ampersand:
-/// - exactly one contact -> standard HID relative X/Y pointer movement
-/// - exactly two contacts -> standard HID relative X/Y as scroll delta
-/// - click transition with one contact -> primary button
-/// - click transition with two contacts -> secondary button
+/// Rules:
+/// - Button1 is the physical click source.
+/// - one contact + Button1 press -> primary button.
+/// - two contacts + Button1 press -> secondary button.
+/// - one contact + X/Y -> pointer move.
+/// - two contacts + X/Y -> scroll.
+/// - Button2/3 and three-or-more-contact gestures are rejected rather than
+///   guessed.
 ///
-/// Three-or-more-contact gestures are rejected rather than guessed.
-/// Scroll sign/scaling is preserved from the standard HID relative axes and must be
-/// calibrated at the production bridge, not hidden in this decoder.
-///
-/// Button identity is latched on press so a contact-count change cannot turn a
+/// Button identity is latched on press so contact-count changes cannot turn a
 /// secondary press into a primary release. reset() emits a compensating
-/// release to prevent a remote button from remaining stuck when ownership ends.
+/// release to prevent a downstream stuck-button state on ownership loss.
 public struct AppleTrackpadSemanticTranslator: Sendable {
     public enum Button: UInt32, Equatable, Sendable {
         case primary = 0
@@ -30,6 +29,7 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
 
     public enum TranslationError: Error, Equatable, Sendable {
         case unsupportedContactCount(Int)
+        case unsupportedButtonBits
         case invalidState
     }
 
@@ -40,14 +40,14 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
     public mutating func translate(
         _ report: AppleTrackpadRawReportDecoder.Report
     ) throws -> [Event] {
-        guard report.contactCount == report.contacts.count else {
-            throw TranslationError.invalidState
+        guard !report.buttons.secondary, !report.buttons.other else {
+            throw TranslationError.unsupportedButtonBits
         }
 
-        var events: [Event] = []
+        let clicked = report.buttons.primary
         let wasClicked = activeButton != nil
 
-        if report.physicalClicked && !wasClicked {
+        if clicked && !wasClicked {
             let button: Button
             switch report.contactCount {
             case 1:
@@ -59,43 +59,34 @@ public struct AppleTrackpadSemanticTranslator: Sendable {
             }
 
             activeButton = button
-            events.append(.button(button, down: true))
-            // Do not translate movement from the transition packet. Mechanical
-            // click-down frequently carries incidental contact jitter.
-            return events
+            return [.button(button, down: true)]
         }
 
-        if !report.physicalClicked && wasClicked {
+        if !clicked && wasClicked {
             guard let button = activeButton else {
                 throw TranslationError.invalidState
             }
             activeButton = nil
-            events.append(.button(button, down: false))
-            // Same rule on release: avoid turning release jitter into motion.
-            return events
+            return [.button(button, down: false)]
         }
 
         let dx = Int32(report.pointerX)
         let dy = Int32(report.pointerY)
 
         guard dx != 0 || dy != 0 else {
-            return events
+            return []
         }
 
         switch report.contactCount {
         case 1:
-            events.append(.move(dx: dx, dy: dy))
+            return [.move(dx: dx, dy: dy)]
         case 2:
-            events.append(.scroll(horizontal: dx, vertical: dy))
+            return [.scroll(horizontal: dx, vertical: dy)]
         default:
             throw TranslationError.unsupportedContactCount(report.contactCount)
         }
-
-        return events
     }
 
-    /// Ends translator ownership. If a button is logically held, emit its
-    /// matching release so the downstream target cannot retain a stuck button.
     public mutating func reset() -> [Event] {
         guard let button = activeButton else {
             return []
