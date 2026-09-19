@@ -21,7 +21,7 @@ private enum ProbeFailure: Error, CustomStringConvertible {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -46,10 +46,26 @@ private enum ProbeMode: String {
     case inputSurface = "input-surface"
     case hybridSurface = "hybrid-surface"
     case tapLayers = "tap-layers"
+    case componentInventory = "component-inventory"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
 }
+
+#if canImport(CoreHID)
+@available(macOS 15.0, *)
+private actor DeviceReferenceCollector {
+    private var references: [HIDDeviceClient.DeviceReference] = []
+
+    func append(_ reference: HIDDeviceClient.DeviceReference) {
+        references.append(reference)
+    }
+
+    func snapshot() -> [HIDDeviceClient.DeviceReference] {
+        references
+    }
+}
+#endif
 
 private actor ProbeCounters {
     private(set) var inputReports = 0
@@ -284,6 +300,11 @@ private struct TrackpadSeizeProbe {
         print("PROBE_PRECONDITION active_key_resizable_window_required=true native_directional_cursor_must_be_HEALTHY_before_start=true")
         print("PROBE_ORACLE keep_same_window_key=true test_same_resize_edge_before_and_after=true")
 
+        if mode == .componentInventory {
+            try await runComponentInventoryProbe()
+            return
+        }
+
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         print("PROBE_DISCOVERY_OK")
 
@@ -428,9 +449,103 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runComponentInventoryProbe() async throws {
+        let manager = HIDDeviceManager()
+        let criteria = HIDDeviceManager.DeviceMatchingCriteria(
+            product: "Apple Internal Keyboard / Trackpad",
+            isBuiltIn: true
+        )
+        let collector = DeviceReferenceCollector()
+
+        let monitorTask = Task {
+            do {
+                for try await notification in await manager.monitorNotifications(
+                    matchingCriteria: [criteria]
+                ) {
+                    if Task.isCancelled { break }
+                    switch notification {
+                    case .deviceMatched(let reference):
+                        await collector.append(reference)
+                    case .deviceRemoved:
+                        continue
+                    @unknown default:
+                        continue
+                    }
+                }
+            } catch is CancellationError {
+                // Expected after the bounded discovery window.
+            } catch {
+                fputs("PROBE_COMPONENT_INVENTORY_MONITOR_FAIL error=\(String(describing: error))\n", stderr)
+            }
+        }
+
+        print("PROBE_COMPONENT_INVENTORY_DISCOVERY duration_seconds=3 product=Apple_Internal_Keyboard_Trackpad built_in=true")
+        try await Task.sleep(for: .seconds(3))
+        monitorTask.cancel()
+        _ = await monitorTask.result
+
+        let references = await collector.snapshot()
+        print("PROBE_COMPONENT_INVENTORY_MATCHES count=\(references.count)")
+
+        for (index, reference) in references.enumerated() {
+            guard let client = HIDDeviceClient(deviceReference: reference) else {
+                print("PROBE_COMPONENT index=\(index) client_creation=false")
+                continue
+            }
+
+            let primaryUsage = await client.primaryUsage
+            let deviceUsages = await client.deviceUsages
+            let descriptor = await client.descriptor
+            let elements = await client.elements
+            let transport = await client.transport
+            let locationID = await client.locationID
+            let uniqueID = await client.uniqueID
+
+            var usageCounts: [String: Int] = [:]
+            for element in elements {
+                let usage = String(describing: element.usage)
+                    .replacingOccurrences(of: " ", with: "_")
+                    .replacingOccurrences(of: "\n", with: "_")
+                usageCounts[usage, default: 0] += 1
+            }
+
+            let primary = String(describing: primaryUsage)
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "\n", with: "_")
+            let supported = deviceUsages
+                .map {
+                    String(describing: $0)
+                        .replacingOccurrences(of: " ", with: "_")
+                        .replacingOccurrences(of: "\n", with: "_")
+                }
+                .joined(separator: ",")
+
+            print(
+                "PROBE_COMPONENT index=\(index) "
+                    + "primary_usage=\(primary) "
+                    + "device_usage_count=\(deviceUsages.count) "
+                    + "descriptor_length=\(descriptor.count) "
+                    + "element_count=\(elements.count) "
+                    + "transport=\(String(describing: transport)) "
+                    + "location_id_present=\(locationID != nil) "
+                    + "unique_id_present=\(uniqueID != nil)"
+            )
+            print("PROBE_COMPONENT_USAGES index=\(index) usages=\(supported)")
+            for (usage, count) in usageCounts.sorted(by: { $0.key < $1.key }) {
+                print(
+                    "PROBE_COMPONENT_ELEMENT_USAGE index=\(index) "
+                        + "usage=\(usage) count=\(count)"
+                )
+            }
+        }
+
+        print("PROBE_END boundary=component_inventory")
     }
 
     @available(macOS 15.0, *)
