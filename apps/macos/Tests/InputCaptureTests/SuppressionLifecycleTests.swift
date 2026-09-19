@@ -16,6 +16,19 @@ private final class KeyCleanupObservation: @unchecked Sendable {
     var cleanup: [CapturedKeyEvent] = []
 }
 
+private final class PointerEmissionObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [PointerEvent] = []
+
+    func append(_ event: PointerEvent) {
+        lock.withLock { storage.append(event) }
+    }
+
+    var events: [PointerEvent] {
+        lock.withLock { storage }
+    }
+}
+
 private final class GenerationObservation: @unchecked Sendable {
     private let lock = NSLock()
     private var generation: UInt64?
@@ -138,6 +151,71 @@ final class SuppressionLifecycleTests: XCTestCase {
     /// A tap callback that began in suppression generation A must retain A's
     /// identity even when return and a new suppression generation B complete
     /// before the callback emits its event.
+
+    func testExternalPointerOwnerConsumesPointerWithoutQuartzForwarding() {
+        let capture = makeCapture()
+        let observation = PointerEmissionObservation()
+        capture.onPointerEvent = { observation.append($0) }
+
+        XCTAssertEqual(capture.suppressWithExternalPointerOwner(), 1)
+
+        let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        event.setIntegerValueField(.mouseEventDeltaX, value: 8)
+        event.setIntegerValueField(.mouseEventDeltaY, value: -4)
+
+        XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: event))
+        XCTAssertTrue(observation.events.isEmpty)
+
+        capture.release(reason: .normalReturn)
+    }
+
+    func testExternalPointerOwnerStillSuppressesAndForwardsKeyboard() {
+        let capture = makeCapture()
+        let observation = KeyCleanupObservation()
+        capture.onKeyEvent = { observation.ordinary.append($0) }
+
+        XCTAssertEqual(capture.suppressWithExternalPointerOwner(), 1)
+
+        let keyDown = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+
+        XCTAssertNil(capture.handleForTesting(type: .keyDown, event: keyDown))
+        XCTAssertEqual(observation.ordinary.map(\.key), [.a])
+        XCTAssertEqual(observation.ordinary.map(\.transition), [.down])
+
+        capture.release(reason: .captureStopped)
+    }
+
+    func testExternalPointerOwnerNormalReturnNeverRestoresQuartzPointer() {
+        let observation = PointerStateObservation()
+        let capture = makeCapture(restore: { observation.restoreCount += 1 })
+
+        XCTAssertEqual(capture.suppressWithExternalPointerOwner(), 1)
+        capture.release(reason: .normalReturn)
+
+        XCTAssertEqual(observation.restoreCount, 0)
+        XCTAssertTrue(capture.isAwaitingEdgeExitForTesting)
+        XCTAssertFalse(capture.isSuppressed)
+    }
+
+    func testLegacySuppressionStillUsesPointerRestore() {
+        let observation = PointerStateObservation()
+        let capture = makeCapture(restore: { observation.restoreCount += 1 })
+
+        XCTAssertEqual(capture.suppress(), 1)
+        capture.release(reason: .normalReturn)
+
+        XCTAssertEqual(observation.restoreCount, 1)
+    }
+
     func testSuppressedEventRetainsGenerationAcrossReturnAndReentry() {
         let enteredEmission = DispatchSemaphore(value: 0)
         let continueEmission = DispatchSemaphore(value: 0)
