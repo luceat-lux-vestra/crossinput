@@ -15,13 +15,14 @@ private enum ProbeFailure: Error, CustomStringConvertible {
     case wrongDevice(String)
     case noXYElements
     case descriptorSemantics(String)
+    case virtualDeviceCreation
 
     var description: String {
         switch self {
         case .unsupportedOS:
             return "CoreHID is unavailable on this macOS version"
         case .invalidMode(let value):
-            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|monitor-only|seize-only|seize-monitor"
+            return "invalid or missing mode=\(value ?? "nil"); use --mode discovery-only|client-only|identity-only|metadata-only|descriptor-semantics|synchronous-release|input-surface|hybrid-surface|tap-layers|component-inventory|component-activity|virtual-device-capability|monitor-only|seize-only|seize-monitor"
         case .discoveryTimeout:
             return "no built-in Apple trackpad mouse component was discovered before timeout"
         case .clientCreation:
@@ -32,6 +33,8 @@ private enum ProbeFailure: Error, CustomStringConvertible {
             return "matched device exposes no Generic Desktop X/Y elements"
         case .descriptorSemantics(let detail):
             return "descriptor did not prove unambiguous relative X/Y semantics: \(detail)"
+        case .virtualDeviceCreation:
+            return "HIDVirtualDevice creation failed; verify virtual HID capability/entitlement and signing"
         }
     }
 }
@@ -48,6 +51,7 @@ private enum ProbeMode: String {
     case tapLayers = "tap-layers"
     case componentInventory = "component-inventory"
     case componentActivity = "component-activity"
+    case virtualDeviceCapability = "virtual-device-capability"
     case monitorOnly = "monitor-only"
     case seizeOnly = "seize-only"
     case seizeMonitor = "seize-monitor"
@@ -67,6 +71,30 @@ private actor DeviceReferenceCollector {
     }
 }
 #endif
+
+@available(macOS 15.0, *)
+private final class ProbeVirtualDeviceDelegate: HIDVirtualDeviceDelegate, @unchecked Sendable {
+    func hidVirtualDevice(
+        _ device: HIDVirtualDevice,
+        receivedSetReportRequestOfType type: HIDReportType,
+        id: HIDReportID?,
+        data: Data
+    ) async throws {
+        // Capability probe only. No payload logging and no device-specific
+        // output behavior is required.
+    }
+
+    func hidVirtualDevice(
+        _ device: HIDVirtualDevice,
+        receivedGetReportRequestOfType type: HIDReportType,
+        id: HIDReportID?,
+        maxSize: Int
+    ) async throws -> Data {
+        // Return an empty response rather than inventing device state. This
+        // probe only validates creation/activation/visibility.
+        Data()
+    }
+}
 
 @available(macOS 15.0, *)
 private actor ComponentActivityCounters {
@@ -361,6 +389,11 @@ private struct TrackpadSeizeProbe {
             return
         }
 
+        if mode == .virtualDeviceCapability {
+            try await runVirtualDeviceCapabilityProbe()
+            return
+        }
+
         let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
         print("PROBE_DISCOVERY_OK")
 
@@ -505,9 +538,85 @@ private struct TrackpadSeizeProbe {
             print("PROBE_RELEASE client_lifetime_ending=true")
             print("PROBE_END boundary=device_seizure_plus_monitor expected_local_pointer=immediate expected_post_cursor_health=HEALTHY")
 
-        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity:
+        case .discoveryOnly, .clientOnly, .identityOnly, .metadataOnly, .descriptorSemantics, .synchronousRelease, .inputSurface, .hybridSurface, .tapLayers, .componentInventory, .componentActivity, .virtualDeviceCapability:
             fatalError("pre-monitor probe mode should have returned before control-stage switch")
         }
+    }
+
+    @available(macOS 15.0, *)
+    private static func runVirtualDeviceCapabilityProbe() async throws {
+        print("PROBE_VIRTUAL_CAPABILITY_BEGIN physical_seize=false input_dispatch=false")
+
+        let reference = try await discoverBuiltInTrackpadMouse(timeout: .seconds(3))
+        guard let physicalClient = HIDDeviceClient(deviceReference: reference) else {
+            throw ProbeFailure.clientCreation
+        }
+
+        let descriptor = await physicalClient.descriptor
+        let semantics: HIDPointerXYSemantics
+        do {
+            semantics = try HIDReportDescriptorSemantics.analyzePointerXY(descriptor: descriptor)
+        } catch {
+            throw ProbeFailure.descriptorSemantics(String(describing: error))
+        }
+        guard semantics.provesUnambiguousRelativeXY else {
+            throw ProbeFailure.descriptorSemantics("physical descriptor lost strict relative X/Y proof")
+        }
+
+        print(
+            "PROBE_VIRTUAL_DESCRIPTOR_OK descriptor_length=\(descriptor.count) "
+                + "strict_relative_xy=true"
+        )
+
+        let properties = HIDVirtualDevice.Properties(
+            descriptor: descriptor,
+            vendorID: 1,
+            productID: 1,
+            transport: .virtual,
+            product: "Ampersand CoreHID Relay Probe",
+            manufacturer: "Ampersand",
+            uniqueID: "ampersand-corehid-relay-probe"
+        )
+
+        guard let virtualDevice = HIDVirtualDevice(properties: properties) else {
+            print("PROBE_VIRTUAL_CREATE_FAIL")
+            throw ProbeFailure.virtualDeviceCreation
+        }
+        print("PROBE_VIRTUAL_CREATE_OK")
+
+        let delegate = ProbeVirtualDeviceDelegate()
+        await virtualDevice.activate(delegate: delegate)
+        print("PROBE_VIRTUAL_ACTIVATE_OK")
+
+        guard let virtualClient = HIDDeviceClient(deviceReference: virtualDevice.deviceReference) else {
+            throw ProbeFailure.clientCreation
+        }
+
+        let product = await virtualClient.product
+        let transport = await virtualClient.transport
+        let primaryUsage = await virtualClient.primaryUsage
+        let virtualDescriptor = await virtualClient.descriptor
+
+        let productMatches = product == "Ampersand CoreHID Relay Probe"
+        let transportIsVirtual = transport == .virtual
+        let primaryIsMouse = primaryUsage == .genericDesktop(.mouse)
+        let descriptorMatches = virtualDescriptor == descriptor
+
+        print(
+            "PROBE_VIRTUAL_VISIBLE "
+                + "product_matches=\(productMatches) "
+                + "transport_virtual=\(transportIsVirtual) "
+                + "primary_mouse=\(primaryIsMouse) "
+                + "descriptor_matches=\(descriptorMatches)"
+        )
+
+        guard productMatches, transportIsVirtual, primaryIsMouse, descriptorMatches else {
+            throw ProbeFailure.wrongDevice(
+                "virtual device visibility contract failed"
+            )
+        }
+
+        print("PROBE_END boundary=virtual_device_capability result=PASS")
     }
 
     @available(macOS 15.0, *)
