@@ -1,7 +1,7 @@
 import Foundation
 import Protocol
 import AndroidBridge
-import InputCapture
+import InputDomain
 import Diagnostics
 
 /// Outcome of one admitted pointer batch that entered the delivery lifecycle
@@ -106,7 +106,7 @@ public final class InputSender: @unchecked Sendable {
     /// supplied by the enqueue that created the batch and may be nil when a
     /// caller only needs the synchronous admission outcome.
     private struct PendingPointerBatch {
-        var event: PointerEvent
+        var event: SemanticPointerEvent
         let completion: (@Sendable (PointerDeliveryResult) -> Void)?
         let pointerGeneration: UInt64
         let sessionGeneration: UInt64
@@ -115,8 +115,8 @@ public final class InputSender: @unchecked Sendable {
     /// Returns the accumulated kind when `newer` may merge into an adjacent
     /// `older` batch tail, else nil. Buttons never merge: dropping or
     /// reordering a down/up pair can leave remote button state inconsistent.
-    private static func coalesced(_ older: PointerEvent.Kind,
-                                  _ newer: PointerEvent.Kind) -> PointerEvent.Kind? {
+    private static func coalesced(_ older: SemanticPointerEvent.Kind,
+                                  _ newer: SemanticPointerEvent.Kind) -> SemanticPointerEvent.Kind? {
         switch (older, newer) {
         case let (.move(dx, dy), .move(dx2, dy2)):
             return .move(dx: saturatingAdd(dx, dx2), dy: saturatingAdd(dy, dy2))
@@ -163,7 +163,7 @@ public final class InputSender: @unchecked Sendable {
     /// Admission is O(1): tail inspection, tail merge, capacity check,
     /// amortized-O(1) append. No backward scans, no callback bookkeeping.
     @discardableResult
-    public func enqueuePointer(_ event: PointerEvent,
+    public func enqueuePointer(_ event: SemanticPointerEvent,
                                completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil)
         -> PointerAdmissionOutcome {
         let sessionSnapshot = session.snapshot()
@@ -179,7 +179,7 @@ public final class InputSender: @unchecked Sendable {
                 // Same-kind accumulation preserves ordering: merging only ever
                 // rewrites the tail batch's payload. Its existing completion
                 // stays the single acknowledgement for the whole batch.
-                pendingPointers[pendingPointers.count - 1].event = PointerEvent(mergedKind)
+                pendingPointers[pendingPointers.count - 1].event = SemanticPointerEvent(mergedKind)
                 if case .scroll = event.kind { scrollMergedIntoTail = true }
                 outcome = .coalescedIntoExistingBatch
             } else if pendingPointers.count < maxPendingPointerItems {
@@ -231,14 +231,14 @@ public final class InputSender: @unchecked Sendable {
     }
 
     /// Only move/scroll may be shed under pressure: their payload is additive.
-    private static func isSheddable(_ kind: PointerEvent.Kind) -> Bool {
+    private static func isSheddable(_ kind: SemanticPointerEvent.Kind) -> Bool {
         switch kind {
         case .move, .scroll: return true
         case .button: return false
         }
     }
 
-    public func enqueueKey(_ event: CapturedKeyEvent) {
+    public func enqueueKey(_ event: SemanticKeyEvent) {
         let sessionSnapshot = session.snapshot()
         keyboardQueue.async { [weak self] in
             self?.deliverKey(event, snapshot: sessionSnapshot)
@@ -250,7 +250,7 @@ public final class InputSender: @unchecked Sendable {
     /// delivery, so a control epoch ending while this item is queued drops it
     /// instead of forwarding it after Disable or Disconnect.
     public func enqueueKey(
-        _ event: CapturedKeyEvent,
+        _ event: SemanticKeyEvent,
         deliveryGuard: @escaping @Sendable () -> Bool
     ) {
         let sessionSnapshot = session.snapshot()
@@ -280,7 +280,7 @@ public final class InputSender: @unchecked Sendable {
         pointerQueue.sync {}
     }
 
-    /// Schedules cleanup after key-up events already queued by InputCapture.
+    /// Schedules cleanup after key-up events already queued by host capture.
     /// Local pointer recovery and the triggering external-control event never
     /// wait for a remote request or transport write.
     public func resetCapturedInputState() {
@@ -486,7 +486,7 @@ public final class InputSender: @unchecked Sendable {
         onDeliveryObservation?(observation)
     }
 
-    static func requestKind(for kind: PointerEvent.Kind) -> RequestObservation.Kind {
+    static func requestKind(for kind: SemanticPointerEvent.Kind) -> RequestObservation.Kind {
         switch kind {
         case .move: return .pointerMoveRel
         case .button: return .pointerButton
@@ -494,16 +494,20 @@ public final class InputSender: @unchecked Sendable {
         }
     }
 
-    private func deliverKey(_ event: CapturedKeyEvent, snapshot: SessionSnapshot) {
+    private func deliverKey(_ event: SemanticKeyEvent, snapshot: SessionSnapshot) {
         guard snapshot.generation == session.snapshot().generation,
               let connection = snapshot.connection else { return }
         do {
-            try connection.send(CxiFrame(type: .keyEvent,
-                                          requestId: 1,
-                                          payload: Messages.keyEvent(keyCode: UInt16(event.keyCode),
-                                                                     metaState: event.metaState,
-                                                                     action: event.action,
-                                                                     repeatCount: event.repeatCount)))
+            try connection.send(CxiFrame(
+                type: .keyEvent,
+                requestId: 1,
+                payload: Messages.keyEvent(
+                    keyCode: AndroidKeyCodeMapper.keyCode(for: event.key),
+                    metaState: AndroidKeyCodeMapper.metaState(for: event.modifiers),
+                    action: AndroidKeyCodeMapper.action(for: event.transition),
+                    repeatCount: event.repeatCount
+                )
+            ))
         } catch {
             // Key delivery failures are converted into the same control
             // fail-safe by the session/helper termination path. Do not log

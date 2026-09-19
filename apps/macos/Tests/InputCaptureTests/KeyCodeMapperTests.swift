@@ -1,46 +1,47 @@
 import Testing
 @testable import InputCapture
+import InputDomain
 import CoreGraphics
 
 struct KeyCodeMapperTests {
-    @Test func lettersMapToAndroidKeyCodes() {
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x00) == 29) // A
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x06) == 54) // Z
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x01) == 47) // S
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x0C) == 45) // Q
+    @Test func lettersMapToSemanticKeys() {
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x00) == .a)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x06) == .z)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x01) == .s)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x0C) == .q)
     }
 
     @Test func digitsRowMaps() {
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x12) == 8)  // 1
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x1D) == 7)  // 0
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x12) == .digit1)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x1D) == .digit0)
     }
 
     @Test func navigationMaps() {
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x33) == 67)  // delete/backspace
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x35) == 111) // escape
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x31) == 62)  // space
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x7E) == 19)  // up arrow
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x7B) == 21)  // left arrow
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x73) == 122) // home
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x77) == 123) // end
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x33) == .backspace)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x35) == .escape)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x31) == .space)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x7E) == .arrowUp)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x7B) == .arrowLeft)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x73) == .home)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x77) == .end)
     }
 
     @Test func functionKeysMap() {
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x7A) == 131) // F1
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x6F) == 142) // F12
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x7A) == .f1)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x6F) == .f12)
     }
 
     @Test func nonAnsiKeysReturnNil() {
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x6C) == nil) // volume up
-        #expect(KeyCodeMapper.androidKeyCode(ofVirtualKey: 0x3F) == nil) // fn
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x6C) == nil)
+        #expect(KeyCodeMapper.semanticKey(ofVirtualKey: 0x3F) == nil)
     }
 
-    @Test func metaStateMapsRealAndroidConstants() {
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: [.maskShift]) == 0x1)
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: [.maskAlternate]) == 0x2)
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: [.maskControl]) == 0x1000)
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: [.maskCommand]) == 0x10000)
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: [.maskShift, .maskCommand]) == 0x10001)
-        #expect(KeyCodeMapper.androidMetaState(ofFlags: []) == 0)
+    @Test func modifiersStayPlatformNeutral() {
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: [.maskShift]) == [.shift])
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: [.maskAlternate]) == [.alt])
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: [.maskControl]) == [.control])
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: [.maskCommand]) == [.meta])
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: [.maskShift, .maskCommand]) == [.shift, .meta])
+        #expect(KeyCodeMapper.semanticModifiers(ofFlags: []) == [])
     }
 }
