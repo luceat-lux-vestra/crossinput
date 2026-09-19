@@ -11,12 +11,15 @@ let package = Package(
         .executable(name: "Ampersand", targets: ["App"]),
         .library(name: "Delivery", targets: ["Delivery"]),
         .executable(name: "cxi-smoke", targets: ["SmokeMain"]),
-        .executable(name: "cxi-stress", targets: ["CxiStress"])
+        .executable(name: "cxi-stress", targets: ["CxiStress"]),
+        .executable(name: "trackpad-seize-probe", targets: ["TrackpadSeizeProbe"])
     ],
     targets: [
         .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics", "Delivery"]),
         .executableTarget(name: "CxiStress", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics", "Delivery"], path: "Tools/CxiStress"),
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
+        .executableTarget(name: "TrackpadSeizeProbe", dependencies: ["HIDDescriptorSemantics"], path: "Tools/TrackpadSeizeProbe"),
+        .target(name: "HIDDescriptorSemantics", dependencies: []),
         .target(name: "Delivery", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics"]),
         .target(name: "Protocol", dependencies: []),
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
@@ -29,6 +32,7 @@ let package = Package(
         .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
-        .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"])
+        .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"]),
+        .testTarget(name: "HIDDescriptorSemanticsTests", dependencies: ["HIDDescriptorSemantics"])
     ]
 )
