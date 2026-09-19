@@ -6,19 +6,20 @@ plugins {
 
 android {
     namespace = "com.crossinput.helper"
-    compileSdk = 35
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "com.crossinput.helper"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 2
         versionName = "0.1.1"
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_25
+        targetCompatibility = JavaVersion.VERSION_25
     }
 
     buildTypes {
@@ -34,7 +35,7 @@ android {
 
 kotlin {
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_17
+        jvmTarget = JvmTarget.fromTarget("25")
     }
 }
 
