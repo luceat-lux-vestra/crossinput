@@ -19,6 +19,9 @@ class UhidPointerInjector(
     private var buttons: Int = 0
     private var failed = false
 
+    override val hasPressedButtons: Boolean
+        get() = buttons != 0
+
     /** Creates the device lazily so backend selection can fall back cleanly. */
     fun create(): Boolean {
         if (deviceId != null && !failed) return true
