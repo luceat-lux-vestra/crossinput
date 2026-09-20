@@ -6,6 +6,7 @@ import android.view.Display
 import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
+import com.crossinput.helper.protocol.PointerAlignmentEdge
 import java.lang.reflect.Method
 
 /** Semantic pointer boundary consumed by the CXI dispatcher. */
@@ -46,9 +47,13 @@ interface PointerInjector {
     val supportsExplicitDisplayRouting: Boolean
         get() = routing == PointerRouting.EXPLICIT_DISPLAY
 
+    val hasPressedButtons: Boolean
+        get() = false
+
     fun selectDisplay(display: Display): Boolean
     fun refreshMetrics(displayId: Int)
     fun moveRelative(dx: Int, dy: Int): PointerDelivery
+    fun alignToEdge(edge: PointerAlignmentEdge): PointerDelivery = PointerDelivery.FAILED
     fun button(button: Int, down: Boolean): PointerDelivery
     fun scroll(horizontal: Float, vertical: Float): PointerDelivery
     fun close()
@@ -200,6 +205,9 @@ class InputManagerPointerInjector(
     // Current pressed-button mask (MotionEvent.BUTTON_*), scrcpy-style
     private var buttons: Int = 0
 
+    override val hasPressedButtons: Boolean
+        get() = buttons != 0
+
     /**
      * Starts a new selection epoch. Invariant: every successful
      * [selectDisplay] begins with no buttons logically held by this injector
@@ -274,6 +282,32 @@ class InputManagerPointerInjector(
         currentX = nextX
         currentY = nextY
         return PointerDelivery.deliveredMovement(deliveredDx, deliveredDy)
+    }
+
+    override fun alignToEdge(edge: PointerAlignmentEdge): PointerDelivery {
+        if (!initialized || displayWidth <= 0 || displayHeight <= 0) {
+            log.warn("InputManagerPointerInjector", "alignToEdge called before target selected")
+            return PointerDelivery.FAILED
+        }
+        if (buttons != 0) {
+            log.warn("InputManagerPointerInjector", "alignment rejected while pointer button is held")
+            return PointerDelivery.FAILED
+        }
+
+        val nextX = when (edge) {
+            PointerAlignmentEdge.LEFT -> 0f
+            PointerAlignmentEdge.RIGHT -> displayWidth - 1f
+            PointerAlignmentEdge.TOP, PointerAlignmentEdge.BOTTOM -> currentX
+        }
+        val nextY = when (edge) {
+            PointerAlignmentEdge.TOP -> 0f
+            PointerAlignmentEdge.BOTTOM -> displayHeight - 1f
+            PointerAlignmentEdge.LEFT, PointerAlignmentEdge.RIGHT -> currentY
+        }
+        if (!injectMoveEvent(nextX, nextY)) return PointerDelivery.FAILED
+        currentX = nextX
+        currentY = nextY
+        return PointerDelivery.DELIVERED
     }
 
     override fun button(button: Int, down: Boolean): PointerDelivery {
