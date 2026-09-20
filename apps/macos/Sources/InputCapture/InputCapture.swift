@@ -144,6 +144,8 @@ public final class InputCapture: @unchecked Sendable {
     /// Called when the pointer reaches a screen edge while listening.
     /// 0=left 1=right 2=top 3=bottom (ScreenEdge rawValue).
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
+    /// Called while listening when the pointer leaves every configured edge zone.
+    public var onScreenEdgeExit: (@Sendable () -> Void)?
     /// Called when suppression is released by the fail-safe (timeout, disconnect, shortcut).
     /// The second parameter is the suppression generation that was active when suppress() was called.
     /// Stale callbacks (older generation) must be discarded by the caller.
@@ -662,6 +664,7 @@ public final class InputCapture: @unchecked Sendable {
                 // itself cannot arm (it points away from the edge).
                 stateLock.withLock { requireEdgeExit = false }
             }
+            onScreenEdgeExit?()
             return
         }
         if exitGated { return }
