@@ -21,6 +21,7 @@ object Protocol {
     const val TYPE_POINTER_BUTTON: Int = 0x000A
     const val TYPE_POINTER_SCROLL: Int = 0x000B
     const val TYPE_KEY_EVENT: Int = 0x000C
+    const val TYPE_POINTER_ALIGN_BOUNDARY: Int = 0x000D
 
     const val TYPE_HELLO_ACK: Int = 0x8001
     const val TYPE_DISPLAY_LIST: Int = 0x8002
