@@ -294,6 +294,17 @@ class Controller(
                     log.warn("Main", "pointer scroll delivery status=${result.status}")
                 }
             }
+            Protocol.TYPE_POINTER_ALIGN_EDGE -> {
+                val edge = Messages.pointerAlignEdge(frame.payload)
+                val result = pointer.alignToEdge(edge)
+                // Alignment is a control-plane barrier. Raw UHID movement used
+                // internally to reach the edge is deliberately not surfaced as
+                // semantic deliveredDx/dy to the host.
+                writePointerResult(frame, PointerDelivery(result.status))
+                if (result.status != PointerDelivery.Status.DELIVERED) {
+                    log.warn("Main", "pointer boundary alignment status=${result.status}")
+                }
+            }
             Protocol.TYPE_KEY_EVENT -> {
                 keyboard.keyEvent(Messages.keyEvent(frame.payload))
             }
@@ -332,6 +343,7 @@ class Controller(
             return
         }
         val capabilities = Cxi.CAPABILITY_SEMANTIC_POINTER_RESULT or
+            Cxi.CAPABILITY_POINTER_BOUNDARY_ALIGNMENT or
             if (pointer.supportsExplicitDisplayRouting) {
                 Cxi.CAPABILITY_EXPLICIT_POINTER_ROUTING
             } else {
