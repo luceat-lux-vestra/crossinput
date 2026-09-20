@@ -1,6 +1,8 @@
 package com.crossinput.helper
 
+import android.util.DisplayMetrics
 import android.view.Display
+import com.crossinput.helper.protocol.PointerAlignmentEdge
 
 /** Runtime choice for the semantic pointer backend. */
 enum class PointerBackendMode(val token: String) {
@@ -125,6 +127,47 @@ class PointerDispatcher(
         deliver { it.moveRelative(dx, dy) }
 
     @Synchronized
+    override fun alignToEdge(edge: PointerAlignmentEdge): PointerDelivery {
+        val backend = active ?: return PointerDelivery.FAILED
+        if (backend.hasPressedButtons) {
+            log.warn(TAG, "pointer boundary alignment rejected while button held")
+            return PointerDelivery.FAILED
+        }
+
+        if (backend !== uhid) return backend.alignToEdge(edge)
+
+        val display = selectedDisplay ?: return PointerDelivery.FAILED
+        val metrics = DisplayMetrics()
+        display.getRealMetrics(metrics)
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+            log.warn(TAG, "pointer boundary alignment unavailable: invalid display metrics")
+            return PointerDelivery.FAILED
+        }
+
+        val (dx, dy) = PointerBoundaryAlignment.movement(
+            edge,
+            metrics.widthPixels,
+            metrics.heightPixels,
+        )
+        val result = uhid.moveRelative(dx, dy)
+        return when (result.status) {
+            PointerDelivery.Status.DELIVERED -> PointerDelivery.DELIVERED
+            PointerDelivery.Status.PARTIALLY_DELIVERED -> {
+                if (mode != PointerBackendMode.UHID) activateFallback()
+                PointerDelivery.PARTIALLY_DELIVERED
+            }
+            PointerDelivery.Status.FAILED -> {
+                if (mode == PointerBackendMode.UHID) {
+                    PointerDelivery.FAILED
+                } else {
+                    activateFallback()
+                    active?.alignToEdge(edge) ?: PointerDelivery.FAILED
+                }
+            }
+        }
+    }
+
+    @Synchronized
     override fun button(button: Int, down: Boolean): PointerDelivery =
         deliver { it.button(button, down) }
 
@@ -175,5 +218,31 @@ class PointerDispatcher(
 
     companion object {
         private const val TAG = "PointerDispatcher"
+    }
+}
+
+internal object PointerBoundaryAlignment {
+    private const val MIN_RAW_DISTANCE = 8_192
+    private const val MULTIPLIER = 16
+    private const val MAX_RAW_DISTANCE = 120_000
+
+    fun movement(
+        edge: PointerAlignmentEdge,
+        width: Int,
+        height: Int,
+    ): Pair<Int, Int> {
+        require(width > 0 && height > 0)
+        val axis = when (edge) {
+            PointerAlignmentEdge.LEFT, PointerAlignmentEdge.RIGHT -> width
+            PointerAlignmentEdge.TOP, PointerAlignmentEdge.BOTTOM -> height
+        }
+        val magnitude = maxOf(MIN_RAW_DISTANCE, axis * MULTIPLIER)
+            .coerceAtMost(MAX_RAW_DISTANCE)
+        return when (edge) {
+            PointerAlignmentEdge.LEFT -> -magnitude to 0
+            PointerAlignmentEdge.RIGHT -> magnitude to 0
+            PointerAlignmentEdge.TOP -> 0 to -magnitude
+            PointerAlignmentEdge.BOTTOM -> 0 to magnitude
+        }
     }
 }
