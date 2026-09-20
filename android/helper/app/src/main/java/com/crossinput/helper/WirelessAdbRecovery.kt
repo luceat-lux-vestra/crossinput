@@ -13,6 +13,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
+import android.os.PersistableBundle
 import android.provider.Settings
 import android.util.Log
 import java.util.concurrent.atomic.AtomicInteger
@@ -22,12 +23,21 @@ internal const val WIRELESS_ADB_SETTING_KEY = "adb_wifi_enabled"
 internal const val WIRELESS_ADB_RECOVERY_JOB_ID = 0x43584941
 internal const val WIRELESS_ADB_VERIFY_DELAY_MS = 3_000L
 private const val WIRELESS_ADB_RETRY_BACKOFF_MS = 10_000L
+private const val EXTRA_FORCE_WRITE = "force_write"
+private const val EXTRA_PREFLIGHT_TOKEN = "preflight_token"
+private const val INTENT_PREFLIGHT_TOKEN = "crossinput_preflight_token"
 
 class WirelessAdbBootstrapActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "bootstrap activity started")
-        val result = WirelessAdbRecoveryScheduler.schedule(this, source = "bootstrap")
+        val preflightToken = intent?.getStringExtra(INTENT_PREFLIGHT_TOKEN).orEmpty()
+        Log.i(TAG, "bootstrap activity started token=$preflightToken")
+        val result = WirelessAdbRecoveryScheduler.schedule(
+            this,
+            source = "bootstrap",
+            forceWrite = true,
+            preflightToken = preflightToken,
+        )
         if (result != JobScheduler.RESULT_SUCCESS) {
             Log.w(TAG, "bootstrap schedule failed result=$result")
         }
@@ -43,7 +53,12 @@ class WirelessAdbRecoveryReceiver : BroadcastReceiver() {
         }
 
         Log.i(TAG, "boot receiver invoked action=$action")
-        val result = WirelessAdbRecoveryScheduler.schedule(context, source = action)
+        val result = WirelessAdbRecoveryScheduler.schedule(
+            context,
+            source = action,
+            forceWrite = false,
+            preflightToken = "",
+        )
         if (result != JobScheduler.RESULT_SUCCESS) {
             Log.w(TAG, "boot schedule failed action=$action result=$result")
         }
@@ -51,16 +66,26 @@ class WirelessAdbRecoveryReceiver : BroadcastReceiver() {
 }
 
 internal object WirelessAdbRecoveryScheduler {
-    fun schedule(context: Context, source: String): Int {
+    fun schedule(
+        context: Context,
+        source: String,
+        forceWrite: Boolean,
+        preflightToken: String,
+    ): Int {
         val scheduler = context.getSystemService(JobScheduler::class.java)
         if (scheduler == null) {
             Log.w(TAG, "scheduler unavailable source=$source")
             return JobScheduler.RESULT_FAILURE
         }
+        val extras = PersistableBundle().apply {
+            putBoolean(EXTRA_FORCE_WRITE, forceWrite)
+            putString(EXTRA_PREFLIGHT_TOKEN, preflightToken)
+        }
         val job = JobInfo.Builder(
             WIRELESS_ADB_RECOVERY_JOB_ID,
             ComponentName(context, WirelessAdbRecoveryJobService::class.java),
         )
+            .setExtras(extras)
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setBackoffCriteria(
@@ -82,7 +107,12 @@ class WirelessAdbRecoveryJobService : JobService() {
 
     override fun onStartJob(params: JobParameters): Boolean {
         val runGeneration = generation.incrementAndGet()
-        Log.i(TAG, "recovery job started jobId=${params.jobId}")
+        val forceWrite = params.extras.getBoolean(EXTRA_FORCE_WRITE, false)
+        val preflightToken = params.extras.getString(EXTRA_PREFLIGHT_TOKEN).orEmpty()
+        Log.i(
+            TAG,
+            "recovery job started jobId=${params.jobId} forceWrite=$forceWrite token=$preflightToken",
+        )
         worker?.interrupt()
         worker = Thread({
             val outcome = try {
@@ -92,7 +122,7 @@ class WirelessAdbRecoveryJobService : JobService() {
                     settingStore = AndroidWirelessAdbSettingStore(this),
                     wifiConnected = { wifiConnected },
                     sleep = Thread::sleep,
-                ).run()
+                ).run(forceWrite = forceWrite)
             } catch (_: InterruptedException) {
                 Log.i(TAG, "recovery job interrupted")
                 return@Thread
@@ -106,7 +136,10 @@ class WirelessAdbRecoveryJobService : JobService() {
             when (outcome) {
                 WirelessAdbRecoveryOutcome.ENABLED,
                 WirelessAdbRecoveryOutcome.ALREADY_ENABLED -> {
-                    Log.i(TAG, "wireless ADB recovery succeeded outcome=${outcome.token}")
+                    Log.i(
+                        TAG,
+                        "wireless ADB recovery succeeded outcome=${outcome.token} token=$preflightToken",
+                    )
                     jobFinished(params, false)
                 }
 
@@ -186,12 +219,13 @@ internal class WirelessAdbRecovery(
     private val wifiConnected: () -> Boolean,
     private val sleep: (Long) -> Unit,
 ) {
-    fun run(): WirelessAdbRecoveryOutcome {
+    fun run(forceWrite: Boolean = false): WirelessAdbRecoveryOutcome {
         if (!settingStore.isSupported()) return WirelessAdbRecoveryOutcome.UNSUPPORTED
         if (!wifiConnected()) return WirelessAdbRecoveryOutcome.RETRY
 
         return try {
-            if (settingStore.isEnabled()) {
+            val alreadyEnabled = settingStore.isEnabled()
+            if (alreadyEnabled && !forceWrite) {
                 return WirelessAdbRecoveryOutcome.ALREADY_ENABLED
             }
             if (!settingStore.setEnabled(true)) {

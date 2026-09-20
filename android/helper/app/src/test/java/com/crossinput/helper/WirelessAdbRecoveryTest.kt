@@ -38,6 +38,26 @@ class WirelessAdbRecoveryTest {
     }
 
     @Test
+    fun forcedPreflightWritesAndVerifiesEvenWhenAlreadyEnabled() {
+        val store = FakeStore(supported = true, enabled = true)
+        var slept = false
+        val outcome = WirelessAdbRecovery(
+            settingStore = store,
+            wifiConnected = { true },
+            sleep = { delay ->
+                assertEquals(WIRELESS_ADB_VERIFY_DELAY_MS, delay)
+                slept = true
+            },
+        ).run(forceWrite = true)
+
+        assertEquals(WirelessAdbRecoveryOutcome.ENABLED, outcome)
+        assertTrue(slept)
+        assertEquals(2, store.reads)
+        assertEquals(1, store.writes)
+        assertTrue(store.enabled)
+    }
+
+    @Test
     fun disabledSettingIsEnabledAndVerified() {
         val store = FakeStore(supported = true, enabled = false)
         var slept = false

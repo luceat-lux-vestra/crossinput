@@ -7,6 +7,7 @@ PACKAGE="com.crossinput.helper"
 PERMISSION="android.permission.WRITE_SECURE_SETTINGS"
 BOOTSTRAP_COMPONENT="$PACKAGE/.WirelessAdbBootstrapActivity"
 LOG_TAG="CrossInputWirelessAdb"
+PREFLIGHT_TOKEN="cxi-$(date +%s)-$$"
 
 adb_cmd() {
   if [ -n "${ANDROID_SERIAL:-}" ]; then
@@ -57,7 +58,8 @@ if [ "$ENABLED" != "1" ]; then
 fi
 
 echo "==> Explicitly starting bootstrap component"
-adb_cmd shell am start -W -n "$BOOTSTRAP_COMPONENT"
+adb_cmd shell am start -W -n "$BOOTSTRAP_COMPONENT" \
+  --es crossinput_preflight_token "$PREFLIGHT_TOKEN"
 
 echo "==> Package user state"
 adb_cmd shell dumpsys package "$PACKAGE" \
@@ -68,8 +70,10 @@ echo "==> Waiting for installed-app recovery preflight"
 PREFLIGHT_OK=0
 for _ in $(seq 1 15); do
   LOGS="$(adb_cmd logcat -d -t 200 -s "$LOG_TAG:I" '*:S' 2>/dev/null || true)"
-  if printf '%s\n' "$LOGS" | grep -q 'bootstrap activity started' \
-    && printf '%s\n' "$LOGS" | grep -q 'wireless ADB recovery succeeded outcome='; then
+  if printf '%s\n' "$LOGS" \
+      | grep -Fq "bootstrap activity started token=$PREFLIGHT_TOKEN" \
+    && printf '%s\n' "$LOGS" \
+      | grep -Fq "wireless ADB recovery succeeded outcome=enabled token=$PREFLIGHT_TOKEN"; then
     PREFLIGHT_OK=1
     break
   fi
@@ -92,7 +96,7 @@ if [ "$PREFLIGHT_OK" -ne 1 ]; then
   exit 1
 fi
 
-echo "==> Recovery preflight passed"
+echo "==> Recovery preflight passed (token=$PREFLIGHT_TOKEN)"
 adb_cmd logcat -d -t 50 -s "$LOG_TAG:I" '*:S' || true
 
 cat <<EOF
