@@ -9,6 +9,13 @@ import Diagnostics
 /// decisions are returned separately from `enqueuePointer` as
 /// `PointerAdmissionOutcome`, so a local decision can never be mistaken for
 /// a remote verdict.
+public enum RemotePointerBoundary: Sendable, Equatable {
+    case left
+    case right
+    case top
+    case bottom
+}
+
 public enum PointerDeliveryResult: Sendable, Equatable {
     // Movement results carry both the requested batch delta (what was asked
     // of the helper, after coalescing) and the accepted delta. The state
@@ -140,6 +147,23 @@ public final class InputSender: @unchecked Sendable {
     /// session traps local input until the watchdog fires (issue #50).
     public var hasLiveConnection: Bool {
         session.snapshot().connection != nil
+    }
+
+    /// Enqueues the pre-ownership boundary-alignment barrier on the same
+    /// serial lane as pointer delivery, but outside additive event batching.
+    /// It is never coalesced or shed under pointer backpressure. Lifecycle
+    /// cancellation invalidates its completion through pointerGeneration.
+    public func alignRemoteBoundary(
+        _ boundary: RemotePointerBoundary,
+        completion: @escaping @Sendable (PointerDeliveryResult) -> Void
+    ) {
+        let snapshot = session.snapshot()
+        let generation = stateLock.withLock { pointerGeneration }
+        pointerQueue.async { [self] in
+            let result = deliverBoundaryAlignment(boundary, snapshot: snapshot)
+            let stillCurrent = stateLock.withLock { pointerGeneration == generation }
+            completion(stillCurrent ? result : .cancelled)
+        }
     }
 
     /// Admits one captured event into the bounded pointer-batch queue.
@@ -376,6 +400,70 @@ public final class InputSender: @unchecked Sendable {
             let result = deliverPointer(item)
             let stillCurrent = stateLock.withLock { pointerGeneration == item.pointerGeneration }
             item.completion?(stillCurrent ? result : .cancelled)
+        }
+    }
+
+    private func deliverBoundaryAlignment(
+        _ boundary: RemotePointerBoundary,
+        snapshot: SessionSnapshot
+    ) -> PointerDeliveryResult {
+        guard snapshot.generation == session.snapshot().generation,
+              let connection = snapshot.connection else { return .cancelled }
+
+        let wireBoundary: PointerBoundary
+        switch boundary {
+        case .left: wireBoundary = .left
+        case .right: wireBoundary = .right
+        case .top: wireBoundary = .top
+        case .bottom: wireBoundary = .bottom
+        }
+
+        do {
+            let response = try connection.requestBlocking(
+                .pointerAlignBoundary,
+                payload: Messages.pointerAlignBoundary(wireBoundary),
+                timeout: pointerRequestTimeout)
+
+            guard session.snapshot().generation == snapshot.generation else {
+                return .cancelled
+            }
+            guard response.type == .pointerResult else {
+                observe(RequestObservation(
+                    kind: .pointerAlignBoundary,
+                    outcome: .unexpectedResponse(requestType: .pointerAlignBoundary)))
+                return .failed
+            }
+
+            let result = try Messages.decodePointerResult(response.payload)
+            switch result.status {
+            case .delivered:
+                return .delivered
+            case .partiallyDelivered:
+                observe(RequestObservation(
+                    kind: .pointerAlignBoundary,
+                    outcome: .partialDelivery(requestType: .pointerAlignBoundary)))
+                return .failed
+            case .failed:
+                observe(RequestObservation(
+                    kind: .pointerAlignBoundary,
+                    outcome: .helperReportedFailure(requestType: .pointerAlignBoundary)))
+                return .failed
+            }
+        } catch {
+            if error is DecodeError {
+                observe(RequestObservation(
+                    kind: .pointerAlignBoundary,
+                    outcome: .malformedResponse(requestType: .pointerAlignBoundary)))
+            } else if error is ConnectionError {
+                // Transport outcomes are owned by RemoteSession.
+            } else {
+                observe(RequestObservation(
+                    kind: .pointerAlignBoundary,
+                    outcome: .otherFailure(
+                        requestType: .pointerAlignBoundary,
+                        errorDescription: String(describing: error))))
+            }
+            return .failed
         }
     }
 
