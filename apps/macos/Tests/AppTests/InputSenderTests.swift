@@ -113,6 +113,58 @@ final class InputSenderTests: XCTestCase {
                                                .pointerMoveRel, .pointerScroll])
     }
 
+    func testRemoteCleanupFenceBlocksReentryUntilOldPointerWorkSettles() async {
+        let fixture = makeFixture()
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: fixture.sender,
+            capture: capture,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertTrue(fixture.sender.isHandoffReady)
+
+        // Hold old pointer work inside transport. Cleanup must remain pending
+        // behind it, and an edge event during that interval must stay local.
+        fixture.sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        )
+        awaitInFlight(fixture.session)
+
+        fixture.sender.releaseRemotelyHeldButtons()
+        XCTAssertFalse(fixture.sender.isHandoffReady)
+
+        capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertTrue(fixture.sender.isHandoffReady)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.1, false)
+
+        // After cleanup finishes a fresh edge event may arm the next epoch.
+        capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        controller.emergencyReturn()
+    }
+
     func testDisconnectedSessionObjectCannotArmEdgeHandoff() async {
         let session = FakeSession()
         let reference = SessionReference()

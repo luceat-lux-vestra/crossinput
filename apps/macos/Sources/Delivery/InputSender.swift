@@ -97,6 +97,9 @@ public final class InputSender: @unchecked Sendable {
     private var pendingPointers: [PendingPointerBatch] = []
     private var pointerWorkerScheduled = false
     private var pointerGeneration: UInt64 = 0
+    /// New handoff admission is suspended while old persistent remote state
+    /// is draining. Guarded by stateLock.
+    private var remoteCleanupPending = false
     /// Aggregate metadata only — never input values or payloads. Mutated
     /// under stateLock; flushed to the log only after the lock is released.
     private var coalescedScrollBatchCount = 0
@@ -152,6 +155,14 @@ public final class InputSender: @unchecked Sendable {
     /// session traps local input until the watchdog fires (issue #50).
     public var hasLiveConnection: Bool {
         session.snapshot().connection?.isConnected == true
+    }
+
+    /// A new control epoch may start only when transport is live and cleanup
+    /// from the previous epoch has fully crossed the keyboard/pointer queues.
+    /// Local host ownership never waits on this fence; it gates re-entry only.
+    public var isHandoffReady: Bool {
+        guard hasLiveConnection else { return false }
+        return stateLock.withLock { !remoteCleanupPending }
     }
 
     /// Admits one captured event into the bounded pointer-batch queue.
@@ -333,10 +344,25 @@ public final class InputSender: @unchecked Sendable {
     /// session. Send failures are swallowed (best effort) — cleanup must not
     /// trap local control; the fail-safe return proceeds regardless.
     public func releaseRemotelyHeldButtons() {
+        let shouldSchedule = stateLock.withLock {
+            guard !remoteCleanupPending else { return false }
+            remoteCleanupPending = true
+            return true
+        }
+        guard shouldSchedule else { return }
+
+        // Cross keyboardQueue first so synthesized key-up cleanup already
+        // queued by InputCapture cannot be overtaken. Then cross pointerQueue
+        // so any old in-flight button result is accounted before releases are
+        // generated. Only that terminal point re-opens handoff admission.
         keyboardQueue.async { [weak self] in
             guard let self else { return }
             pointerQueue.async { [weak self] in
-                _ = self?.releaseHeldButtonsForCurrentSession()
+                guard let self else { return }
+                _ = self.releaseHeldButtonsForCurrentSession()
+                self.stateLock.withLock {
+                    self.remoteCleanupPending = false
+                }
             }
         }
     }

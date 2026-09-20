@@ -275,7 +275,11 @@ final class ControlHandoffController: @unchecked Sendable {
             // return the pointer can rest on the configured edge; entering
             // remoteActive with no live transport trapped the user until the
             // watchdog fired (issue #50).
-            guard let self, self.isEdgeSwitchEnabled, self.sender.hasLiveConnection else { return }
+            guard let self,
+                  self.isEdgeSwitchEnabled,
+                  self.sender.isHandoffReady else {
+                return
+            }
             self.switchMachine.pointerAtEdge(edge)
         }
         capture.onPointerEvent = { [weak self] event in
@@ -880,7 +884,6 @@ final class ControlHandoffController: @unchecked Sendable {
             // this callback remains the fail-safe owner for direct transitions.
             releaseHostOwnershipAndCapture(reason: releaseReason(for: reason))
             sender.cancelPendingPointerEvents()
-            sender.releaseRemotelyHeldButtons()
 
         case .edgeArmed:
             break
