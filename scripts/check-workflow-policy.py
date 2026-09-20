@@ -329,6 +329,8 @@ def check_issue_backfill_safety(workflows, findings):
         "const dryRun = process.env.DRY_RUN === 'true';",
         "const backfill = process.env.BACKFILL === 'true';",
         "if (!dryRun) await ensureLabels();",
+        "(data.color || '').toLowerCase() !== color.toLowerCase()",
+        "updateLabel({ ...context.repo, name, color, description })",
         "if (!backfill)",
         "if (dryRun) return;",
     ):
