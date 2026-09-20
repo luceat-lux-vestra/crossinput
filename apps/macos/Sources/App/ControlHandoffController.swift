@@ -4,6 +4,7 @@ import InputCapability
 import EdgeSwitch
 import Diagnostics
 import Delivery
+import AndroidBridge
 
 enum ControlEnableResult: Equatable {
     case enabled
@@ -37,6 +38,15 @@ final class ControlHandoffController: @unchecked Sendable {
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
 
+    private struct RemoteBoundaryProfile: Sendable {
+        let returnPolicy: RemoteReturnPolicy
+        let width: UInt32
+        let height: UInt32
+    }
+
+    private var selectedRemoteBoundaryProfile: RemoteBoundaryProfile?
+    private var activeRemoteBoundaryProfile: RemoteBoundaryProfile?
+
     @MainActor
     init(sender: InputSender,
          capture: InputCapture = InputCapture(),
@@ -65,8 +75,15 @@ final class ControlHandoffController: @unchecked Sendable {
             // return the pointer can rest on the configured edge; entering
             // remoteActive with no live transport trapped the user until the
             // watchdog fired (issue #50).
-            guard let self, self.isEdgeSwitchEnabled, self.sender.hasLiveConnection else { return }
-            self.switchMachine.pointerAtEdge(edge)
+            guard let self, self.sender.hasLiveConnection else { return }
+            let policy: RemoteReturnPolicy? = self.lifecycleLock.withLock {
+                guard self.edgeSwitchEnabled
+                    || (!self.lifecycleStarted && self.switchMachine.state != .disabled) else { return nil }
+                self.activeRemoteBoundaryProfile = self.selectedRemoteBoundaryProfile
+                return self.activeRemoteBoundaryProfile?.returnPolicy ?? .deliveryClampAware
+            }
+            guard let policy else { return }
+            self.switchMachine.pointerAtEdge(edge, returnPolicy: policy)
         }
         capture.onPointerEvent = { [weak self] event in
             self?.enqueue(event)
@@ -97,6 +114,19 @@ final class ControlHandoffController: @unchecked Sendable {
                 guard let self, generation == self.currentSuppressionGeneration else { return }
                 self.switchMachine.forceReturn(reason: self.transitionReason(for: reason))
             }
+        }
+    }
+
+    func updateRemoteTarget(_ target: RemoteTarget?) {
+        let profile = target.map {
+            RemoteBoundaryProfile(
+                returnPolicy: $0.kind == .external ? .alignBeforeReturn : .deliveryClampAware,
+                width: $0.width,
+                height: $0.height
+            )
+        }
+        lifecycleLock.withLock {
+            selectedRemoteBoundaryProfile = profile
         }
     }
 
@@ -225,9 +255,7 @@ final class ControlHandoffController: @unchecked Sendable {
             guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled) else { return nil }
             let epoch = controlEpoch
             let outcome = sender.enqueuePointer(event) { [weak self] result in
-                Task { @MainActor in
-                    self?.apply(delivery: result, controlEpoch: epoch)
-                }
+                self?.handlePointerDelivery(result, controlEpoch: epoch)
             }
             return (outcome, epoch)
         }
@@ -242,9 +270,7 @@ final class ControlHandoffController: @unchecked Sendable {
             guard edgeSwitchEnabled, activeSuppressionGeneration == suppressionGeneration else { return nil }
             let epoch = controlEpoch
             let outcome = sender.enqueuePointer(event) { [weak self] result in
-                Task { @MainActor in
-                    self?.apply(delivery: result, controlEpoch: epoch)
-                }
+                self?.handlePointerDelivery(result, controlEpoch: epoch)
             }
             return (outcome, epoch)
         }
@@ -276,6 +302,113 @@ final class ControlHandoffController: @unchecked Sendable {
         }
     }
 
+    private func handlePointerDelivery(_ delivery: PointerDeliveryResult, controlEpoch: UInt64) {
+        let alignmentProfile: RemoteBoundaryProfile? = lifecycleLock.withLock {
+            guard self.controlEpoch == controlEpoch,
+                  edgeSwitchEnabled,
+                  activeSuppressionGeneration != nil,
+                  activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn else { return nil }
+            return activeRemoteBoundaryProfile
+        }
+
+        if let alignmentProfile,
+           capture.isSuppressed,
+           case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy) = delivery {
+            let action = switchMachine.pointerMoved(
+                requestedDx: CGFloat(requestedDx),
+                requestedDy: CGFloat(requestedDy),
+                deliveredDx: CGFloat(deliveredDx),
+                deliveredDy: CGFloat(deliveredDy)
+            )
+            if case let .alignRemoteBoundary(edge) = action {
+                guard enqueueRemoteBoundaryAlignment(
+                    edge: edge,
+                    profile: alignmentProfile,
+                    controlEpoch: controlEpoch
+                ) else {
+                    failRemoteBoundaryAlignment(controlEpoch: controlEpoch)
+                    return
+                }
+            }
+            Task { @MainActor in
+                self.apply(
+                    delivery: delivery,
+                    controlEpoch: controlEpoch,
+                    movementAlreadyAccounted: true
+                )
+            }
+            return
+        }
+
+        Task { @MainActor in
+            self.apply(delivery: delivery, controlEpoch: controlEpoch)
+        }
+    }
+
+    private func enqueueRemoteBoundaryAlignment(
+        edge: ScreenEdge,
+        profile: RemoteBoundaryProfile,
+        controlEpoch: UInt64
+    ) -> Bool {
+        guard let vector = Self.remoteBoundaryAlignmentVector(edge: edge, profile: profile) else {
+            return false
+        }
+        return sender.enqueuePriorityControlMovement(dx: vector.dx, dy: vector.dy) { [weak self] result in
+            self?.handleRemoteBoundaryAlignmentDelivery(result, controlEpoch: controlEpoch)
+        }
+    }
+
+    private func handleRemoteBoundaryAlignmentDelivery(
+        _ delivery: PointerDeliveryResult,
+        controlEpoch: UInt64
+    ) {
+        let stillCurrent = lifecycleLock.withLock {
+            self.controlEpoch == controlEpoch
+                && edgeSwitchEnabled
+                && activeSuppressionGeneration != nil
+                && activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn
+        }
+        guard stillCurrent, capture.isSuppressed else { return }
+
+        switch delivery {
+        case .deliveredMovement:
+            guard switchMachine.confirmRemoteBoundaryAlignment() else {
+                failRemoteBoundaryAlignment(controlEpoch: controlEpoch)
+                return
+            }
+            Diagnostics.log("remote boundary alignment confirmed")
+        case .cancelled, .partiallyDeliveredMovement, .delivered, .failed:
+            failRemoteBoundaryAlignment(controlEpoch: controlEpoch)
+        }
+    }
+
+    private func failRemoteBoundaryAlignment(controlEpoch: UInt64) {
+        guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
+        sender.cancelPendingPointerEvents()
+        switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
+    private static func remoteBoundaryAlignmentVector(
+        edge: ScreenEdge,
+        profile: RemoteBoundaryProfile
+    ) -> (dx: Int32, dy: Int32)? {
+        guard profile.returnPolicy == .alignBeforeReturn else { return nil }
+        let axis = edge == .left || edge == .right ? profile.width : profile.height
+        guard axis > 0 else { return nil }
+
+        let magnitude = Int32(min(max(Int64(axis) * 8, 8_192), 32_767))
+        switch edge {
+        case .left:
+            return (magnitude, 0)
+        case .right:
+            return (-magnitude, 0)
+        case .top:
+            return (0, magnitude)
+        case .bottom:
+            return (0, -magnitude)
+        }
+    }
+
     private func handleButtonSafetyRejection(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
         sender.cancelPendingPointerEvents()
@@ -286,7 +419,11 @@ final class ControlHandoffController: @unchecked Sendable {
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
-    private func apply(delivery: PointerDeliveryResult, controlEpoch: UInt64) {
+    private func apply(
+        delivery: PointerDeliveryResult,
+        controlEpoch: UInt64,
+        movementAlreadyAccounted: Bool = false
+    ) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled, capture.isSuppressed else { return }
         switch delivery {
         case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
@@ -298,10 +435,12 @@ final class ControlHandoffController: @unchecked Sendable {
             // rule (issue #45): return-direction movement counts even when
             // the helper's display-bound clamp reported zero accepted
             // movement; inward movement only counts what was accepted.
-            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
-                                       requestedDy: CGFloat(requestedDy),
-                                       deliveredDx: CGFloat(deliveredDx),
-                                       deliveredDy: CGFloat(deliveredDy))
+            if !movementAlreadyAccounted {
+                switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
+                                           requestedDy: CGFloat(requestedDy),
+                                           deliveredDx: CGFloat(deliveredDx),
+                                           deliveredDy: CGFloat(deliveredDy))
+            }
         case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
             switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
                                        requestedDy: CGFloat(requestedDy),
@@ -387,6 +526,7 @@ final class ControlHandoffController: @unchecked Sendable {
             lifecycleLock.withLock {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
+                activeRemoteBoundaryProfile = nil
             }
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
