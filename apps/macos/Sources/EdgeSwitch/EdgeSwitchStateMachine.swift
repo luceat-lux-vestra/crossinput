@@ -30,6 +30,28 @@ public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
     case left, right, top, bottom
 }
 
+/// How the current remote target proves that a return boundary is real.
+///
+/// `deliveryClampAware` preserves the historical InputManager contract: accepted
+/// movement reflects display-bound clamping, so requested intent may safely
+/// complete the return once virtual hysteresis is crossed.
+///
+/// `alignBeforeReturn` is for system-routed relative-pointer targets such as
+/// Samsung DeX UHID. Their delivery acknowledgement proves report acceptance,
+/// not visible screen-space displacement. A virtual return candidate therefore
+/// requests a real remote-boundary alignment before macOS can be released.
+public enum RemoteReturnPolicy: Sendable, Equatable {
+    case deliveryClampAware
+    case alignBeforeReturn
+}
+
+/// Control-plane action requested by movement accounting. It is deliberately
+/// separate from state transitions: alignment keeps remote ownership active.
+public enum PointerMovementAction: Sendable, Equatable {
+    case none
+    case alignRemoteBoundary(ScreenEdge)
+}
+
 /// Why a state transition happened. The handoff machine records only control
 /// and safety causes. External availability causes are translated by the
 /// application layer into the control-oriented `remoteUnavailable` command.
@@ -124,6 +146,9 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
 
     private var stateStorage: HandoffState = .disabled
     private var entryEdgeStorage: ScreenEdge = .left
+    private var remoteReturnPolicyStorage: RemoteReturnPolicy = .deliveryClampAware
+    private var remoteBoundaryAlignmentPending = false
+    private var remoteBoundaryAligned = false
 
     /// Virtual pointer position along the axis perpendicular to the entry edge.
     /// 0 = entry boundary, positive = inside the remote target, negative = beyond the
@@ -193,28 +218,59 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
+            remoteBoundaryAlignmentPending = false
+            remoteBoundaryAligned = false
+            remoteReturnPolicyStorage = .deliveryClampAware
             deactivation = transition(to: .disabled, reason: .deactivated)
         }
         return deactivation
     }
 
     /// Pointer reached a screen edge while macOS is active.
-    public func pointerAtEdge(_ edge: ScreenEdge) {
+    public func pointerAtEdge(
+        _ edge: ScreenEdge,
+        returnPolicy: RemoteReturnPolicy = .deliveryClampAware
+    ) {
         run {
             switch stateStorage {
             case .localActive:
                 transition(to: .edgeArmed, reason: .edgeEntered)
                 entryEdgeStorage = edge
+                remoteReturnPolicyStorage = returnPolicy
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
+                remoteBoundaryAlignmentPending = false
+                remoteBoundaryAligned = false
                 transition(to: .remoteActive, reason: .edgeEntered)
             case .edgeArmed:
                 entryEdgeStorage = edge
+                remoteReturnPolicyStorage = returnPolicy
                 virtualAxisPosition = 0
                 hasReceivedFirstMove = false
+                remoteBoundaryAlignmentPending = false
+                remoteBoundaryAligned = false
             default: break
             }
         }
+    }
+
+    /// Confirms that the remote cursor has been driven to the real boundary
+    /// corresponding to the current entry edge. The confirmation is accepted
+    /// only for the outstanding alignment request of the current remote epoch.
+    @discardableResult
+    public func confirmRemoteBoundaryAlignment() -> Bool {
+        var confirmed = false
+        run {
+            guard stateStorage == .remoteActive,
+                  remoteReturnPolicyStorage == .alignBeforeReturn,
+                  remoteBoundaryAlignmentPending else { return }
+            remoteBoundaryAlignmentPending = false
+            remoteBoundaryAligned = true
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = true
+            confirmed = true
+        }
+        return confirmed
     }
 
     /// Signed movement along the axis perpendicular to the entry edge.
@@ -232,7 +288,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// Called with the movement accepted by the semantic input-delivery
     /// boundary, never with raw deltas from a failed send. Legacy spelling:
     /// requested and delivered movement are identical.
-    public func pointerMoved(dx: CGFloat, dy: CGFloat) {
+    @discardableResult
+    public func pointerMoved(dx: CGFloat, dy: CGFloat) -> PointerMovementAction {
         pointerMoved(requestedDx: dx, requestedDy: dy,
                      deliveredDx: dx, deliveredDy: dy)
     }
@@ -253,16 +310,43 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// A call with no requested and no accepted movement is a complete no-op:
     /// it neither consumes the first-movement exemption nor changes the
     /// virtual position, state, or transition callbacks.
+    @discardableResult
     public func pointerMoved(requestedDx: CGFloat, requestedDy: CGFloat,
-                             deliveredDx: CGFloat, deliveredDy: CGFloat) {
+                             deliveredDx: CGFloat, deliveredDy: CGFloat) -> PointerMovementAction {
+        var action: PointerMovementAction = .none
         run {
             guard stateStorage == .remoteActive else { return }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
             guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else { return }
+            // While the delivery lane is placing the cursor on the real remote
+            // boundary, later movement must not mutate the virtual position.
+            guard !remoteBoundaryAlignmentPending else { return }
+
             let edge = entryEdgeStorage
             let requestedDelta = Self.androidDirectedDelta(entryEdge: edge, dx: requestedDx, dy: requestedDy)
             let deliveredDelta = Self.androidDirectedDelta(entryEdge: edge, dx: deliveredDx, dy: deliveredDy)
+
+            if remoteReturnPolicyStorage == .alignBeforeReturn, remoteBoundaryAligned {
+                // The cursor is known to be on the real return boundary. Moving
+                // inward by an accepted amount invalidates that proof. Moving
+                // farther toward macOS is absorbed by the remote bound but its
+                // requested intent drives only the post-boundary hysteresis.
+                if deliveredDelta > 0 {
+                    remoteBoundaryAligned = false
+                    virtualAxisPosition = deliveredDelta
+                    hasReceivedFirstMove = true
+                    return
+                }
+                if requestedDelta < 0 {
+                    virtualAxisPosition += requestedDelta
+                    if virtualAxisPosition <= -returnHysteresis {
+                        returnToMacOS(reason: .boundaryCrossed)
+                    }
+                }
+                return
+            }
+
             // Issue #45: return-direction intent is credited in full even when
             // the helper's display-bound clamp absorbed all of it; inward
             // movement only ever advances by what was accepted.
@@ -289,10 +373,21 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
             // The first event after entering never returns (issue #37); leftover
             // warp/synthetic deltas must not bounce the user out of the remote target.
             guard !first else { return }
-            if position <= -returnHysteresis {
+
+            if remoteReturnPolicyStorage == .alignBeforeReturn {
+                // Raw UHID report counts are not screen-space coordinates. Once
+                // the virtual model says the user has moved back to the entry
+                // origin, establish the *real* remote edge before any return.
+                // Orthogonal/no-return motion at position zero must not arm it.
+                if requestedDelta < 0, position <= 0 {
+                    remoteBoundaryAlignmentPending = true
+                    action = .alignRemoteBoundary(edge)
+                }
+            } else if position <= -returnHysteresis {
                 returnToMacOS(reason: .boundaryCrossed)
             }
         }
+        return action
     }
 
     /// Returns control to macOS for a control-oriented fail-safe reason.
@@ -353,6 +448,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private func returnToMacOS(reason: TransitionReason) {
         virtualAxisPosition = 0
         hasReceivedFirstMove = false
+        remoteBoundaryAlignmentPending = false
+        remoteBoundaryAligned = false
         transition(to: .returning, reason: reason)
         transition(to: .localActive, reason: reason)
     }
