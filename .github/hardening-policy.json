@@ -82,7 +82,7 @@
       "context": "Dependency Review",
       "workflow": "dependency-review.yml",
       "job": "review",
-      "promotion": "Promote only after ordinary PR reliability, live Dependency Graph support, merged-main evidence, and one atomic checked-in/live ruleset update."
+      "promotion": "Promote only after ordinary PR reliability and live Dependency Graph support. Dependency Review is PR-diff-scoped and has no merged-main producer; after promotion, verify the atomic checked-in/live ruleset state by fresh readback."
     }
   ],
   "workflow_static_analysis": {
