@@ -285,6 +285,60 @@ def check_hygiene(workflows, findings):
                              "job does not declare `timeout-minutes:`")
 
 
+def check_issue_labeler_backfill_safety(root, workflows, findings):
+    workflow = workflows.get("issue-labeler.yml")
+    where = "issue-labeler.yml"
+    if workflow is None:
+        findings.add("ISSUE_BACKFILL_UNSAFE", where, "issue labeler workflow is missing")
+        return
+
+    dispatch = triggers(workflow).get("workflow_dispatch")
+    if not isinstance(dispatch, dict):
+        findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                     "workflow_dispatch must declare explicit backfill/dry_run inputs")
+        return
+    inputs = dispatch.get("inputs") or {}
+    dry_run = inputs.get("dry_run") or {}
+    backfill = inputs.get("backfill") or {}
+    if dry_run.get("default") is not True:
+        findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                     "workflow_dispatch dry_run must default to true")
+    if backfill.get("default") is not True:
+        findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                     "workflow_dispatch backfill must be explicit and default to true")
+
+    path = os.path.join(root, ".github", "workflows", "issue-labeler.yml")
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+
+    required = [
+        "DRY_RUN:",
+        "BACKFILL:",
+        "const dryRun = process.env.DRY_RUN === 'true';",
+        "const backfill = process.env.BACKFILL === 'true';",
+        "if (dryRun) return;",
+        "if (!backfill)",
+        "DRY_RUN label update:",
+        "DRY_RUN label create:",
+    ]
+    for token in required:
+        if token not in text:
+            findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                         f"missing dry-run/backfill safety token {token!r}")
+
+    guard = text.find("if (dryRun) return;")
+    for mutation in ("removeLabel(", "addLabels("):
+        position = text.find(mutation)
+        if position != -1 and (guard == -1 or position < guard):
+            findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                         f"{mutation} is reachable before the issue dry-run guard")
+
+    for mutation in ("updateLabel(", "createLabel("):
+        if mutation in text and f"else await github.rest.issues.{mutation}" not in text:
+            findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                         f"{mutation} is not directly guarded by the catalog dry-run branch")
+
+
 def managed_labels(root):
     """Labels the labeler workflows create/maintain, i.e. guaranteed to exist."""
     names = set()
@@ -510,6 +564,7 @@ def main():
     check_permissions(workflows, policy, findings)
     check_trust_boundaries(workflows, policy, findings)
     check_hygiene(workflows, findings)
+    check_issue_labeler_backfill_safety(args.root, workflows, findings)
     check_labels(args.root, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
     if args.live:
