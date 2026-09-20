@@ -20,9 +20,11 @@ public struct HelperCapabilities: OptionSet, Sendable, Equatable {
 
     public static let semanticPointerResult = Self(rawValue: 1 << 0)
     public static let explicitPointerRouting = Self(rawValue: 1 << 1)
+    public static let pointerBoundaryAlignment = Self(rawValue: 1 << 2)
     public static let currentPointerPath: Self = [
         .semanticPointerResult,
         .explicitPointerRouting,
+        .pointerBoundaryAlignment,
     ]
 }
 
@@ -40,6 +42,7 @@ public enum MessageType: UInt16, Sendable {
     case pointerButton = 0x000A
     case pointerScroll = 0x000B
     case keyEvent = 0x000C
+    case pointerAlignEdge = 0x000D
     // Android -> Mac
     case helloAck = 0x8001
     case displayList = 0x8002
@@ -55,6 +58,13 @@ public enum MessageType: UInt16, Sendable {
 }
 
 /// One complete CXI frame (header + payload), all integers little-endian.
+public enum PointerAlignmentEdge: UInt8, Sendable, Equatable, CaseIterable {
+    case left = 0
+    case right = 1
+    case top = 2
+    case bottom = 3
+}
+
 public struct CxiFrame: Sendable, Equatable {
     public let type: MessageType
     public let requestId: UInt32
@@ -191,6 +201,12 @@ public enum Messages {
     /// Positive vertical = up, positive horizontal = left (Android AXIS_* convention).
     public static func pointerScroll(horizontal: Float, vertical: Float) -> Data {
         LE.f32(horizontal) + LE.f32(vertical)
+    }
+
+    /// Control-plane pointer operation used by the handoff boundary gate.
+    /// The helper owns backend-specific movement and replies with POINTER_RESULT.
+    public static func pointerAlignEdge(_ edge: PointerAlignmentEdge) -> Data {
+        LE.u8(edge.rawValue)
     }
 
     /// Android KeyEvent semantics: keyCode = KeyEvent.KEYCODE_*, metaState = KeyEvent.META_*.
