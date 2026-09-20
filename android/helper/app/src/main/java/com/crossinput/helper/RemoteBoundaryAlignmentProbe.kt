@@ -88,7 +88,6 @@ object RemoteBoundaryAlignmentProbeMain {
         try {
             if (!pointer.selectSystemRoute()) {
                 System.err.println("REMOTE_BOUNDARY_PROBE result=FAIL reason=uhid-unavailable")
-                System.exit(6)
                 return
             }
 
@@ -106,9 +105,14 @@ object RemoteBoundaryAlignmentProbeMain {
                     "REMOTE_BOUNDARY_PROBE result=FAIL reason=partial-or-failed-delivery " +
                         "edge=${boundary.token}",
                 )
-                System.exit(7)
                 return
             }
+
+            // The production UHID device remains alive for the remote epoch.
+            // The standalone probe closes immediately, so give InputReader a
+            // bounded drain interval before teardown to avoid measuring only
+            // successful kernel writes.
+            Thread.sleep(250)
 
             println(
                 "REMOTE_BOUNDARY_PROBE result=PASS display_id=$displayId " +
