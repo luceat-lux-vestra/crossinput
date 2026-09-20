@@ -96,6 +96,92 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(session.requestTypes, [.pointerAlignBoundary, .pointerMoveRel])
     }
 
+    func testControllerDoesNotSuppressUntilAlignmentIsConfirmed() async {
+        let session = FakeSession()
+        session.gateAllRequests = true
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(sender: sender, capture: capture, switchMachine: machine)
+
+        machine.activate()
+        controller.capture.onScreenEdge?(.left)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(session.requestEntered.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(machine.state, .edgeArmed)
+        XCTAssertFalse(capture.isSuppressed)
+
+        session.releaseGate()
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+        XCTAssertEqual(session.alignmentBoundaries, [1], "Mac left edge must align DeX right boundary")
+        _ = controller
+    }
+
+    func testEdgeExitCancelsInFlightAlignmentAndStaleSuccessCannotSuppress() async {
+        let session = FakeSession()
+        session.gateAllRequests = true
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(sender: sender, capture: capture, switchMachine: machine)
+
+        machine.activate()
+        controller.capture.onScreenEdge?(.left)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(session.requestEntered.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(machine.state, .edgeArmed)
+
+        controller.capture.onScreenEdgeExit?()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+
+        session.releaseGate()
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed, "stale alignment completion must not acquire remote ownership")
+        _ = controller
+    }
+
+    func testAlignmentFailureFailsLocalWithoutStartingSuppression() async {
+        let session = FakeSession(response: CxiFrame(
+            type: .pointerResult,
+            requestId: 1,
+            payload: Messages.pointerResult(status: .failed)))
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(sender: sender, capture: capture, switchMachine: machine)
+
+        machine.activate()
+        controller.capture.onScreenEdge?(.left)
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+        _ = controller
+    }
+
     func testMovementUsesHelperAcceptedDelta() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult,
@@ -1548,6 +1634,7 @@ final class InputSenderTests: XCTestCase {
         private(set) var acceptedMovement: (Int32, Int32) = (0, 0)
         private(set) var acceptedScroll: (Float, Float) = (0, 0)
         private(set) var requestTypes: [MessageType] = []
+        private(set) var alignmentBoundaries: [UInt8] = []
         private(set) var pointerButtonEvents: [(UInt32, Bool)] = []
         private(set) var sentPointerButtonEvents: [(UInt32, Bool)] = []
         private(set) var sentFrames: [CxiFrame] = []
@@ -1608,6 +1695,9 @@ final class InputSenderTests: XCTestCase {
             lock.withLock {
                 requestCount += 1
                 requestTypes.append(type)
+                if type == .pointerAlignBoundary, let boundary = payload.first {
+                    alignmentBoundaries.append(boundary)
+                }
                 if type == .pointerButton, payload.count >= 5 {
                     let button = payload.withUnsafeBytes { raw in
                         UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
