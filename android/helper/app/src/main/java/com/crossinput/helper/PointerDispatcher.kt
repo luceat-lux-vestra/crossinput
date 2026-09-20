@@ -1,5 +1,6 @@
 package com.crossinput.helper
 
+import android.util.DisplayMetrics
 import android.view.Display
 
 /** Runtime choice for the semantic pointer backend. */
@@ -125,6 +126,28 @@ class PointerDispatcher(
         deliver { it.moveRelative(dx, dy) }
 
     @Synchronized
+    override fun alignBoundary(boundary: PointerBoundary): PointerDelivery {
+        val display = selectedDisplay ?: return PointerDelivery.FAILED
+        val backend = active ?: return PointerDelivery.FAILED
+        if (backend === inputManager) return inputManager.alignBoundary(boundary)
+
+        val metrics = DisplayMetrics()
+        display.getRealMetrics(metrics)
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
+            log.error(TAG, "boundary alignment unavailable: invalid selected-display metrics")
+            return PointerDelivery.FAILED
+        }
+        val (dx, dy) = BoundaryAlignment.vector(boundary, metrics.widthPixels, metrics.heightPixels)
+        return deliver { injector ->
+            if (injector === inputManager) {
+                injector.alignBoundary(boundary)
+            } else {
+                injector.moveRelative(dx, dy)
+            }
+        }
+    }
+
+    @Synchronized
     override fun button(button: Int, down: Boolean): PointerDelivery =
         deliver { it.button(button, down) }
 
@@ -170,6 +193,28 @@ class PointerDispatcher(
         } else {
             active = null
             log.error(TAG, "pointer backend failover unavailable")
+        }
+    }
+
+    internal object BoundaryAlignment {
+        private const val MIN_RAW_DISTANCE = 8_192
+        private const val MULTIPLIER = 16
+        private const val MAX_RAW_DISTANCE = 120_000
+
+        fun vector(boundary: PointerBoundary, width: Int, height: Int): Pair<Int, Int> {
+            require(width > 0 && height > 0)
+            val axis = when (boundary) {
+                PointerBoundary.LEFT, PointerBoundary.RIGHT -> width
+                PointerBoundary.TOP, PointerBoundary.BOTTOM -> height
+            }
+            val magnitude = maxOf(MIN_RAW_DISTANCE, axis * MULTIPLIER)
+                .coerceAtMost(MAX_RAW_DISTANCE)
+            return when (boundary) {
+                PointerBoundary.LEFT -> -magnitude to 0
+                PointerBoundary.RIGHT -> magnitude to 0
+                PointerBoundary.TOP -> 0 to -magnitude
+                PointerBoundary.BOTTOM -> 0 to magnitude
+            }
         }
     }
 
