@@ -8,6 +8,17 @@ on:
       - reopened
   workflow_dispatch:
     inputs:
+      backfill:
+        description: Reconcile all currently open issues
+        required: true
+        type: boolean
+        default: true
+      dry_run:
+        description: Report proposed changes without mutating labels
+        required: true
+        type: boolean
+        default: true
+    inputs:
       dry_run:
         description: Report proposed changes without mutating labels
         required: true
