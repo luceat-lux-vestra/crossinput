@@ -20,10 +20,19 @@ public struct HelperCapabilities: OptionSet, Sendable, Equatable {
 
     public static let semanticPointerResult = Self(rawValue: 1 << 0)
     public static let explicitPointerRouting = Self(rawValue: 1 << 1)
+    public static let remoteBoundaryAlignment = Self(rawValue: 1 << 2)
     public static let currentPointerPath: Self = [
         .semanticPointerResult,
         .explicitPointerRouting,
+        .remoteBoundaryAlignment,
     ]
+}
+
+public enum PointerBoundary: UInt8, Sendable, Equatable, CaseIterable {
+    case left = 0
+    case right = 1
+    case top = 2
+    case bottom = 3
 }
 
 public enum MessageType: UInt16, Sendable {
@@ -40,6 +49,7 @@ public enum MessageType: UInt16, Sendable {
     case pointerButton = 0x000A
     case pointerScroll = 0x000B
     case keyEvent = 0x000C
+    case pointerAlignBoundary = 0x000D
     // Android -> Mac
     case helloAck = 0x8001
     case displayList = 0x8002
@@ -181,6 +191,10 @@ public enum Messages {
 
     public static func pointerMoveRel(dx: Int32, dy: Int32) -> Data {
         LE.i32(dx) + LE.i32(dy)
+    }
+
+    public static func pointerAlignBoundary(_ boundary: PointerBoundary) -> Data {
+        LE.u8(boundary.rawValue)
     }
 
     /// button: 0=left 1=right 2=middle
