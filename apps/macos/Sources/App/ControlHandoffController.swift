@@ -321,6 +321,7 @@ final class ControlHandoffController: @unchecked Sendable {
                 deliveredDy: CGFloat(deliveredDy)
             )
             if case let .alignRemoteBoundary(edge) = action {
+                Diagnostics.log("remote boundary alignment requested edge=\(edge.rawValue)")
                 guard enqueueRemoteBoundaryAlignment(
                     edge: edge,
                     profile: alignmentProfile,
@@ -383,6 +384,7 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func failRemoteBoundaryAlignment(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
+        Diagnostics.log("remote boundary alignment failed")
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
