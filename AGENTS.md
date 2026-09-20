@@ -65,6 +65,64 @@ Preserve validated product behavior, device/protocol facts, safety invariants, a
 6. PRs must reference the issue and must not be merged without the required verification record.
 7. On completion, close the issue and leave the merge record in the issue.
 
+## Failure classification before remediation
+
+A failing runtime observation, device test, CI check, evidence gate, hardening
+audit, or other red signal is an **observation**, not a patch target. Before a
+non-trivial remediation, classify the observed failure as exactly one of:
+
+- `implementation defect` — CrossInput product code violates the accepted
+  product, protocol, lifecycle, routing, or safety contract;
+- `test defect` — a harness, fixture, simulator, assertion, automation step,
+  or verification procedure is wrong for the intended contract;
+- `evidence defect` — device/runtime evidence capture, attribution,
+  provenance, freshness, parsing, or proof construction is wrong or
+  insufficient;
+- `workflow-policy drift` — CI, hardening, repository policy, checked-in
+  governance, or live repository settings have diverged;
+- `environment failure` — host/device state, ADB transport, permissions,
+  toolchain, runner, platform service, resource state, or another execution
+  environment condition caused the failure;
+- `UNKNOWN` — available evidence does not justify any of the five classes.
+
+Project-specific subtypes may refine the canonical class. In particular,
+device/platform capability limitations must be recorded explicitly instead of
+being silently treated as product bugs. A missing or unsupported device
+capability may be classified as `environment failure / device capability`
+only when the accepted product contract already treats that capability as
+optional or runtime-detected; otherwise keep the responsibility `UNKNOWN`
+until product detection, harness, evidence, and environment causes are
+separated.
+
+`UNKNOWN`, `UNVERIFIED`, and `INSUFFICIENT EVIDENCE` remain fail-closed.
+Classification is itself a proof obligation. Preserve at least:
+
+```text
+Observed:
+Classification:
+Basis:
+Root cause:
+Remediation:
+Proof:
+```
+
+The `Basis` must justify the selected responsibility layer and identify
+plausible alternatives that were rejected or remain unresolved. Do not treat a
+device/runtime symptom as an implementation defect until product code,
+harness/test, device capability, evidence, workflow-policy, and host/device
+environment causes have been separated.
+
+A deterministic/reproducible failure does not become an
+`environment failure` merely because a later rerun passes. Never weaken a
+valid device test, verifier, safety invariant, evidence requirement, or
+hardening/review policy merely to obtain green.
+
+If remediation changes product code, a test/harness, device-capability
+assumption, evidence procedure, workflow/policy, or another premise of the
+reviewed revision, invalidate the affected evidence. Re-run the relevant
+targeted/device proof and required CI on the new exact final PR HEAD before
+merge.
+
 ## Documentation requirements
 
 - Decisions are recorded in `docs/adr/` in ADR format (context/decision/alternatives/consequences/validation/revisit conditions).
