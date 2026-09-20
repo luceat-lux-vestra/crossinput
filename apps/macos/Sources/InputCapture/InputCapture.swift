@@ -15,9 +15,20 @@ public enum SuppressionReleaseReason: String, Sendable {
     case emergencyHotkey
     case remoteUnavailable
     case captureStopped
+    /// The CGEventTap was disabled at runtime. Remote ownership can no longer
+    /// prove keyboard suppression, so the active suppression epoch fails local.
+    case tapDisabled
     /// An external controller took ownership of the macOS pointer. This path
     /// must not restore the pointer by warping it to the configured edge.
     case externalControl
+}
+
+/// Local CG input observed while the external pointer backend is acquiring or
+/// owns the built-in trackpad. Edge-pinned pointer motion may continue during
+/// acquisition; every other input shape is incompatible with an atomic handoff.
+public enum ExternalPointerOwnerActivity: Sendable, Equatable {
+    case edgePinnedPointerMove
+    case incompatibleLocalInput
 }
 
 /// Compatibility names for the host-facing capture API. Their underlying
@@ -114,9 +125,17 @@ private final class ExternalControlSourceDiagnostics: @unchecked Sendable {
 ///   and forwarded, but a watchdog automatically restores the pointer, and the emergency
 ///   shortcut (⇧⌘X) always returns control regardless of the Android connection.
 public final class InputCapture: @unchecked Sendable {
-    public enum Mode: Sendable {
+    public enum Mode: Sendable, Equatable {
         case listening   // observe only: pointer stays on macOS
-        case suppressed  // consume pointer events and forward them to the device
+        case suppressed  // keyboard + pointer-local-leak suppression is active
+    }
+
+    private enum PointerSuppressionStrategy: Sendable {
+        /// Legacy event-tap pointer forwarding with edge-hold Quartz warps.
+        case eventTapWarp
+        /// Another backend owns pointer semantics and physical pointer seizure.
+        /// Event-tap pointer events are consumed only as a no-leak guard.
+        case externalOwner
     }
 
     public var mode: Mode {
@@ -141,6 +160,11 @@ public final class InputCapture: @unchecked Sendable {
     /// can release any captured pointer buttons before the triggering event is
     /// passed through to macOS.
     public var onPointerStateReset: (@Sendable () -> Void)?
+    /// Called when local CG input appears while an external backend is
+    /// acquiring or owns pointer semantics. The triggering event is passed
+    /// through when ownership is not yet active or must fail local.
+    public var onExternalPointerOwnerActivity:
+        (@Sendable (UInt64, ExternalPointerOwnerActivity) -> Void)?
     /// Called when the pointer reaches a screen edge while listening.
     /// 0=left 1=right 2=top 3=bottom (ScreenEdge rawValue).
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
@@ -153,6 +177,10 @@ public final class InputCapture: @unchecked Sendable {
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var runLoop: CFRunLoop?
+    /// Invalidates queued run-loop installation work across stop/restart.
+    /// Without this generation, stop() can win before the tapQueue block runs
+    /// and that stale block can reattach an invalidated source afterwards.
+    private var tapLifecycleGeneration: UInt64 = 0
     private var watchdog: DispatchSourceTimer?
     /// Dedicated queue for the fail-safe watchdog. The tap queue's only thread
     /// is parked inside CFRunLoopRun() and can never service timer events, so
@@ -168,15 +196,31 @@ public final class InputCapture: @unchecked Sendable {
     /// across a gap or out-of-frame event.
     private var currentEventDisplay: DisplayEdgeConfiguration?
     private var isSuppressing = false
+    private var pointerSuppressionStrategy: PointerSuppressionStrategy = .eventTapWarp
+    /// External-owner epochs reserve a generation before CoreHID acquisition,
+    /// but keyboard suppression/forwarding starts only after the exact
+    /// generation has a published and validated host-pointer lease.
+    private var externalPointerOwnerReadyGeneration: UInt64?
     private let externalControlClassifier: ExternalControlEventClassifier
     private let sourceIdentityResolver: @Sendable (Int32) -> ExternalControlEventSource?
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
     private let pointerRestoreOverride: (() -> Void)?
+    /// Physical host input must be neutral before ownership can cross to a
+    /// different machine. Injected only by tests; production reads the HID
+    /// system state table directly.
+    private let hostInputNeutralProvider: @Sendable () -> Bool
     /// Test-only barrier used to deterministically exercise a lifecycle
     /// boundary after an event has been admitted as suppressed but before it
     /// is handed to the capture callback.
     private let beforeSuppressedEventEmission: (@Sendable () -> Void)?
+    /// Test-only barrier before generation-scoped keyboard admission.
+    private let beforeSuppressedKeyboardAdmission: (@Sendable () -> Void)?
+    /// Test-only barrier after isSuppressing becomes false but before cleanup
+    /// and onSuppressionReleased run. This exposes the exact local-return
+    /// linearization boundary without relying on held-key side effects.
+    private let afterSuppressionDeactivatedBeforeCallbacks:
+        (@Sendable () -> Void)?
 
     /// Monotonically increasing counter identifying the current suppression session.
     /// Incremented on each suppress() call. Passed to onSuppressionReleased so
@@ -187,6 +231,7 @@ public final class InputCapture: @unchecked Sendable {
     private var androidEdgeByDisplay: [CGDirectDisplayID: ScreenEdge] = [:]
     private let edgeThreshold: CGFloat = 2
     private var emergencyHotKey: EventHotKeyRef?
+    private var emergencyHotKeyHandler: EventHandlerRef?
     /// Prevents an immediate re-trigger after the pointer returns to macOS.
     /// Guarded by stateLock (written from release paths on other threads).
     private var edgeCooldownUntil: CFTimeInterval = 0
@@ -223,7 +268,11 @@ public final class InputCapture: @unchecked Sendable {
         sourceIdentityResolver: (@Sendable (Int32) -> ExternalControlEventSource?)? = nil,
         pointerRestoreOverride: (() -> Void)? = nil,
         suppressionTimeoutOverride: TimeInterval? = nil,
-        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil
+        beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil,
+        beforeSuppressedKeyboardAdmission: (@Sendable () -> Void)? = nil,
+        afterSuppressionDeactivatedBeforeCallbacks:
+            (@Sendable () -> Void)? = nil,
+        hostInputNeutralProvider: (@Sendable () -> Bool)? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
@@ -231,8 +280,14 @@ public final class InputCapture: @unchecked Sendable {
             enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
         )
         self.pointerRestoreOverride = pointerRestoreOverride
+        self.hostInputNeutralProvider =
+            hostInputNeutralProvider ?? Self.isPhysicalHostInputNeutral
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
         self.beforeSuppressedEventEmission = beforeSuppressedEventEmission
+        self.beforeSuppressedKeyboardAdmission =
+            beforeSuppressedKeyboardAdmission
+        self.afterSuppressionDeactivatedBeforeCallbacks =
+            afterSuppressionDeactivatedBeforeCallbacks
     }
 
     // MARK: - Lifecycle
@@ -250,7 +305,17 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public func startTrusted() -> Bool {
-        guard tap == nil else { return true }
+        if let existingTap = stateLock.withLock({ tap }) {
+            if CGEvent.tapIsEnabled(tap: existingTap) {
+                return true
+            }
+            // A timed-out/user-disabled tap can remain non-nil even when
+            // re-enabling failed. Never report that stale tap as a successful
+            // fresh capture path.
+            Diagnostics.log("startTrusted(): stale disabled tap; recreating")
+            stop()
+        }
+
         var mask: CGEventMask = 0
         for eventType in Self.capturedEvents {
             mask |= CGEventMask(1 << eventType.rawValue)
@@ -260,7 +325,7 @@ public final class InputCapture: @unchecked Sendable {
             let capture = Unmanaged<InputCapture>.fromOpaque(refcon).takeUnretainedValue()
             return capture.handle(proxy: proxy, type: type, event: event)
         }
-        guard let tap = CGEvent.tapCreate(
+        guard let newTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
@@ -268,22 +333,91 @@ public final class InputCapture: @unchecked Sendable {
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else { return false }
-        self.tap = tap
-        self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        guard let source = CFMachPortCreateRunLoopSource(
+            kCFAllocatorDefault,
+            newTap,
+            0
+        ) else {
+            CFMachPortInvalidate(newTap)
+            return false
+        }
+
+        let generation: UInt64? = stateLock.withLock {
+            // Concurrent starts are not expected in production, but fail
+            // locally instead of publishing a second modifying tap.
+            guard tap == nil else { return nil }
+            tapLifecycleGeneration &+= 1
+            if tapLifecycleGeneration == 0 {
+                tapLifecycleGeneration = 1
+            }
+            tap = newTap
+            runLoopSource = source
+            return tapLifecycleGeneration
+        }
+        guard let generation else {
+            CFMachPortInvalidate(newTap)
+            return true
+        }
+
         tapQueue.async { [weak self] in
             guard let self else { return }
             let runLoop = CFRunLoopGetCurrent()
-            self.runLoop = runLoop
-            CFRunLoopAddSource(runLoop, self.runLoopSource, .commonModes)
-            self.installEmergencyHotKey()
+
+            // Do not capture CFRunLoopSource across the Sendable queue
+            // boundary. Publish it under stateLock, then retrieve the exact
+            // current source from inside the tap queue.
+            let sourceToInstall: CFRunLoopSource? =
+                self.stateLock.withLock {
+                    guard self.tapLifecycleGeneration == generation,
+                          self.tap != nil,
+                          let currentSource = self.runLoopSource else {
+                        return nil
+                    }
+                    self.runLoop = runLoop
+                    return currentSource
+                }
+            guard let sourceToInstall else { return }
+
+            CFRunLoopAddSource(runLoop, sourceToInstall, .commonModes)
+
+            // stop() can race between publishing runLoop above and adding the
+            // source. Recheck the lifecycle generation before entering the
+            // blocking run loop; stale work removes its own source and exits.
+            let stillCurrent = self.stateLock.withLock {
+                self.tapLifecycleGeneration == generation
+                    && self.tap != nil
+                    && self.runLoopSource === sourceToInstall
+            }
+            guard stillCurrent else {
+                CFRunLoopRemoveSource(
+                    runLoop,
+                    sourceToInstall,
+                    .commonModes
+                )
+                return
+            }
+
+            self.installEmergencyHotKey(generation: generation)
             CFRunLoopRun()
+
+            self.stateLock.withLock {
+                if self.tapLifecycleGeneration == generation {
+                    self.runLoop = nil
+                }
+            }
         }
         return true
     }
 
     public func stop() {
         release(reason: .captureStopped)
-        stateLock.withLock {
+
+        let runLoopToStop: CFRunLoop? = stateLock.withLock {
+            tapLifecycleGeneration &+= 1
+            if tapLifecycleGeneration == 0 {
+                tapLifecycleGeneration = 1
+            }
+
             if let tap {
                 CFMachPortInvalidate(tap)
                 self.tap = nil
@@ -294,33 +428,113 @@ public final class InputCapture: @unchecked Sendable {
             runLoopSource = nil
             watchdog?.cancel()
             watchdog = nil
+
+            let activeRunLoop = runLoop
+            runLoop = nil
+            return activeRunLoop
         }
+
         // CFRunLoopStop is documented thread-safe; call it directly instead of
         // enqueueing on tapQueue, whose thread may be parked inside
         // CFRunLoopRun() and could never service the block (issue #50).
-        stateLock.withLock {
-            if let runLoop {
-                CFRunLoopStop(runLoop)
-                self.runLoop = nil
-            }
+        if let runLoopToStop {
+            CFRunLoopStop(runLoopToStop)
         }
+        uninstallEmergencyHotKey()
     }
 
     // MARK: - Mode control
 
-    /// Switches to suppressed mode: pointer events are consumed and forwarded.
+    /// Legacy suppression path retained while the Architecture Leap is staged.
+    /// Pointer semantics come from CGEventTap and movement is edge-held by Quartz.
     public func suppress() -> UInt64? {
+        suppress(pointerStrategy: .eventTapWarp)
+    }
+
+    /// Suppression path used when another backend owns host pointer seizure and
+    /// semantic pointer capture (CoreHID for the built-in trackpad).
+    ///
+    /// CGEventTap remains installed for keyboard handling and local-input
+    /// anomaly detection. Pointer CGEvents are never silently deleted by this
+    /// mode; CoreHID is the only pointer-ownership mechanism.
+    ///
+    /// The returned generation is initially acquisition-only. Keyboard input
+    /// stays local until activateExternalPointerOwner(generation:) succeeds.
+    public func suppressWithExternalPointerOwner() -> UInt64? {
+        suppress(pointerStrategy: .externalOwner)
+    }
+
+    /// Activates keyboard suppression/forwarding for exactly one external-owner
+    /// generation after its CoreHID lease has been published and validated.
+    /// Stale or already-released generations fail closed.
+    public func activateExternalPointerOwner(generation: UInt64) -> Bool {
+        stateLock.withLock {
+            guard isSuppressing,
+                  pointerSuppressionStrategy == .externalOwner,
+                  suppressionGeneration == generation else {
+                return false
+            }
+            externalPointerOwnerReadyGeneration = generation
+            return true
+        }
+    }
+
+    /// Withdraws remote keyboard ownership for exactly one external-owner
+    /// generation without ending the suppression epoch yet. Controller-originated
+    /// return uses this before dropping the CoreHID lease so any keyboard event
+    /// that starts after native pointer ownership is restored is already local.
+    @discardableResult
+    public func deactivateExternalPointerOwner(generation: UInt64) -> Bool {
+        stateLock.withLock {
+            guard isSuppressing,
+                  pointerSuppressionStrategy == .externalOwner,
+                  suppressionGeneration == generation else {
+                return false
+            }
+            externalPointerOwnerReadyGeneration = nil
+            return true
+        }
+    }
+
+    public func isExternalPointerOwnerActive(generation: UInt64) -> Bool {
+        stateLock.withLock {
+            isSuppressing
+                && pointerSuppressionStrategy == .externalOwner
+                && suppressionGeneration == generation
+                && externalPointerOwnerReadyGeneration == generation
+        }
+    }
+
+    private func suppress(pointerStrategy: PointerSuppressionStrategy) -> UInt64? {
         let generation: UInt64? = stateLock.withLock {
             guard !isSuppressing else { return nil }
+
+            if case .externalOwner = pointerStrategy {
+                // Do not split an input transition across machines. A key,
+                // modifier, or mouse button that went down on macOS must also
+                // come up on macOS before remote ownership can begin.
+                guard hostInputNeutralProvider() else {
+                    Diagnostics.log(
+                        "external-owner suppression blocked reason=host-input-active"
+                    )
+                    return nil
+                }
+            }
+
             isSuppressing = true
+            pointerSuppressionStrategy = pointerStrategy
             suppressionGeneration &+= 1
+            externalPointerOwnerReadyGeneration = nil
             keysDown.removeAll()
             keysDownGeneration = suppressionGeneration
             return suppressionGeneration
         }
         guard let generation else { return nil }
         startWatchdog(for: generation)
-        Diagnostics.log("suppression started generation=\(generation)")
+        Diagnostics.log(
+            "suppression started generation=\(generation) pointerStrategy="
+                + "\(pointerStrategy)"
+        )
         return generation
     }
 
@@ -329,39 +543,53 @@ public final class InputCapture: @unchecked Sendable {
         release(reason: reason, expectedGeneration: nil)
     }
 
+    /// Releases exactly one known suppression generation. Stale lifecycle
+    /// work must use this overload so it can never release a newer epoch.
+    public func release(
+        reason: SuppressionReleaseReason,
+        generation: UInt64
+    ) {
+        release(reason: reason, expectedGeneration: generation)
+    }
+
     /// Releases only the suppression session that admitted the callback. This
     /// prevents a stale watchdog, external-control probe, or emergency event
     /// from releasing a newer suppression generation after re-entry.
     private func release(reason: SuppressionReleaseReason, expectedGeneration: UInt64?) {
-        let (wasSuppressing, generation) = stateLock.withLock {
+        let (wasSuppressing, generation, pointerStrategy) = stateLock.withLock {
             if let expectedGeneration,
                (!isSuppressing || suppressionGeneration != expectedGeneration) {
-                return (false, suppressionGeneration)
+                return (false, suppressionGeneration, pointerSuppressionStrategy)
             }
             let was = isSuppressing
             let gen = suppressionGeneration
+            let strategy = pointerSuppressionStrategy
             isSuppressing = false
+            pointerSuppressionStrategy = .eventTapWarp
+            externalPointerOwnerReadyGeneration = nil
             watchdog?.cancel()
             watchdog = nil
-            return (was, gen)
+            return (was, gen, strategy)
         }
         if wasSuppressing {
             Diagnostics.log(
                 "suppression released generation=\(generation) reason=\(reason.rawValue)"
             )
+            afterSuppressionDeactivatedBeforeCallbacks?()
             flushStuckKeys(for: generation)
             if reason == .externalControl {
-                // External control owns the pointer position. Do not warp it
-                // back to the edge or center; the triggering event is returned
-                // to macOS immediately after this synchronous cleanup.
+                // External control owns the pointer position. Do not warp it.
+                // The triggering event is returned to macOS after cleanup.
                 onPointerStateReset?()
-                stateLock.withLock {
-                    edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-                }
+                armEdgeExitGate()
+            } else if pointerStrategy == .externalOwner {
+                // CoreHID release restores native pointer ownership in place.
+                // Any Quartz warp/synthetic move here would reintroduce the
+                // cursor-corruption trigger proven by issue #96.
+                armEdgeExitGate()
             } else {
-                // Physically return the pointer to the crossing edge point the user
-                // pushed through, so Android->macOS continues seamlessly instead of
-                // jumping to the screen center.
+                // Legacy path only: restore the crossing point while the old
+                // event-tap ownership implementation remains staged.
                 if let pointerRestoreOverride {
                     pointerRestoreOverride()
                 } else {
@@ -388,6 +616,34 @@ public final class InputCapture: @unchecked Sendable {
         }
     }
 
+    /// Reads only boolean hardware state; no key codes or button identities
+    /// are logged or persisted. The HID-system table excludes synthetic app
+    /// sources and represents the physical input state that must remain owned
+    /// by macOS until every down transition has its local up transition.
+    private static func isPhysicalHostInputNeutral() -> Bool {
+        for rawKeyCode in UInt16(0)...UInt16(127) {
+            if CGEventSource.keyState(
+                .hidSystemState,
+                key: CGKeyCode(rawKeyCode)
+            ) {
+                return false
+            }
+        }
+
+        for rawButton in UInt32(0)...UInt32(31) {
+            guard let button = CGMouseButton(rawValue: rawButton) else {
+                continue
+            }
+            if CGEventSource.buttonState(
+                .hidSystemState,
+                button: button
+            ) {
+                return false
+            }
+        }
+        return true
+    }
+
     // MARK: - Event handling (capture thread)
 
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -396,12 +652,38 @@ public final class InputCapture: @unchecked Sendable {
         // a callback that began in epoch A be relabelled as epoch B after a
         // return and re-entry. The controller would then forward stale input
         // to the new remote epoch.
-        let suppressedGeneration = stateLock.withLock {
-            isSuppressing ? suppressionGeneration : nil
+        let suppressionSnapshot: (
+            generation: UInt64,
+            pointerStrategy: PointerSuppressionStrategy,
+            externalOwnerReady: Bool
+        )? = stateLock.withLock {
+            guard isSuppressing else { return nil }
+            return (
+                suppressionGeneration,
+                pointerSuppressionStrategy,
+                pointerSuppressionStrategy != .externalOwner
+                    || externalPointerOwnerReadyGeneration == suppressionGeneration
+            )
         }
+        let suppressedGeneration = suppressionSnapshot?.generation
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            // A disabled modifying tap cannot prove keyboard suppression.
+            // If a remote epoch is active, fail local synchronously before
+            // attempting to re-enable the tap. This also triggers the Control
+            // owner to drop any published CoreHID lease.
+            if let generation = suppressedGeneration {
+                Diagnostics.log(
+                    "event tap disabled during suppression action=local-return"
+                )
+                release(
+                    reason: .tapDisabled,
+                    expectedGeneration: generation
+                )
+            }
+            if let currentTap = stateLock.withLock({ tap }) {
+                CGEvent.tapEnable(tap: currentTap, enable: true)
+            }
             return Unmanaged.passUnretained(event)
         default:
             // Source resolution is unnecessary on the hot path while local
@@ -423,19 +705,75 @@ public final class InputCapture: @unchecked Sendable {
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    // CoreHID owns built-in-trackpad semantics. A CG pointer
+                    // event during this mode is never silently deleted.
+                    beforeSuppressedEventEmission?()
+
+                    let currentExternalGeneration: UInt64? =
+                        stateLock.withLock {
+                            guard isSuppressing,
+                                  pointerSuppressionStrategy
+                                      == .externalOwner else {
+                                return nil
+                            }
+                            return suppressionGeneration
+                        }
+
+                    guard let currentExternalGeneration else {
+                        // Local return won the race. This is now a local event.
+                        return Unmanaged.passUnretained(event)
+                    }
+
+                    if currentExternalGeneration != snapshot.generation {
+                        // A replacement external-owner epoch won the race.
+                        // Never leak this old callback into the replacement:
+                        // fail the current acquisition/ownership local and pass
+                        // the triggering event to macOS.
+                        onExternalPointerOwnerActivity?(
+                            currentExternalGeneration,
+                            .incompatibleLocalInput
+                        )
+                        return Unmanaged.passUnretained(event)
+                    }
+
+                    // Before seizure, outward motion may legitimately remain
+                    // on the configured edge; after seizure, any CG pointer
+                    // event is an ownership anomaly.
+                    let remainsAtConfiguredEdge =
+                        type == .mouseMoved
+                        && currentConfiguredEdgeCandidate() != nil
+                    onExternalPointerOwnerActivity?(
+                        currentExternalGeneration,
+                        remainsAtConfiguredEdge
+                            ? .edgePinnedPointerMove
+                            : .incompatibleLocalInput
+                    )
+                    return Unmanaged.passUnretained(event)
+                }
                 let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
                 let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)), generation: suppressedGeneration)
-                holdPointerAtEdge(generation: suppressedGeneration)
-                return nil // consume: pointer held at the edge
+                emitPointerEvent(
+                    PointerEvent(.move(dx: dx, dy: dy)),
+                    generation: snapshot.generation
+                )
+                holdPointerAtEdge(generation: snapshot.generation)
+                return nil
             }
             detectEdge()
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
              .otherMouseDown, .otherMouseUp:
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    onExternalPointerOwnerActivity?(
+                        snapshot.generation,
+                        .incompatibleLocalInput
+                    )
+                    return Unmanaged.passUnretained(event)
+                }
                 let button = Self.buttonIndex(for: type)
                 let down: Bool
                 switch type {
@@ -443,21 +781,39 @@ public final class InputCapture: @unchecked Sendable {
                 default: down = false
                 }
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.button(button: button, down: down)), generation: suppressedGeneration)
+                emitPointerEvent(
+                    PointerEvent(.button(button: button, down: down)),
+                    generation: snapshot.generation
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .scrollWheel:
-            if let suppressedGeneration {
+            if let snapshot = suppressionSnapshot {
+                if snapshot.pointerStrategy == .externalOwner {
+                    onExternalPointerOwnerActivity?(
+                        snapshot.generation,
+                        .incompatibleLocalInput
+                    )
+                    return Unmanaged.passUnretained(event)
+                }
                 let vertical = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
                 let horizontal = Float(event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
                 beforeSuppressedEventEmission?()
-                emitPointerEvent(PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)), generation: suppressedGeneration)
+                emitPointerEvent(
+                    PointerEvent(.scroll(horizontal: horizontal, vertical: vertical)),
+                    generation: snapshot.generation
+                )
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .keyDown, .keyUp, .flagsChanged:
-            return handleKeyboard(event: event, type: type, suppressionGeneration: suppressedGeneration)
+            return handleKeyboard(
+                event: event,
+                type: type,
+                suppressionGeneration: suppressedGeneration,
+                remoteAdmissionReady: suppressionSnapshot?.externalOwnerReady ?? true
+            )
         default:
             return Unmanaged.passUnretained(event)
         }
@@ -483,9 +839,15 @@ public final class InputCapture: @unchecked Sendable {
     /// registered Carbon hot keys — the shortcut must not depend on events we
     /// swallow (issue #53). The Carbon registration remains a secondary path
     /// for windows where the tap itself is disabled or unsuppressed.
-    private func handleKeyboard(event: CGEvent, type: CGEventType,
-                                suppressionGeneration: UInt64?) -> Unmanaged<CGEvent>? {
-        guard let suppressionGeneration else { return Unmanaged.passUnretained(event) }
+    private func handleKeyboard(
+        event: CGEvent,
+        type: CGEventType,
+        suppressionGeneration: UInt64?,
+        remoteAdmissionReady: Bool
+    ) -> Unmanaged<CGEvent>? {
+        guard let suppressionGeneration else {
+            return Unmanaged.passUnretained(event)
+        }
         let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .keyDown,
            virtualKey == Self.emergencyKeyCode,
@@ -494,8 +856,21 @@ public final class InputCapture: @unchecked Sendable {
             release(reason: .emergencyHotkey, expectedGeneration: suppressionGeneration)
             return nil
         }
+
+        // During CoreHID acquisition keyboard ownership is still local. Pass
+        // the triggering event through and cancel acquisition so a transition
+        // cannot split across local and remote owners.
+        guard remoteAdmissionReady else {
+            onExternalPointerOwnerActivity?(
+                suppressionGeneration,
+                .incompatibleLocalInput
+            )
+            return Unmanaged.passUnretained(event)
+        }
+
         let modifiers = KeyCodeMapper.semanticModifiers(ofFlags: event.flags)
         let key = KeyCodeMapper.semanticKey(ofVirtualKey: virtualKey)
+        beforeSuppressedKeyboardAdmission?()
         switch type {
         case .flagsChanged:
             // Modifier-only transitions remain represented in modifier state;
@@ -505,8 +880,12 @@ public final class InputCapture: @unchecked Sendable {
             // Auto-repeat arrives as further .keyDown with the autorepeat bit set.
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             if let key {
-                guard updateKeysDown(key, transition: .down, generation: suppressionGeneration) else {
-                    return nil
+                guard updateKeysDown(
+                    key,
+                    transition: .down,
+                    generation: suppressionGeneration
+                ) else {
+                    return dispositionAfterStaleKeyboardAdmission(event)
                 }
                 beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(
@@ -518,8 +897,12 @@ public final class InputCapture: @unchecked Sendable {
             }
         case .keyUp:
             if let key {
-                guard updateKeysDown(key, transition: .up, generation: suppressionGeneration) else {
-                    return nil
+                guard updateKeysDown(
+                    key,
+                    transition: .up,
+                    generation: suppressionGeneration
+                ) else {
+                    return dispositionAfterStaleKeyboardAdmission(event)
                 }
                 beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(
@@ -533,6 +916,46 @@ public final class InputCapture: @unchecked Sendable {
             break
         }
         return nil // consume: system shortcuts must not fire on macOS
+    }
+
+    /// A keyboard callback can lose its generation while it is executing.
+    /// If ownership is local now, the triggering event belongs to macOS.
+    /// If a replacement external-owner epoch is still acquiring, pass the
+    /// event locally and abort that epoch so the transition cannot split.
+    /// A replacement fully-remote epoch consumes the stale callback instead
+    /// of leaking input to macOS or relabelling it as the new generation.
+    private func dispositionAfterStaleKeyboardAdmission(
+        _ event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        let current: (
+            generation: UInt64,
+            strategy: PointerSuppressionStrategy,
+            externalOwnerReady: Bool
+        )? = stateLock.withLock {
+            guard isSuppressing else { return nil }
+            return (
+                suppressionGeneration,
+                pointerSuppressionStrategy,
+                pointerSuppressionStrategy != .externalOwner
+                    || externalPointerOwnerReadyGeneration
+                        == suppressionGeneration
+            )
+        }
+
+        guard let current else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if current.strategy == .externalOwner,
+           !current.externalOwnerReady {
+            onExternalPointerOwnerActivity?(
+                current.generation,
+                .incompatibleLocalInput
+            )
+            return Unmanaged.passUnretained(event)
+        }
+
+        return nil
     }
 
     private func emitPointerEvent(_ event: PointerEvent, generation: UInt64) {
@@ -628,6 +1051,25 @@ public final class InputCapture: @unchecked Sendable {
         currentEventDisplay?.displayID
     }
 
+    private func currentConfiguredEdgeCandidate() -> DisplayEdgeCandidate? {
+        guard let display = currentEventDisplay,
+              let configuredEdge = stateLock.withLock({
+                  androidEdgeByDisplay[display.displayID]
+              }) else {
+            return nil
+        }
+        let currentDisplay = DisplayEdgeConfiguration(
+            displayID: display.displayID,
+            frame: display.frame,
+            configuredEdge: configuredEdge
+        )
+        return DisplayEdgeResolver.candidate(
+            at: currentPosition,
+            displays: [currentDisplay],
+            threshold: edgeThreshold
+        )
+    }
+
     private func detectEdge() {
         // After a return-to-macOS warp, ignore the edge until the pointer has
         // physically left the configured edge zone. The pointer is restored
@@ -640,23 +1082,11 @@ public final class InputCapture: @unchecked Sendable {
         }
         let exitGated = requireEdgeExit
         stateLock.unlock()
-        guard let display = currentEventDisplay,
-              let configuredEdge = stateLock.withLock({ androidEdgeByDisplay[display.displayID] }) else {
-            return
-        }
-        let currentDisplay = DisplayEdgeConfiguration(
-            displayID: display.displayID,
-            frame: display.frame,
-            configuredEdge: configuredEdge
-        )
+
         // Only the configured Android edge of the display containing this
         // event triggers a switch. An unresolved gap/out-of-frame event has no
         // candidate and therefore remains ordinary macOS navigation.
-        guard let candidate = DisplayEdgeResolver.candidate(
-            at: currentPosition,
-            displays: [currentDisplay],
-            threshold: edgeThreshold
-        ) else {
+        guard let candidate = currentConfiguredEdgeCandidate() else {
             if exitGated {
                 // First event outside the zone releases the gate; that event
                 // itself cannot arm (it points away from the edge).
@@ -666,6 +1096,18 @@ public final class InputCapture: @unchecked Sendable {
         }
         if exitGated { return }
         onScreenEdge?(candidate.edge)
+    }
+
+    private func armEdgeExitGate() {
+        stateLock.withLock {
+            edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
+            requireEdgeExit = true
+        }
+    }
+
+    /// Test-only state probe for the no-retrap invariant after local return.
+    internal var isAwaitingEdgeExitForTesting: Bool {
+        stateLock.withLock { requireEdgeExit }
     }
 
     private func centerPointer() {
@@ -703,10 +1145,7 @@ public final class InputCapture: @unchecked Sendable {
             // Arm the gates even on the unresolved-display path: without them
             // a subsequent event near any configured edge can instantly
             // re-arm handoff after a fail-safe return (issue #50).
-            stateLock.withLock {
-                edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-                requireEdgeExit = true
-            }
+            armEdgeExitGate()
             return
         }
         let hold = DisplayEdgeResolver.pointerPosition(
@@ -721,10 +1160,7 @@ public final class InputCapture: @unchecked Sendable {
         // leave-zone gate. The synthetic move posted above arrives through
         // the tap with the pointer still inside the zone, so only physical
         // movement away from the edge may re-arm handoff (issue #50).
-        stateLock.withLock {
-            edgeCooldownUntil = CFAbsoluteTimeGetCurrent() + 0.5
-            requireEdgeExit = true
-        }
+        armEdgeExitGate()
     }
 
     /// macOS drops the first real movement deltas after a warp (the pointer
@@ -830,22 +1266,107 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Emergency shortcut (⇧⌘X) — always works, independent of the Android link
 
-    private func installEmergencyHotKey() {
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                      eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetEventDispatcherTarget(), { _, _, userData in
-            guard let userData else { return noErr }
-            let capture = Unmanaged<InputCapture>.fromOpaque(userData).takeUnretainedValue()
-            capture.release(reason: .emergencyHotkey)
-            return noErr
-        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
+    private func installEmergencyHotKey(generation: UInt64) {
+        let alreadyInstalled = stateLock.withLock {
+            emergencyHotKey != nil || emergencyHotKeyHandler != nil
+        }
+        guard !alreadyInstalled else { return }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        var handlerRef: EventHandlerRef?
+        let handlerStatus = InstallEventHandler(
+            GetEventDispatcherTarget(),
+            { _, _, userData in
+                guard let userData else { return noErr }
+                let capture = Unmanaged<InputCapture>
+                    .fromOpaque(userData)
+                    .takeUnretainedValue()
+                capture.release(reason: .emergencyHotkey)
+                return noErr
+            },
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &handlerRef
+        )
+        guard handlerStatus == noErr, let handlerRef else {
+            Diagnostics.log(
+                "emergency hotkey handler install failed status=\(handlerStatus)"
+            )
+            return
+        }
 
         var hotKeyRef: EventHotKeyRef?
         let keyCode = UInt32(kVK_ANSI_X)
         let modifiers = UInt32(cmdKey | shiftKey)
-        let hotKeyID = EventHotKeyID(signature: OSType(0x414D5058), id: 1) // "AMPX"
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
-        emergencyHotKey = hotKeyRef
+        let hotKeyID = EventHotKeyID(
+            signature: OSType(0x414D5058),
+            id: 1
+        ) // "AMPX"
+        let hotKeyStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetEventDispatcherTarget(),
+            0,
+            &hotKeyRef
+        )
+        guard hotKeyStatus == noErr, let hotKeyRef else {
+            _ = RemoveEventHandler(handlerRef)
+            Diagnostics.log(
+                "emergency hotkey registration failed status=\(hotKeyStatus)"
+            )
+            return
+        }
+
+        let accepted = stateLock.withLock {
+            guard tapLifecycleGeneration == generation,
+                  emergencyHotKey == nil,
+                  emergencyHotKeyHandler == nil else {
+                return false
+            }
+            emergencyHotKey = hotKeyRef
+            emergencyHotKeyHandler = handlerRef
+            return true
+        }
+
+        if !accepted {
+            _ = UnregisterEventHotKey(hotKeyRef)
+            _ = RemoveEventHandler(handlerRef)
+        }
+    }
+
+    private func uninstallEmergencyHotKey() {
+        let registrations: (EventHotKeyRef?, EventHandlerRef?) =
+            stateLock.withLock {
+                let registrations = (
+                    emergencyHotKey,
+                    emergencyHotKeyHandler
+                )
+                emergencyHotKey = nil
+                emergencyHotKeyHandler = nil
+                return registrations
+            }
+
+        if let hotKey = registrations.0 {
+            let status = UnregisterEventHotKey(hotKey)
+            if status != noErr {
+                Diagnostics.log(
+                    "emergency hotkey unregister failed status=\(status)"
+                )
+            }
+        }
+        if let handler = registrations.1 {
+            let status = RemoveEventHandler(handler)
+            if status != noErr {
+                Diagnostics.log(
+                    "emergency hotkey handler removal failed status=\(status)"
+                )
+            }
+        }
     }
 
     // MARK: - Mapping

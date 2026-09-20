@@ -109,7 +109,8 @@ final class AppModel: ObservableObject {
             sender: sender,
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
-            captureStop: captureStop
+            captureStop: captureStop,
+            hostPointerBackend: HostPointerOwnershipBackends.makeDefault()
         )
         targetController = TargetSelectionController(session: reference)
 

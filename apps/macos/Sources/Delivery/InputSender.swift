@@ -31,6 +31,18 @@ public enum PointerDeliveryResult: Sendable, Equatable {
     case failed
 }
 
+/// Result of one generation-bound keyboard write. Unlike pointer requests,
+/// key delivery has no helper acknowledgement, so successful synchronous
+/// transport write is the strongest delivery evidence available here.
+public enum KeyDeliveryResult: Sendable, Equatable {
+    /// The key frame was written to the current session generation.
+    case delivered
+    /// The queued key became stale before or immediately after the write.
+    case cancelled
+    /// The current session rejected the write.
+    case failed
+}
+
 /// What `enqueuePointer` did with one captured event. This is the entire
 /// admission contract; it is orthogonal to `PointerDeliveryResult`.
 public enum PointerAdmissionOutcome: Sendable, Equatable {
@@ -139,7 +151,7 @@ public final class InputSender: @unchecked Sendable {
     /// must not arm handoff without it: entering remoteActive against a dead
     /// session traps local input until the watchdog fires (issue #50).
     public var hasLiveConnection: Bool {
-        session.snapshot().connection != nil
+        session.snapshot().connection?.isConnected == true
     }
 
     /// Admits one captured event into the bounded pointer-batch queue.
@@ -238,10 +250,21 @@ public final class InputSender: @unchecked Sendable {
         }
     }
 
-    public func enqueueKey(_ event: SemanticKeyEvent) {
+    public func enqueueKey(
+        _ event: SemanticKeyEvent,
+        completion: (@Sendable (KeyDeliveryResult) -> Void)? = nil
+    ) {
         let sessionSnapshot = session.snapshot()
         keyboardQueue.async { [weak self] in
-            self?.deliverKey(event, snapshot: sessionSnapshot)
+            guard let self else {
+                completion?(.cancelled)
+                return
+            }
+            let result = self.deliverKey(
+                event,
+                snapshot: sessionSnapshot
+            )
+            completion?(result)
         }
     }
 
@@ -251,12 +274,24 @@ public final class InputSender: @unchecked Sendable {
     /// instead of forwarding it after Disable or Disconnect.
     public func enqueueKey(
         _ event: SemanticKeyEvent,
-        deliveryGuard: @escaping @Sendable () -> Bool
+        deliveryGuard: @escaping @Sendable () -> Bool,
+        completion: (@Sendable (KeyDeliveryResult) -> Void)? = nil
     ) {
         let sessionSnapshot = session.snapshot()
         keyboardQueue.async { [weak self] in
-            guard let self, deliveryGuard() else { return }
-            self.deliverKey(event, snapshot: sessionSnapshot)
+            guard let self else {
+                completion?(.cancelled)
+                return
+            }
+            guard deliveryGuard() else {
+                completion?(.cancelled)
+                return
+            }
+            let result = self.deliverKey(
+                event,
+                snapshot: sessionSnapshot
+            )
+            completion?(result)
         }
     }
 
@@ -494,9 +529,15 @@ public final class InputSender: @unchecked Sendable {
         }
     }
 
-    private func deliverKey(_ event: SemanticKeyEvent, snapshot: SessionSnapshot) {
+    private func deliverKey(
+        _ event: SemanticKeyEvent,
+        snapshot: SessionSnapshot
+    ) -> KeyDeliveryResult {
         guard snapshot.generation == session.snapshot().generation,
-              let connection = snapshot.connection else { return }
+              let connection = snapshot.connection else {
+            return .cancelled
+        }
+
         do {
             try connection.send(CxiFrame(
                 type: .keyEvent,
@@ -508,10 +549,20 @@ public final class InputSender: @unchecked Sendable {
                     repeatCount: event.repeatCount
                 )
             ))
+
+            // A session replacement can race the synchronous write. Never
+            // credit a successful write from the retired generation to a new
+            // remote-control epoch.
+            guard session.snapshot().generation == snapshot.generation else {
+                return .cancelled
+            }
+            return .delivered
         } catch {
-            // Key delivery failures are converted into the same control
-            // fail-safe by the session/helper termination path. Do not log
-            // key codes or payload contents here.
+            // The ordinary key path now reports failure to the lifecycle
+            // owner immediately instead of waiting for a separate disconnect
+            // callback. Cleanup callers may omit the completion and retain
+            // best-effort behavior.
+            return .failed
         }
     }
 
