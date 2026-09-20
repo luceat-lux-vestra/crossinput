@@ -155,6 +155,15 @@ def check_required_gates(workflows, policy, findings):
                              f"declared producer in .github/hardening-policy.json")
 
 
+def check_staged_gates(workflows, policy, findings):
+    staged = policy.get("staged_status_checks") or []
+    if not staged:
+        return
+    staged_policy = dict(policy)
+    staged_policy["required_status_checks"] = staged
+    check_required_gates(workflows, staged_policy, findings)
+
+
 def check_action_pins(workflows, findings):
     for filename, workflow in workflows.items():
         for job_id, job in (workflow.get("jobs") or {}).items():
@@ -496,6 +505,7 @@ def main():
     findings = Findings()
 
     check_required_gates(workflows, policy, findings)
+    check_staged_gates(workflows, policy, findings)
     check_action_pins(workflows, findings)
     check_permissions(workflows, policy, findings)
     check_trust_boundaries(workflows, policy, findings)
