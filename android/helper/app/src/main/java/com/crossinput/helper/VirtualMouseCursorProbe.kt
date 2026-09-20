@@ -104,7 +104,7 @@ object VirtualMouseCursorProbeMain {
 
             val paramsClass = Class.forName("android.companion.virtual.VirtualDeviceParams")
             val paramsBuilderClass = Class.forName(
-                "android.companion.virtual.VirtualDeviceParams$Builder",
+                "android.companion.virtual.VirtualDeviceParams\$Builder",
             )
             val paramsBuilder = paramsBuilderClass.getConstructor().newInstance()
             paramsBuilderClass.methods
@@ -118,7 +118,7 @@ object VirtualMouseCursorProbeMain {
 
             val mouseConfigClass = Class.forName("android.hardware.input.VirtualMouseConfig")
             val mouseBuilderClass = Class.forName(
-                "android.hardware.input.VirtualMouseConfig$Builder",
+                "android.hardware.input.VirtualMouseConfig\$Builder",
             )
             val mouseBuilder = mouseBuilderClass.getConstructor().newInstance()
             invokeBuilder(mouseBuilderClass, mouseBuilder, "setVendorId", 0x4358)
