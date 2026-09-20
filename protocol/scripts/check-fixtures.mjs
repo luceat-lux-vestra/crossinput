@@ -12,7 +12,7 @@ const T = {
   0x0004: "CREATE_HID_DEVICE", 0x0005: "DESTROY_HID_DEVICE", 0x0006: "HID_REPORT",
   0x0007: "PING", 0x0008: "SHUTDOWN",
   0x0009: "POINTER_MOVE_REL", 0x000A: "POINTER_BUTTON", 0x000B: "POINTER_SCROLL",
-  0x000C: "KEY_EVENT",
+  0x000C: "KEY_EVENT", 0x000D: "POINTER_ALIGN_BOUNDARY",
   0x8001: "HELLO_ACK", 0x8002: "DISPLAY_LIST", 0x8003: "DISPLAY_CHANGED",
   0x8004: "HID_CREATED", 0x8005: "HID_ERROR", 0x8006: "PONG",
   0x8007: "LOG_EVENT", 0x8008: "FATAL_ERROR",
@@ -99,6 +99,10 @@ function decodePayload(type, payload) {
       return { displayId: u32(payload, 0) };
     case "POINTER_MOVE_REL":
       return { dx: payload.readInt32LE(0), dy: payload.readInt32LE(4) };
+    case "POINTER_ALIGN_BOUNDARY": {
+      const boundaries = ["LEFT", "RIGHT", "TOP", "BOTTOM"];
+      return { boundary: boundaries[payload[0]] ?? `0x${payload[0].toString(16)}` };
+    }
     case "POINTER_BUTTON":
       return { button: u32(payload, 0), down: payload[4] !== 0 };
     case "POINTER_SCROLL":
