@@ -20,7 +20,7 @@ def main() -> int:
         "const backfill = process.env.BACKFILL === 'true';",
         "if (!dryRun) await ensureLabels();",
         "if (dryRun) return;",
-        "if (!backfill)",
+        "context.eventName === 'workflow_dispatch' && !backfill",
     ]
     for value in required:
         if value not in source:
@@ -54,7 +54,10 @@ def main() -> int:
     for mutation in ("github.rest.issues.updateLabel", "github.rest.issues.createLabel"):
         if mutation not in ensure:
             fail(f"expected catalog mutation anchor missing: {mutation}")
+    backfill_guard_pos = source.index("context.eventName === 'workflow_dispatch' && !backfill")
     call_pos = source.index("if (!dryRun) await ensureLabels();")
+    if backfill_guard_pos > call_pos:
+        fail("disabled backfill must return before any label-catalog mutation")
     if call_pos < classify_end:
         fail("label catalog guard must execute after reconciliation function definition")
 
