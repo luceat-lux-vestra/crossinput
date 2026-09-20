@@ -17,11 +17,14 @@ final class TransitionCollector: @unchecked Sendable {
 }
 
 final class EdgeSwitchStateMachineTests: XCTestCase {
-    private func makeRemoteActive(edge: ScreenEdge) -> EdgeSwitchStateMachine {
+    private func makeRemoteActive(
+        edge: ScreenEdge,
+        returnPolicy: RemoteReturnPolicy = .deliveryClampAware
+    ) -> EdgeSwitchStateMachine {
         let machine = EdgeSwitchStateMachine()
         machine.activate()
         XCTAssertEqual(machine.state, .localActive)
-        machine.pointerAtEdge(edge)
+        machine.pointerAtEdge(edge, returnPolicy: returnPolicy)
         XCTAssertEqual(machine.state, .remoteActive)
         machine.flushCallbacks()
         return machine
@@ -121,6 +124,72 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .remoteActive)
         machine.pointerMoved(dx: 161, dy: 0)
         XCTAssertEqual(machine.state, .localActive)
+    }
+
+    // MARK: - Issue #145: real remote-boundary gate
+
+    func testAlignmentPolicyNeverReturnsBeforeConfirmedRemoteBoundary() {
+        let cases: [(ScreenEdge, (CGFloat, CGFloat), (CGFloat, CGFloat))] = [
+            (.left, (-300, 0), (300, 0)),
+            (.right, (300, 0), (-300, 0)),
+            (.top, (0, -300), (0, 300)),
+            (.bottom, (0, 300), (0, -300)),
+        ]
+
+        for (edge, inward, outward) in cases {
+            let machine = makeRemoteActive(edge: edge, returnPolicy: .alignBeforeReturn)
+
+            XCTAssertEqual(
+                machine.pointerMoved(dx: inward.0, dy: inward.1),
+                .none,
+                "edge \(edge) inward movement must not request alignment"
+            )
+
+            let action = machine.pointerMoved(dx: outward.0, dy: outward.1)
+            XCTAssertEqual(action, .alignRemoteBoundary(edge), "edge \(edge)")
+            XCTAssertEqual(machine.state, .remoteActive,
+                           "virtual origin must not return before real-boundary proof")
+            XCTAssertTrue(machine.confirmRemoteBoundaryAlignment(), "edge \(edge)")
+
+            let almost = (
+                outward.0 == 0 ? CGFloat(0) : (outward.0 > 0 ? CGFloat(59) : CGFloat(-59)),
+                outward.1 == 0 ? CGFloat(0) : (outward.1 > 0 ? CGFloat(59) : CGFloat(-59))
+            )
+            XCTAssertEqual(machine.pointerMoved(dx: almost.0, dy: almost.1), .none)
+            XCTAssertEqual(machine.state, .remoteActive, "edge \(edge) before hysteresis")
+
+            let final = (
+                outward.0 == 0 ? CGFloat(0) : (outward.0 > 0 ? CGFloat(1) : CGFloat(-1)),
+                outward.1 == 0 ? CGFloat(0) : (outward.1 > 0 ? CGFloat(1) : CGFloat(-1))
+            )
+            XCTAssertEqual(machine.pointerMoved(dx: final.0, dy: final.1), .none)
+            XCTAssertEqual(machine.state, .localActive, "edge \(edge) after confirmed hysteresis")
+        }
+    }
+
+    func testAlignmentPolicyDoesNotArmOnOrthogonalMotionAtVirtualOrigin() {
+        let machine = makeRemoteActive(edge: .left, returnPolicy: .alignBeforeReturn)
+
+        XCTAssertEqual(machine.pointerMoved(dx: 0, dy: 50), .none)
+        XCTAssertEqual(machine.pointerMoved(dx: 0, dy: 50), .none)
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertFalse(machine.confirmRemoteBoundaryAlignment(),
+                       "orthogonal movement must not create a fake alignment request")
+    }
+
+    func testAcceptedInwardMovementInvalidatesAlignmentProof() {
+        let machine = makeRemoteActive(edge: .right, returnPolicy: .alignBeforeReturn)
+
+        _ = machine.pointerMoved(dx: 100, dy: 0)
+        XCTAssertEqual(machine.pointerMoved(dx: -100, dy: 0), .alignRemoteBoundary(.right))
+        XCTAssertTrue(machine.confirmRemoteBoundaryAlignment())
+
+        // The cursor moved away from the proven remote edge, so the next
+        // return attempt must establish the real edge again rather than return
+        // directly from stale alignment state.
+        XCTAssertEqual(machine.pointerMoved(dx: 10, dy: 0), .none)
+        XCTAssertEqual(machine.pointerMoved(dx: -10, dy: 0), .alignRemoteBoundary(.right))
+        XCTAssertEqual(machine.state, .remoteActive)
     }
 
     // MARK: - Issue #45: intent-based return credit
