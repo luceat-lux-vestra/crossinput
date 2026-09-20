@@ -63,7 +63,7 @@ Existing issue-label automation remains in place. This reassessment does not cre
 
 A post-merge quality review found that the existing issue-event classifier was safe and live-proven, but manual `workflow_dispatch` backfill still mutated the entire open backlog immediately.
 
-The follow-up owned by #162 changes only that operator boundary:
+The follow-up remains owned by #158 and changes only that operator boundary:
 
 - `dry_run=true` is the dispatch default;
 - `backfill` is an explicit dispatch input;
