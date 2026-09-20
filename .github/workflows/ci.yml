@@ -89,6 +89,8 @@ jobs:
         run: python3 scripts/check-workflow-policy.py
       - name: "Repository hardening policy fixtures"
         run: python3 scripts/test-workflow-policy.py
+      - name: "GitHub Actions static security"
+        run: bash scripts/check-actions-security.sh
       # The on-device drivers are not exercised by any other job; an unbalanced
       # brace here only surfaces at verification time on a real device.
       - name: "bash -n"
