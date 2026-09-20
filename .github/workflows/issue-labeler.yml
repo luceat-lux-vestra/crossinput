@@ -18,17 +18,6 @@ on:
         required: true
         type: boolean
         default: true
-    inputs:
-      dry_run:
-        description: Report proposed changes without mutating labels
-        required: true
-        default: true
-        type: boolean
-      backfill:
-        description: Reconcile all currently open issues
-        required: true
-        default: true
-        type: boolean
 
 permissions:
   contents: read
