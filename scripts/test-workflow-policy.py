@@ -164,6 +164,18 @@ def main():
                            "          ref: ${{ github.event.pull_request.head.sha }}\n"),
          "TRUST_PRT_CHECKOUT")
 
+    case("pull_request_target branch scope drift",
+         lambda root: edit(workflow(root, "pr-labeler.yml"),
+                           "    branches: [main]\n",
+                           "    branches: [release]\n"),
+         "TRUST_PRT_SCOPE")
+
+    case("pull_request_target repository guard removed",
+         lambda root: edit(workflow(root, "pr-labeler.yml"),
+                           "    if: github.repository == 'luceat-lux-vestra/crossinput'\n",
+                           ""),
+         "TRUST_PRT_SCOPE")
+
     # Attacker-controlled text interpolated into shell.
     case("shell injection from PR title",
          lambda root: edit(workflow(root, "ci.yml"),
