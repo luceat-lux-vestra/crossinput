@@ -1,7 +1,7 @@
 name: Pull request labels
 
 on:
-  pull_request:
+  pull_request_target:
     types:
       - opened
       - edited
@@ -18,12 +18,11 @@ concurrency:
 jobs:
   classify:
     name: classify
-    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Same-repository PR metadata only. Fork PRs are skipped because pull_request
-    # tokens are read-only there; this avoids the elevated pull_request_target
-    # trigger entirely. No PR code is checked out or executed by this job.
+    # Label writes only. This workflow never checks out or executes
+    # fork-controlled code, so the pull_request_target token stays confined to
+    # this job.
     permissions:
       contents: read
       pull-requests: write
