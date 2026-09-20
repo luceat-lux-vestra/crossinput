@@ -153,22 +153,15 @@ def main():
          "PERM_UNDECLARED_WRITE")
 
     # Trust boundary: fork-controlled code executed by a privileged trigger.
-    def make_privileged_pr_checkout(root):
-        path = workflow(root, "pr-labeler.yml")
-        edit(path,
-             "  pull_request:\n",
-             "  pull_request_target:\n")
-        edit(path,
-             "    steps:\n",
-             "    steps:\n"
-             "      - uses: actions/checkout"
-             "@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-             "        with:\n"
-             "          persist-credentials: false\n"
-             "          ref: ${{ github.event.pull_request.head.sha }}\n")
-
-    case("pull_request_target checks out PR-head code",
-         make_privileged_pr_checkout,
+    case("pull_request_target checks out code",
+         lambda root: edit(workflow(root, "pr-labeler.yml"),
+                           "    steps:\n",
+                           "    steps:\n"
+                           "      - uses: actions/checkout"
+                           "@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
+                           "        with:\n"
+                           "          persist-credentials: false\n"
+                           "          ref: ${{ github.event.pull_request.head.sha }}\n"),
          "TRUST_PRT_CHECKOUT")
 
     # Attacker-controlled text interpolated into shell.
