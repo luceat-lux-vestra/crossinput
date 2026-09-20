@@ -63,6 +63,7 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
 | 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up; positive horizontal = left — mirrors the macOS scroll axes; Android backends convert to their native conventions: AXIS_HSCROLL positive is right, so the InputManager backend negates horizontal and the UHID backend inverts it into the AC Pan field) |
 | 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (current v1 Android KeyEvent wire semantics; see below) |
+| 0x000D | POINTER_ALIGN_BOUNDARY | boundary u8 (0=left, 1=right, 2=top, 3=bottom); align the currently selected pointer route to that target boundary before remote ownership begins |
 
 ### Android → Mac
 
@@ -96,6 +97,7 @@ the current semantic pointer path. The current helper advertises:
 |---:|---|---|
 | 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
 | 1 | `explicitPointerRouting` | the helper can serve pointer targets through an explicit-display-routing backend when required (desktop sinks may instead be served by the system-routed backend; see "Application path") |
+| 2 | `remoteBoundaryAlignment` | the helper implements correlated `POINTER_ALIGN_BOUNDARY` and returns `POINTER_RESULT`; current applications require this before edge handoff |
 
 No keyboard semantic-result capability is implemented yet. #141 must allocate
 and document any additive capability/result encoding before production use.
@@ -103,7 +105,12 @@ and document any additive capability/result encoding before production use.
 ## Application path and v1 compatibility
 
 The normal Ampersand application path uses the semantic `POINTER_*` messages
-after `SELECT_DISPLAY`. The Android helper's `PointerDispatcher` owns backend
+after `SELECT_DISPLAY`. Before edge handoff enters remote ownership, the macOS
+controller sends `POINTER_ALIGN_BOUNDARY` for the boundary adjacent to the
+configured host edge and waits for a correlated `POINTER_RESULT`. Alignment
+failure, partial delivery, timeout, or stale completion leaves/fails control
+local; alignment movement is preparation and is never credited as user handoff
+movement. The Android helper's `PointerDispatcher` owns backend
 selection. For desktop sink targets (hidden `DisplayInfo.FLAG_DESKTOP`, e.g.
 Samsung DeX), AUTO prefers the system-routed UHID mouse: its reports flow
 through InputReader, so the visible pointer sprite follows the virtual
@@ -233,8 +240,10 @@ LIST_DISPLAYS (req 2)            │
 SELECT_DISPLAY (req 3)           │   (routes subsequent semantic POINTER_*
                                  │    messages through selected route state)
                                  ├─► DISPLAY_CHANGED (req 3)
+POINTER_ALIGN_BOUNDARY (req 4)   │   (pre-remote ownership preparation)
+                                 ├─► POINTER_RESULT (same req)
 POINTER_MOVE_REL / BUTTON /      │   (helper picks backend per target)
-SCROLL (req 4..n)                │
+SCROLL (req 5..n)                │
                                  ├─► POINTER_RESULT (same req; semantic pointer result)
 KEY_EVENT (req k)                │   (current v1 compatibility behavior)
                                  │    no correlated key-result frame today
