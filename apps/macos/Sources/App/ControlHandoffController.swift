@@ -68,6 +68,11 @@ final class ControlHandoffController: @unchecked Sendable {
             guard let self, self.isEdgeSwitchEnabled, self.sender.hasLiveConnection else { return }
             self.switchMachine.pointerAtEdge(edge)
         }
+        capture.onScreenEdgeExit = { [weak self] in
+            guard let self, self.switchMachine.state == .edgeArmed else { return }
+            self.sender.cancelPendingPointerEvents()
+            self.switchMachine.cancelArming()
+        }
         capture.onPointerEvent = { [weak self] event in
             self?.enqueue(event)
         }
@@ -374,6 +379,7 @@ final class ControlHandoffController: @unchecked Sendable {
                 lifecycleLock.withLock { activeSuppressionGeneration = generation }
             }
         case .localActive, .returning, .disabled:
+            let wasSuppressed = capture.isSuppressed
             // Lifecycle invariant (issue #62 code-gate): when local suppression
             // ends for ANY reason — normal boundary return, remote failure,
             // emergency return, takeover, disable — the pending-pointer
@@ -390,9 +396,43 @@ final class ControlHandoffController: @unchecked Sendable {
             }
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
-            capture.release(reason: releaseReason(for: reason))
+            if wasSuppressed {
+                capture.release(reason: releaseReason(for: reason))
+            }
         case .edgeArmed:
-            break
+            beginRemotePreparation()
+        }
+    }
+
+    private func beginRemotePreparation() {
+        guard isEdgeSwitchEnabled, switchMachine.state == .edgeArmed else { return }
+        let epoch = lifecycleLock.withLock { controlEpoch }
+        let boundary = remoteBoundary(for: switchMachine.entryEdge)
+        sender.alignRemoteBoundary(boundary) { [weak self] result in
+            Task { @MainActor in
+                guard let self,
+                      self.isControlEpochCurrent(epoch),
+                      self.isEdgeSwitchEnabled,
+                      self.switchMachine.state == .edgeArmed else { return }
+                switch result {
+                case .delivered:
+                    self.switchMachine.remotePrepared()
+                case .cancelled:
+                    break
+                case .failed, .deliveredMovement, .partiallyDeliveredMovement:
+                    self.sender.cancelPendingPointerEvents()
+                    self.switchMachine.forceReturn(reason: .remoteUnavailable)
+                }
+            }
+        }
+    }
+
+    private func remoteBoundary(for hostEdge: ScreenEdge) -> RemotePointerBoundary {
+        switch hostEdge {
+        case .left: return .right
+        case .right: return .left
+        case .top: return .bottom
+        case .bottom: return .top
         }
     }
 
@@ -413,7 +453,8 @@ final class ControlHandoffController: @unchecked Sendable {
         case .remoteUnavailable: return .remoteUnavailable
         case .externalControlTakeover: return .externalControl
         case .deactivated: return .captureStopped
-        case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered:
+        case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered,
+             .remotePrepared, .edgeExited:
             return .normalReturn
         }
     }
