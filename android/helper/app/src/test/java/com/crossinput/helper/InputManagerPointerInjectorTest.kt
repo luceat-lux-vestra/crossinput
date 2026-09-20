@@ -116,22 +116,31 @@ class InputManagerPointerInjectorTest {
     }
 
     @Test
-    fun boundaryAlignmentUsesExactSelectedDisplayEdges() {
+    fun boundaryAlignmentUsesExactRightEdge() {
         assertEquals(
             PointerDelivery.deliveredMovement(959, 0),
             newInjector().alignBoundary(PointerBoundary.RIGHT),
         )
-        tearDown()
+    }
+
+    @Test
+    fun boundaryAlignmentUsesExactLeftEdge() {
         assertEquals(
             PointerDelivery.deliveredMovement(-960, 0),
             newInjector().alignBoundary(PointerBoundary.LEFT),
         )
-        tearDown()
+    }
+
+    @Test
+    fun boundaryAlignmentUsesExactTopEdge() {
         assertEquals(
             PointerDelivery.deliveredMovement(0, -540),
             newInjector().alignBoundary(PointerBoundary.TOP),
         )
-        tearDown()
+    }
+
+    @Test
+    fun boundaryAlignmentUsesExactBottomEdge() {
         assertEquals(
             PointerDelivery.deliveredMovement(0, 539),
             newInjector().alignBoundary(PointerBoundary.BOTTOM),
