@@ -36,6 +36,8 @@ public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
 public enum TransitionReason: String, Sendable {
     case activation
     case edgeEntered
+    case remotePrepared
+    case edgeExited
     case boundaryCrossed
     case emergencyReturn
     case watchdogTimeout
@@ -203,17 +205,41 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         run {
             switch stateStorage {
             case .localActive:
+                entryEdgeStorage = edge
+                virtualAxisPosition = 0
+                hasReceivedFirstMove = false
                 transition(to: .edgeArmed, reason: .edgeEntered)
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
-                transition(to: .remoteActive, reason: .edgeEntered)
             case .edgeArmed:
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
+                // The in-flight preparation is tied to entryEdgeStorage.
+                // Ignore a different edge until the pointer leaves the edge
+                // zone and arming is cancelled; otherwise a stale alignment
+                // could activate ownership for a different edge.
+                break
             default: break
             }
+        }
+    }
+
+    /// Confirms that the remote pointer has been aligned to the boundary
+    /// corresponding to [entryEdge]. Only this preparation acknowledgement
+    /// may advance an armed handoff into remote ownership.
+    public func remotePrepared() {
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            transition(to: .remoteActive, reason: .remotePrepared)
+        }
+    }
+
+    /// Cancels a not-yet-owned handoff when the local pointer leaves the
+    /// configured edge before remote preparation completes.
+    public func cancelArming() {
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            transition(to: .localActive, reason: .edgeExited)
         }
     }
 
