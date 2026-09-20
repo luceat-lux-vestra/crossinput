@@ -134,6 +134,7 @@ final class AppModel: ObservableObject {
             self?.targets = targets
             self?.selectedTarget = selected
             self?.targetState = state
+            self?.handoffController.updateRemoteTarget(selected)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
