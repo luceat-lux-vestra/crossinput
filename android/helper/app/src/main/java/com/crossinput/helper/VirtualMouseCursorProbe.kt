@@ -113,7 +113,7 @@ object VirtualMouseCursorProbeMain {
             val params = paramsBuilderClass.getMethod("build").invoke(paramsBuilder)
 
             virtualDevice = managerClass
-                .getMethod("createVirtualDevice", Int::class.javaPrimitiveType, paramsClass)
+                .getMethod("createVirtualDevice", Int::class.javaPrimitiveType!!, paramsClass)
                 .invoke(manager, associationId, params)
 
             val mouseConfigClass = Class.forName("android.hardware.input.VirtualMouseConfig")
