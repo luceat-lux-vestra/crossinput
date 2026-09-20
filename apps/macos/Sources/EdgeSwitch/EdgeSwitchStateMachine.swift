@@ -187,6 +187,11 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         queue.sync { entryEdgeStorage }
     }
 
+    /// Return-boundary proof policy snapshotted for the current remote epoch.
+    public var remoteReturnPolicy: RemoteReturnPolicy {
+        queue.sync { remoteReturnPolicyStorage }
+    }
+
     /// Latest transition sequence, including transitions whose callbacks have
     /// not completed yet. Lifecycle owners use this to invalidate delayed
     /// callbacks when a control epoch is intentionally ended.
