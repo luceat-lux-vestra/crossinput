@@ -62,8 +62,8 @@ jobs:
               for (const [name, color, description] of labelDefs) {
                 try {
                   const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
-                  if ((data.description || '') !== description) {
-                    await github.rest.issues.updateLabel({ ...context.repo, name, description });
+                  if ((data.description || '') !== description || (data.color || '').toLowerCase() !== color.toLowerCase()) {
+                    await github.rest.issues.updateLabel({ ...context.repo, name, color, description });
                   }
                 } catch (error) {
                   if (error.status !== 404) throw error;
