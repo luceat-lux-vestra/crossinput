@@ -202,6 +202,13 @@ class CodecTest {
     }
 
     @Test
+    fun pointerAlignBoundaryParsesAndRejectsInvalidValues() {
+        assertEquals(1, Messages.pointerAlignBoundary(byteArrayOf(1)))
+        assertThrows(ProtocolException::class.java) { Messages.pointerAlignBoundary(byteArrayOf()) }
+        assertThrows(ProtocolException::class.java) { Messages.pointerAlignBoundary(byteArrayOf(4)) }
+    }
+
+    @Test
     fun keyEventParses() {
         val payload = byteArrayOf(0x1D, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00) // keyCode 29, meta 0x1 (Shift), down, repeat 0
         val parsed = Messages.keyEvent(payload)
