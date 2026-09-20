@@ -65,6 +65,34 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(session.requestCount, 1)
     }
 
+    func testPriorityControlMovementRunsBeforeAlreadyPendingUserBatch() {
+        let session = FakeSession()
+        session.gateAllRequests = true
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let inserted = ResultBox<Bool>()
+        let firstDone = DispatchSemaphore(value: 0)
+
+        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in
+            inserted.set(sender.enqueuePriorityControlMovement(dx: 1_000, dy: 0))
+            firstDone.signal()
+        }
+        XCTAssertEqual(session.requestEntered.wait(timeout: .now() + 1), .success)
+
+        // This user movement is already pending when the first delivery
+        // completes. The control barrier must be inserted in front of it.
+        sender.enqueuePointer(PointerEvent(.move(dx: 2, dy: 0))) { _ in }
+        session.releaseGate()
+
+        XCTAssertEqual(firstDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(inserted.get(), true)
+        sender.waitForDrain()
+
+        XCTAssertEqual(session.pointerMovementEvents.map { $0.0 }, [1, 1_000, 2])
+        XCTAssertEqual(session.pointerMovementEvents.map { $0.1 }, [0, 0, 0])
+    }
+
     func testHighFrequencyMovesAreCoalescedAndBounded() {
         let session = FakeSession(delay: 100_000_000)
         let reference = SessionReference()
@@ -1468,6 +1496,7 @@ final class InputSenderTests: XCTestCase {
         var onEvent: (@Sendable (CxiFrame) -> Void)?
         var onDisconnect: (@Sendable () -> Void)?
         private(set) var acceptedMovement: (Int32, Int32) = (0, 0)
+        private(set) var pointerMovementEvents: [(Int32, Int32)] = []
         private(set) var acceptedScroll: (Float, Float) = (0, 0)
         private(set) var requestTypes: [MessageType] = []
         private(set) var pointerButtonEvents: [(UInt32, Bool)] = []
@@ -1564,6 +1593,7 @@ final class InputSenderTests: XCTestCase {
                 lock.withLock {
                     acceptedMovement.0 += dx
                     acceptedMovement.1 += dy
+                    pointerMovementEvents.append((dx, dy))
                 }
                 return CxiFrame(type: .pointerResult, requestId: 1,
                                 payload: Messages.pointerResult(status: .delivered,
