@@ -304,16 +304,24 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     private func handlePointerDelivery(_ delivery: PointerDeliveryResult, controlEpoch: UInt64) {
-        let alignmentProfile: RemoteBoundaryProfile? = lifecycleLock.withLock {
-            guard self.controlEpoch == controlEpoch,
-                  (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)),
-                  activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn else { return nil }
-            return activeRemoteBoundaryProfile
+        let current = lifecycleLock.withLock {
+            self.controlEpoch == controlEpoch
+                && (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled))
+        }
+        guard current else {
+            Task { @MainActor in
+                self.apply(delivery: delivery, controlEpoch: controlEpoch)
+            }
+            return
         }
 
-        if let alignmentProfile,
+        if switchMachine.remoteReturnPolicy == .alignBeforeReturn,
            capture.isSuppressed,
            case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy) = delivery {
+            guard let alignmentProfile = lifecycleLock.withLock({ activeRemoteBoundaryProfile }) else {
+                failRemoteBoundaryAlignment(controlEpoch: controlEpoch)
+                return
+            }
             let action = switchMachine.pointerMoved(
                 requestedDx: CGFloat(requestedDx),
                 requestedDy: CGFloat(requestedDy),
@@ -366,7 +374,7 @@ final class ControlHandoffController: @unchecked Sendable {
         let stillCurrent = lifecycleLock.withLock {
             self.controlEpoch == controlEpoch
                 && (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled))
-                && activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn
+                && switchMachine.remoteReturnPolicy == .alignBeforeReturn
         }
         guard stillCurrent, capture.isSuppressed else { return }
 
