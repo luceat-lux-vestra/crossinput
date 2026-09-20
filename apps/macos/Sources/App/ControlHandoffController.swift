@@ -197,6 +197,7 @@ final class ControlHandoffController: @unchecked Sendable {
             edgeSwitchEnabled = false
             controlEpoch &+= 1
             activeSuppressionGeneration = nil
+            activeRemoteBoundaryProfile = nil
             // An event callback that wins this lock before Disable is admitted
             // before the generation barrier and is cancelled below. Anything
             // after the barrier sees the disabled gate and cannot be forwarded.
@@ -305,7 +306,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private func handlePointerDelivery(_ delivery: PointerDeliveryResult, controlEpoch: UInt64) {
         let alignmentProfile: RemoteBoundaryProfile? = lifecycleLock.withLock {
             guard self.controlEpoch == controlEpoch,
-                  edgeSwitchEnabled,
+                  (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)),
                   activeSuppressionGeneration != nil,
                   activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn else { return nil }
             return activeRemoteBoundaryProfile
@@ -364,7 +365,7 @@ final class ControlHandoffController: @unchecked Sendable {
     ) {
         let stillCurrent = lifecycleLock.withLock {
             self.controlEpoch == controlEpoch
-                && edgeSwitchEnabled
+                && (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled))
                 && activeSuppressionGeneration != nil
                 && activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn
         }
