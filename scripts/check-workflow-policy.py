@@ -214,28 +214,31 @@ def check_permissions(workflows, policy, findings):
                              f"policy allows unused write permission {scope!r}")
 
 
-def check_trust_boundaries(workflows, findings):
+def check_trust_boundaries(workflows, policy, findings):
+    protected_branch = policy["protected_branch"]
+    repository_full_name = policy["repository_full_name"]
     for filename, workflow in workflows.items():
         trigger_map = triggers(workflow)
         privileged = "pull_request_target" in trigger_map
         if privileged:
             config = trigger_map.get("pull_request_target")
             branches = config.get("branches") if isinstance(config, dict) else None
-            if branches != [policy_branch := "main"]:
+            if branches != [protected_branch]:
                 findings.add(
                     "TRUST_PRT_SCOPE",
                     filename,
-                    f"pull_request_target must be limited to {policy_branch!r}; got {branches!r}",
+                    f"pull_request_target must be limited to {protected_branch!r}; got {branches!r}",
                 )
         for job_id, job in (workflow.get("jobs") or {}).items():
             where = f"{filename}:{job_id}"
             if privileged:
                 condition = str(job.get("if") or "")
-                if "github.repository == 'luceat-lux-vestra/crossinput'" not in condition:
+                expected_guard = f"github.repository == '{repository_full_name}'"
+                if expected_guard not in condition:
                     findings.add(
                         "TRUST_PRT_SCOPE",
                         where,
-                        "pull_request_target job must carry an explicit repository guard",
+                        f"pull_request_target job must carry repository guard {expected_guard!r}",
                     )
             for step in steps_of(job):
                 if not isinstance(step, dict):
@@ -495,7 +498,7 @@ def main():
     check_required_gates(workflows, policy, findings)
     check_action_pins(workflows, findings)
     check_permissions(workflows, policy, findings)
-    check_trust_boundaries(workflows, findings)
+    check_trust_boundaries(workflows, policy, findings)
     check_hygiene(workflows, findings)
     check_labels(args.root, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
