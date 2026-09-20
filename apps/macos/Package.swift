@@ -7,14 +7,14 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .library(name: "AmpersandCore", targets: ["Protocol", "AndroidBridge", "InputDomain", "InputCapture", "EdgeSwitch"]),
+        .library(name: "AmpersandCore", targets: ["Protocol", "AndroidBridge", "InputDomain", "InputCapture", "InputCapability", "EdgeSwitch"]),
         .executable(name: "Ampersand", targets: ["App"]),
         .library(name: "Delivery", targets: ["Delivery"]),
         .executable(name: "cxi-smoke", targets: ["SmokeMain"]),
         .executable(name: "cxi-stress", targets: ["CxiStress"])
     ],
     targets: [
-        .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "EdgeSwitch", "AppSettings", "Diagnostics", "Delivery"]),
+        .executableTarget(name: "App", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "InputCapability", "EdgeSwitch", "AppSettings", "Diagnostics", "Delivery"]),
         .executableTarget(name: "CxiStress", dependencies: ["Protocol", "AndroidBridge", "InputCapture", "Diagnostics", "Delivery"], path: "Tools/CxiStress"),
         .executableTarget(name: "SmokeMain", dependencies: ["Protocol", "AndroidBridge"], path: "Tools/SmokeMain"),
         .target(name: "Delivery", dependencies: ["Protocol", "AndroidBridge", "InputDomain", "Diagnostics"]),
@@ -22,6 +22,7 @@ let package = Package(
         .target(name: "AndroidBridge", dependencies: ["Protocol"]),
         .target(name: "InputDomain", dependencies: []),
         .target(name: "InputCapture", dependencies: ["InputDomain", "EdgeSwitch", "Diagnostics"]),
+        .target(name: "InputCapability", dependencies: []),
         .target(name: "EdgeSwitch", dependencies: ["Diagnostics"]),
         .target(name: "Diagnostics", dependencies: []),
         .target(name: "AppSettings", dependencies: []),
@@ -29,8 +30,9 @@ let package = Package(
         .testTarget(name: "AndroidBridgeTests", dependencies: ["AndroidBridge", "Protocol"]),
         .testTarget(name: "InputDomainTests", dependencies: ["InputDomain"]),
         .testTarget(name: "DeliveryTests", dependencies: ["Delivery", "InputDomain"]),
-        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics"]),
+        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics", "InputCapability"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture", "InputDomain"]),
+        .testTarget(name: "InputCapabilityTests", dependencies: ["InputCapability"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
         .testTarget(name: "DiagnosticsTests", dependencies: ["Diagnostics"])
     ]
