@@ -1,7 +1,7 @@
 name: Failure triage
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] metadata-only; no checkout, no PR-controlled code, read-only token
     branches:
       - main
     types:
@@ -20,6 +20,7 @@ concurrency:
 jobs:
   failure-triage:
     name: failure-triage
+    if: github.repository == 'luceat-lux-vestra/crossinput'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
