@@ -349,6 +349,7 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
         let required: [HelperCapabilities] = [
             .semanticPointerResult,
             .explicitPointerRouting,
+            .remoteBoundaryAlignment,
         ]
         let missing = required.filter { !info.capabilities.contains($0) }
         guard missing.isEmpty else {
@@ -449,6 +450,7 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
         switch capability {
         case .semanticPointerResult: return "semanticPointerResult"
         case .explicitPointerRouting: return "explicitPointerRouting"
+        case .remoteBoundaryAlignment: return "remoteBoundaryAlignment"
         default: return "unknown"
         }
     }
