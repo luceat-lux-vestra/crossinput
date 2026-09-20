@@ -114,6 +114,10 @@ struct ProtocolTests {
         #expect(try Messages.decodeHelloAckInfo(payload).capabilities == .currentPointerPath)
     }
 
+    @Test func pointerAlignBoundaryEncodesRight() {
+        #expect(Messages.pointerAlignBoundary(.right) == Data([1]))
+    }
+
     @Test func legacyHelloAckHasNoCapabilities() throws {
         let info = try Messages.decodeHelloAckInfo(Data([1, 0]))
         #expect(info.version == 1)
