@@ -3,6 +3,7 @@ package com.crossinput.helper
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.util.DisplayMetrics
+import android.os.Looper
 import java.lang.reflect.InvocationTargetException
 
 /**
@@ -142,6 +143,13 @@ internal object CursorBoundaryClassifier {
 object CursorPositionProbeMain {
     @JvmStatic
     fun main(args: Array<String>) {
+        // Match the production helper bootstrap. ActivityThread.systemMain()
+        // expects a prepared main looper; the first probe revision omitted
+        // this and therefore failed before reaching the cursor-position API.
+        if (Looper.myLooper() == null) {
+            Looper.prepare()
+        }
+
         val displayId = args.singleOrNull()?.toIntOrNull()
         if (displayId == null || displayId < 0) {
             System.err.println("CURSOR_POSITION_PROBE result=FAIL reason=invalid-display-id")
