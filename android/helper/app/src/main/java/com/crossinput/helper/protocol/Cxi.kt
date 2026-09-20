@@ -20,8 +20,10 @@ object Cxi {
     // HELLO_ACK feature bits. These are additive to CXI v1 framing.
     const val CAPABILITY_SEMANTIC_POINTER_RESULT = 1 shl 0
     const val CAPABILITY_EXPLICIT_POINTER_ROUTING = 1 shl 1
+    const val CAPABILITY_REMOTE_BOUNDARY_ALIGNMENT = 1 shl 2
     const val CAPABILITIES = CAPABILITY_SEMANTIC_POINTER_RESULT or
-        CAPABILITY_EXPLICIT_POINTER_ROUTING
+        CAPABILITY_EXPLICIT_POINTER_ROUTING or
+        CAPABILITY_REMOTE_BOUNDARY_ALIGNMENT
 }
 
 class ProtocolException(message: String) : Exception(message)
