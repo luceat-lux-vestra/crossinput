@@ -18,6 +18,84 @@ private final class TestEventBox: @unchecked Sendable {
 
 @MainActor
 final class InputSenderTests: XCTestCase {
+    func testBoundaryAlignmentUsesDedicatedCorrelatedRequest() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.alignRemoteBoundary(.right) {
+            result.set($0)
+            done.signal()
+        }
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .delivered)
+        XCTAssertEqual(session.requestTypes, [.pointerAlignBoundary])
+    }
+
+    func testBoundaryAlignmentPartialDeliveryFailsClosed() {
+        let session = FakeSession(response: CxiFrame(
+            type: .pointerResult,
+            requestId: 1,
+            payload: Messages.pointerResult(status: .partiallyDelivered,
+                                             deliveredDx: 127,
+                                             deliveredDy: 0)))
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.alignRemoteBoundary(.right) {
+            result.set($0)
+            done.signal()
+        }
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .failed)
+        XCTAssertEqual(session.requestCount, 1)
+    }
+
+    func testCancelledInFlightAlignmentCannotActivateLaterEpoch() {
+        let session = FakeSession()
+        session.gateAllRequests = true
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.alignRemoteBoundary(.right) {
+            result.set($0)
+            done.signal()
+        }
+        XCTAssertEqual(session.requestEntered.wait(timeout: .now() + 1), .success)
+
+        sender.cancelPendingPointerEvents()
+        session.releaseGate()
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .cancelled)
+    }
+
+    func testAlignmentIsOrderedBeforeLaterPointerBatchWithoutCoalescing() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let aligned = DispatchSemaphore(value: 0)
+
+        sender.alignRemoteBoundary(.right) { _ in aligned.signal() }
+        sender.enqueuePointer(PointerEvent(.move(dx: 1, dy: 0))) { _ in }
+        sender.waitForDrain()
+
+        XCTAssertEqual(aligned.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(session.requestTypes, [.pointerAlignBoundary, .pointerMoveRel])
+    }
+
     func testMovementUsesHelperAcceptedDelta() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult,
