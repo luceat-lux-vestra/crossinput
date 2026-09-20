@@ -24,6 +24,7 @@ final class TelemetryTests: XCTestCase {
         XCTAssertEqual(RequestObservation.Kind(of: .pointerMoveRel), .pointerMoveRel)
         XCTAssertEqual(RequestObservation.Kind(of: .pointerButton), .pointerButton)
         XCTAssertEqual(RequestObservation.Kind(of: .pointerScroll), .pointerScroll)
+        XCTAssertEqual(RequestObservation.Kind(of: .pointerAlignBoundary), .pointerAlignBoundary)
         XCTAssertEqual(RequestObservation.Kind(of: .hello), .hello)
         XCTAssertEqual(RequestObservation.Kind(of: .keyEvent), .other)
     }
