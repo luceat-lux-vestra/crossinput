@@ -22,6 +22,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         machine.activate()
         XCTAssertEqual(machine.state, .localActive)
         machine.pointerAtEdge(edge)
+        XCTAssertEqual(machine.state, .edgeArmed)
+        machine.remotePrepared()
         XCTAssertEqual(machine.state, .remoteActive)
         machine.flushCallbacks()
         return machine
@@ -62,7 +64,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
     func testLifecycleBoundaryInvalidatesQueuedOlderTransition() {
         var gate = TransitionSequenceGate()
         let staleRemote = StateTransition(sequence: 4, from: .edgeArmed,
-                                          to: .remoteActive, reason: .edgeEntered)
+                                          to: .remoteActive, reason: .remotePrepared)
         let deactivation = StateTransition(sequence: 5, from: .remoteActive,
                                             to: .disabled, reason: .deactivated)
 
@@ -70,6 +72,41 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertFalse(gate.shouldApply(staleRemote))
         XCTAssertTrue(gate.shouldApply(deactivation))
         XCTAssertEqual(gate.lastAppliedSequence, deactivation.sequence)
+    }
+
+    func testEdgeEntryWaitsForRemotePreparation() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+
+        machine.pointerAtEdge(.left)
+        XCTAssertEqual(machine.state, .edgeArmed)
+        XCTAssertEqual(machine.entryEdge, .left)
+
+        machine.remotePrepared()
+        XCTAssertEqual(machine.state, .remoteActive)
+    }
+
+    func testLeavingEdgeCancelsArmingAndStalePreparationCannotReactivate() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        XCTAssertEqual(machine.state, .edgeArmed)
+
+        machine.cancelArming()
+        XCTAssertEqual(machine.state, .localActive)
+
+        machine.remotePrepared()
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testDifferentEdgeDoesNotRetargetInFlightArming() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.pointerAtEdge(.left)
+        machine.pointerAtEdge(.top)
+
+        XCTAssertEqual(machine.state, .edgeArmed)
+        XCTAssertEqual(machine.entryEdge, .left)
     }
 
     func testMovementIntoAndroidNeverReturnsOnAllEdges() {
@@ -257,7 +294,7 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         let current = StateTransition(sequence: 11, from: .remoteActive,
                                       to: .returning, reason: .remoteUnavailable)
         let stale = StateTransition(sequence: 10, from: .edgeArmed,
-                                    to: .remoteActive, reason: .edgeEntered)
+                                    to: .remoteActive, reason: .remotePrepared)
 
         XCTAssertTrue(gate.shouldApply(current))
         XCTAssertFalse(gate.shouldApply(stale))
@@ -297,6 +334,8 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
 
             machine.activate()
             machine.pointerAtEdge(edge)
+            XCTAssertEqual(machine.state, .edgeArmed, "cycle \(cycle) armed \(edge)")
+            machine.remotePrepared()
             XCTAssertEqual(machine.state, .remoteActive, "cycle \(cycle) entered \(edge)")
 
             // The first event is the post-capture event and must not return.
