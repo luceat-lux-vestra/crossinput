@@ -113,7 +113,7 @@ Development environment:
 |---|---|
 | Xcode | 16+ / Swift 6 |
 | JDK | 25 LTS (Temurin 25.0.4.1) |
-| Kotlin | 2.4.10 (CodeQL-compatible) |
+| Kotlin | 2.4.20 |
 | Node.js | 26.9.0 (tooling) |
 | Android SDK | platforms;android-37.0, build-tools;37.0.0 |
 | adb | 37.x |
