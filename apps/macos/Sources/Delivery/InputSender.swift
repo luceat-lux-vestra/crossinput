@@ -230,6 +230,48 @@ public final class InputSender: @unchecked Sendable {
         return outcome ?? .safetyRejected
     }
 
+    /// Inserts one control-plane relative movement ahead of already pending
+    /// captured pointer batches.
+    ///
+    /// This exists for handoff safety barriers such as remote-boundary
+    /// alignment. It deliberately bypasses capture coalescing/backpressure but
+    /// remains inside the same pointer generation, session generation, worker,
+    /// timeout, telemetry, and cancellation lifecycle as ordinary movement.
+    ///
+    /// Calling this synchronously from an admitted batch's delivery completion
+    /// guarantees that the control movement is the next pointer request before
+    /// the worker drains any later user batches already waiting in the queue.
+    @discardableResult
+    public func enqueuePriorityControlMovement(
+        dx: Int32,
+        dy: Int32,
+        completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil
+    ) -> Bool {
+        let snapshot = session.snapshot()
+        guard snapshot.connection != nil else { return false }
+
+        var shouldSchedule = false
+        stateLock.withLock {
+            pendingPointers.insert(
+                PendingPointerBatch(
+                    event: SemanticPointerEvent(.move(dx: dx, dy: dy)),
+                    completion: completion,
+                    pointerGeneration: pointerGeneration,
+                    sessionGeneration: snapshot.generation
+                ),
+                at: 0
+            )
+            if !pointerWorkerScheduled {
+                pointerWorkerScheduled = true
+                shouldSchedule = true
+            }
+        }
+        if shouldSchedule {
+            pointerQueue.async { [weak self] in self?.drainPointerQueue() }
+        }
+        return true
+    }
+
     /// Only move/scroll may be shed under pressure: their payload is additive.
     private static func isSheddable(_ kind: SemanticPointerEvent.Kind) -> Bool {
         switch kind {
