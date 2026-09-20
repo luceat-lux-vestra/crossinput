@@ -224,6 +224,86 @@ class PointerDispatcherTest {
     }
 
     @Test
+    fun boundaryVectorUsesDirectionAndBoundedMagnitude() {
+        assertEquals(-30_720 to 0, PointerDispatcher.BoundaryAlignment.vector(PointerBoundary.LEFT, 1920, 1080))
+        assertEquals(30_720 to 0, PointerDispatcher.BoundaryAlignment.vector(PointerBoundary.RIGHT, 1920, 1080))
+        assertEquals(0 to -17_280, PointerDispatcher.BoundaryAlignment.vector(PointerBoundary.TOP, 1920, 1080))
+        assertEquals(0 to 17_280, PointerDispatcher.BoundaryAlignment.vector(PointerBoundary.BOTTOM, 1920, 1080))
+        assertEquals(120_000 to 0, PointerDispatcher.BoundaryAlignment.vector(PointerBoundary.RIGHT, Int.MAX_VALUE, 1080))
+    }
+
+    @Test
+    fun uhidBoundaryAlignmentUsesSelectedDisplayGeometry() {
+        whenever(display.getRealMetrics(any())).then { invocation ->
+            val metrics = invocation.getArgument<android.util.DisplayMetrics>(0)
+            metrics.widthPixels = 1920
+            metrics.heightPixels = 1080
+            Unit
+        }
+        whenever(uhid.selectSystemRoute()).thenReturn(true)
+        whenever(uhid.moveRelative(30_720, 0)).thenReturn(PointerDelivery.deliveredMovement(30_720, 0))
+
+        val dispatcher = auto(desktopSink = true)
+        assertTrue(dispatcher.selectDisplay(display))
+
+        assertEquals(
+            PointerDelivery.deliveredMovement(30_720, 0),
+            dispatcher.alignBoundary(PointerBoundary.RIGHT),
+        )
+        verify(uhid).moveRelative(30_720, 0)
+    }
+
+    @Test
+    fun failedUhidBoundaryAlignmentFallsBackToExactInputManagerAlignment() {
+        whenever(display.getRealMetrics(any())).then { invocation ->
+            val metrics = invocation.getArgument<android.util.DisplayMetrics>(0)
+            metrics.widthPixels = 1920
+            metrics.heightPixels = 1080
+            Unit
+        }
+        whenever(uhid.selectSystemRoute()).thenReturn(true)
+        whenever(uhid.moveRelative(30_720, 0)).thenReturn(PointerDelivery.FAILED)
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
+        whenever(inputManager.alignBoundary(PointerBoundary.RIGHT)).thenReturn(PointerDelivery.DELIVERED)
+
+        val dispatcher = auto(desktopSink = true)
+        dispatcher.selectDisplay(display)
+
+        assertEquals(PointerDelivery.DELIVERED, dispatcher.alignBoundary(PointerBoundary.RIGHT))
+        verify(inputManager).alignBoundary(PointerBoundary.RIGHT)
+    }
+
+    @Test
+    fun partialUhidBoundaryAlignmentDoesNotRetryOnFallback() {
+        whenever(display.getRealMetrics(any())).then { invocation ->
+            val metrics = invocation.getArgument<android.util.DisplayMetrics>(0)
+            metrics.widthPixels = 1920
+            metrics.heightPixels = 1080
+            Unit
+        }
+        whenever(uhid.selectSystemRoute()).thenReturn(true)
+        whenever(uhid.moveRelative(30_720, 0)).thenReturn(
+            PointerDelivery.partiallyDeliveredMovement(10_000, 0),
+        )
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
+
+        val dispatcher = auto(desktopSink = true)
+        dispatcher.selectDisplay(display)
+
+        assertEquals(
+            PointerDelivery.Status.PARTIALLY_DELIVERED,
+            dispatcher.alignBoundary(PointerBoundary.RIGHT).status,
+        )
+        verify(inputManager, never()).alignBoundary(any())
+    }
+
+    @Test
+    fun boundaryAlignmentFailsWithoutSelection() {
+        val dispatcher = auto(desktopSink = true)
+        assertEquals(PointerDelivery.FAILED, dispatcher.alignBoundary(PointerBoundary.RIGHT))
+    }
+
+    @Test
     fun nextSelectDisplayStartsANewSelectionEpoch() {
         whenever(uhid.selectSystemRoute()).thenReturn(true)
         whenever(uhid.moveRelative(1, 0)).thenReturn(PointerDelivery.FAILED)
