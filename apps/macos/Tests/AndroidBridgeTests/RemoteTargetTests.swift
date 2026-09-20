@@ -22,6 +22,7 @@ final class RemoteTargetTests: XCTestCase {
 
         XCTAssertEqual(target.id, RemoteTargetID(rawValue: 6))
         XCTAssertEqual(target.kind, .external)
+        XCTAssertTrue(target.isDesktopSink)
         XCTAssertEqual(target.availability, .available)
         XCTAssertEqual(target.width, 1920)
     }
@@ -42,7 +43,48 @@ final class RemoteTargetTests: XCTestCase {
         )
 
         XCTAssertTrue(display.isDesktop)
-        XCTAssertEqual(RemoteTargetCatalog.normalize(display).kind, .external)
+        let target = RemoteTargetCatalog.normalize(display)
+        XCTAssertEqual(target.kind, .external)
+        XCTAssertTrue(target.isDesktopSink)
+    }
+
+    func testHdmiExternalTargetIsNotDesktopSink() {
+        let display = DisplayInfo(
+            displayId: 6,
+            type: 2,
+            flags: 0,
+            state: 1,
+            width: 1920,
+            height: 1080,
+            densityDpi: 160,
+            rotation: 0,
+            name: "HDMI Screen",
+            uniqueId: "hdmi:0",
+            layerStack: 6
+        )
+
+        let target = RemoteTargetCatalog.normalize(display)
+
+        XCTAssertEqual(target.kind, .external)
+        XCTAssertFalse(target.isDesktopSink)
+    }
+
+    func testAppOwnedVirtualDesktopNameIsNotDesktopSink() {
+        let display = DisplayInfo(
+            displayId: 9,
+            type: 5,
+            flags: 0,
+            state: 1,
+            width: 1920,
+            height: 1080,
+            densityDpi: 160,
+            rotation: 0,
+            name: "Desktop",
+            uniqueId: "virtual:com.example.presenter,10042,Desktop,0",
+            layerStack: 9
+        )
+
+        XCTAssertFalse(RemoteTargetCatalog.normalize(display).isDesktopSink)
     }
 
     func testSelectionPreservesOverrideThenExternalThenFirstPolicy() {

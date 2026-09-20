@@ -36,6 +36,10 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
     public let densityDpi: UInt32
     public let rotation: UInt8
     public let uniqueId: String
+    /// Normalized desktop-system-sink semantics used by handoff policy.
+    /// This is intentionally distinct from `.external`: HDMI is external
+    /// but AUTO pointer routing remains explicit-display there.
+    public let isDesktopSink: Bool
 
     public init(id: RemoteTargetID,
                 name: String,
@@ -45,7 +49,8 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
                 height: UInt32,
                 densityDpi: UInt32,
                 rotation: UInt8,
-                uniqueId: String) {
+                uniqueId: String,
+                isDesktopSink: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -55,6 +60,7 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
         self.densityDpi = densityDpi
         self.rotation = rotation
         self.uniqueId = uniqueId
+        self.isDesktopSink = isDesktopSink
     }
 }
 
@@ -66,8 +72,23 @@ public enum RemoteTargetCatalog {
     private static let v1DesktopType: UInt8 = 7
     private static let v1HdmiType: UInt8 = 2
     private static let v1DesktopFlag: UInt32 = 0x40
+    private static let v1VirtualType: UInt8 = 5
+    private static let desktopDisplayName = "Desktop"
+    private static let desktopUniqueIdSegment = "virtual:android,1000,Desktop,"
 
     public static func normalize(_ display: DisplayInfo) -> RemoteTarget {
+        // Keep this conservative predicate aligned with Android
+        // SystemRoutePolicy: only real desktop system sinks need the
+        // system-relative boundary proof. Generic external displays such as
+        // HDMI remain on the explicit-display/clamp-aware path.
+        let isDesktopSink =
+            (display.flags & v1DesktopFlag) != 0 ||
+            display.type == v1DesktopType ||
+            (
+                display.type == v1VirtualType &&
+                display.name == desktopDisplayName &&
+                display.uniqueId.contains(desktopUniqueIdSegment)
+            )
         let isDesktop = display.isDesktop || display.type == v1DesktopType ||
             (display.flags & v1DesktopFlag) != 0
         let kind: RemoteTargetKind
@@ -94,6 +115,7 @@ public enum RemoteTargetCatalog {
             densityDpi: display.densityDpi,
             rotation: display.rotation,
             uniqueId: display.uniqueId,
+            isDesktopSink: isDesktopSink,
         )
     }
 

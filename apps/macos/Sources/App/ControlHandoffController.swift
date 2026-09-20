@@ -120,7 +120,7 @@ final class ControlHandoffController: @unchecked Sendable {
     func updateRemoteTarget(_ target: RemoteTarget?) {
         let profile = target.map {
             RemoteBoundaryProfile(
-                returnPolicy: $0.kind == .external ? .alignBeforeReturn : .deliveryClampAware,
+                returnPolicy: $0.isDesktopSink ? .alignBeforeReturn : .deliveryClampAware,
                 width: $0.width,
                 height: $0.height
             )
