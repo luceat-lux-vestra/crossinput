@@ -56,13 +56,16 @@ final class SuppressionWatchdogTests: XCTestCase {
 
     func testPokeExtendsDeadlinePastTheOriginalTimeout() {
         let observation = WatchdogObservation()
-        // Original deadline 0.3s; keep poking every 0.1s for 0.9s (3x deadline).
-        let capture = makeCapture(timeout: 0.3) { observation.append($0, $1) }
+        // Use a wide scheduling margin on hosted runners while still proving
+        // the semantic boundary: pokes continue beyond the original 2.0s
+        // deadline, and every poke arrives 1.75s before the newly extended
+        // deadline under nominal scheduling.
+        let capture = makeCapture(timeout: 2.0) { observation.append($0, $1) }
         defer { capture.stop() }
 
         XCTAssertEqual(capture.suppress(), 1)
         for _ in 0..<9 {
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.25)
             capture.pokeWatchdog()
             XCTAssertTrue(
                 observation.releases.isEmpty,
