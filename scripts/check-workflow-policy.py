@@ -298,6 +298,9 @@ def check_issue_labeler_backfill_safety(root, workflows, findings):
                      "workflow_dispatch must declare explicit backfill/dry_run inputs")
         return
     inputs = dispatch.get("inputs") or {}
+    if set(inputs) != {"backfill", "dry_run"}:
+        findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                     f"workflow_dispatch inputs drifted: {sorted(inputs)}")
     dry_run = inputs.get("dry_run") or {}
     backfill = inputs.get("backfill") or {}
     if dry_run.get("default") is not True:
@@ -305,7 +308,7 @@ def check_issue_labeler_backfill_safety(root, workflows, findings):
                      "workflow_dispatch dry_run must default to true")
     if backfill.get("default") is not True:
         findings.add("ISSUE_BACKFILL_UNSAFE", where,
-                     "workflow_dispatch backfill must be explicit and default to true")
+                     "workflow_dispatch backfill must default to true")
 
     path = os.path.join(root, ".github", "workflows", "issue-labeler.yml")
     with open(path, "r", encoding="utf-8") as handle:
@@ -317,26 +320,26 @@ def check_issue_labeler_backfill_safety(root, workflows, findings):
         "const dryRun = process.env.DRY_RUN === 'true';",
         "const backfill = process.env.BACKFILL === 'true';",
         "if (dryRun) return;",
-        "if (!backfill)",
-        "DRY_RUN label update:",
-        "DRY_RUN label create:",
+        "if (!dryRun) await ensureLabels();",
+        "if (context.eventName === 'workflow_dispatch' && !backfill)",
     ]
     for token in required:
         if token not in text:
             findings.add("ISSUE_BACKFILL_UNSAFE", where,
                          f"missing dry-run/backfill safety token {token!r}")
 
-    guard = text.find("if (dryRun) return;")
+    issue_guard = text.find("if (dryRun) return;")
     for mutation in ("removeLabel(", "addLabels("):
         position = text.find(mutation)
-        if position != -1 and (guard == -1 or position < guard):
+        if position != -1 and (issue_guard == -1 or position < issue_guard):
             findings.add("ISSUE_BACKFILL_UNSAFE", where,
                          f"{mutation} is reachable before the issue dry-run guard")
 
-    for mutation in ("updateLabel(", "createLabel("):
-        if mutation in text and f"else await github.rest.issues.{mutation}" not in text:
-            findings.add("ISSUE_BACKFILL_UNSAFE", where,
-                         f"{mutation} is not directly guarded by the catalog dry-run branch")
+    catalog_guard = text.find("if (!dryRun) await ensureLabels();")
+    ensure_call = text.rfind("await ensureLabels();")
+    if catalog_guard == -1 or ensure_call != catalog_guard + len("if (!dryRun) "):
+        findings.add("ISSUE_BACKFILL_UNSAFE", where,
+                     "label catalog reconciliation must run only behind !dryRun")
 
 
 def managed_labels(root):
