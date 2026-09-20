@@ -116,6 +116,29 @@ class InputManagerPointerInjectorTest {
     }
 
     @Test
+    fun boundaryAlignmentUsesExactSelectedDisplayEdges() {
+        assertEquals(
+            PointerDelivery.deliveredMovement(959, 0),
+            newInjector().alignBoundary(PointerBoundary.RIGHT),
+        )
+        tearDown()
+        assertEquals(
+            PointerDelivery.deliveredMovement(-960, 0),
+            newInjector().alignBoundary(PointerBoundary.LEFT),
+        )
+        tearDown()
+        assertEquals(
+            PointerDelivery.deliveredMovement(0, -540),
+            newInjector().alignBoundary(PointerBoundary.TOP),
+        )
+        tearDown()
+        assertEquals(
+            PointerDelivery.deliveredMovement(0, 539),
+            newInjector().alignBoundary(PointerBoundary.BOTTOM),
+        )
+    }
+
+    @Test
     fun leftClickUsesActionDownUpWithoutActionButton() {
         val injector = newInjector()
 
