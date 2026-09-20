@@ -155,6 +155,15 @@ def check_required_gates(workflows, policy, findings):
                              f"declared producer in .github/hardening-policy.json")
 
 
+def check_staged_gates(workflows, policy, findings):
+    staged = policy.get("staged_status_checks") or []
+    if not staged:
+        return
+    staged_policy = dict(policy)
+    staged_policy["required_status_checks"] = staged
+    check_required_gates(workflows, staged_policy, findings)
+
+
 def check_action_pins(workflows, findings):
     for filename, workflow in workflows.items():
         for job_id, job in (workflow.get("jobs") or {}).items():
@@ -214,11 +223,32 @@ def check_permissions(workflows, policy, findings):
                              f"policy allows unused write permission {scope!r}")
 
 
-def check_trust_boundaries(workflows, findings):
+def check_trust_boundaries(workflows, policy, findings):
+    protected_branch = policy["protected_branch"]
+    repository_full_name = policy["repository_full_name"]
     for filename, workflow in workflows.items():
-        privileged = "pull_request_target" in triggers(workflow)
+        trigger_map = triggers(workflow)
+        privileged = "pull_request_target" in trigger_map
+        if privileged:
+            config = trigger_map.get("pull_request_target")
+            branches = config.get("branches") if isinstance(config, dict) else None
+            if branches != [protected_branch]:
+                findings.add(
+                    "TRUST_PRT_SCOPE",
+                    filename,
+                    f"pull_request_target must be limited to {protected_branch!r}; got {branches!r}",
+                )
         for job_id, job in (workflow.get("jobs") or {}).items():
             where = f"{filename}:{job_id}"
+            if privileged:
+                condition = str(job.get("if") or "")
+                expected_guard = f"github.repository == '{repository_full_name}'"
+                if expected_guard not in condition:
+                    findings.add(
+                        "TRUST_PRT_SCOPE",
+                        where,
+                        f"pull_request_target job must carry repository guard {expected_guard!r}",
+                    )
             for step in steps_of(job):
                 if not isinstance(step, dict):
                     continue
@@ -475,9 +505,10 @@ def main():
     findings = Findings()
 
     check_required_gates(workflows, policy, findings)
+    check_staged_gates(workflows, policy, findings)
     check_action_pins(workflows, findings)
     check_permissions(workflows, policy, findings)
-    check_trust_boundaries(workflows, findings)
+    check_trust_boundaries(workflows, policy, findings)
     check_hygiene(workflows, findings)
     check_labels(args.root, findings)
     check_codeql_authority(args.root, workflows, policy, findings)

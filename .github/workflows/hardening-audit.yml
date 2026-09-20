@@ -48,6 +48,9 @@ jobs:
             | tee hardening-audit.txt
         continue-on-error: true
 
+      - name: GitHub Actions static security
+        run: bash scripts/check-actions-security.sh
+
       - name: Physical-evidence tooling contract
         # Integrity of the verifier only. No device evidence is generated here.
         run: |

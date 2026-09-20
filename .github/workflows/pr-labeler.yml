@@ -1,7 +1,8 @@
 name: Pull request labels
 
 on:
-  pull_request_target:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] audited metadata-only fork labeling; never checks out or executes PR-head code
+    branches: [main]
     types:
       - opened
       - edited
@@ -18,6 +19,7 @@ concurrency:
 jobs:
   classify:
     name: classify
+    if: github.repository == 'luceat-lux-vestra/crossinput'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Label writes only. This workflow never checks out or executes
