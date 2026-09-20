@@ -129,6 +129,14 @@ class FixtureTest {
     }
 
     @Test
+    fun pointerAlignBoundary() {
+        val frame = fixture("pointer-align-boundary")
+        assertEquals(Protocol.TYPE_POINTER_ALIGN_BOUNDARY, frame.type)
+        assertEquals(14, frame.requestId)
+        assertEquals(1, Messages.pointerAlignBoundary(frame.payload))
+    }
+
+    @Test
     fun pointerButton() {
         val frame = fixture("pointer-button")
         assertEquals(Protocol.TYPE_POINTER_BUTTON, frame.type)
