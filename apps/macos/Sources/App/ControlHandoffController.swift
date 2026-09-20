@@ -332,6 +332,13 @@ final class ControlHandoffController: @unchecked Sendable {
             // Controller-originated paths invalidate first and perform their
             // own synchronous/ordered state transition.
             guard invalidated else { return }
+
+            // Remote cleanup is deliberately after host ownership is already
+            // local, but it must be scheduled from this exact return boundary.
+            // A later MainActor state projection may be superseded by rapid
+            // re-entry and therefore cannot be the sole cleanup owner.
+            self.sender.releaseRemotelyHeldButtons()
+
             Task { @MainActor in
                 self.switchMachine.forceReturn(
                     reason: self.transitionReason(for: reason)
@@ -463,6 +470,12 @@ final class ControlHandoffController: @unchecked Sendable {
 
         if let captureGeneration {
             capture.release(reason: reason, generation: captureGeneration)
+
+            // Schedule remote persistent-state cleanup immediately after the
+            // synchronous host return. Do not depend on the asynchronous
+            // state-machine/UI projection: rapid re-entry can legitimately
+            // make an older local transition stale before MainActor applies it.
+            sender.releaseRemotelyHeldButtons()
         }
         // No generation means another return path already invalidated this
         // ownership period. Never issue an unscoped release here: a concurrent

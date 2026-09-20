@@ -1179,6 +1179,86 @@ final class InputSenderTests: XCTestCase {
                        "cleanup sends button-UP, not the rejected original event re-admitted")
     }
 
+    func testEmergencyReturnSchedulesHeldButtonCleanupBeforeMainActorProjection() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: sender,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(controller.capture.isSuppressed)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success)
+
+        controller.emergencyReturn()
+
+        // Do not flush state callbacks or yield MainActor here. The remote
+        // cleanup must already have been scheduled synchronously by return.
+        sender.waitForDrain()
+
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(
+            session.sentPointerButtonEvents,
+            [(0, false)],
+            "held button cleanup cannot depend on later MainActor projection"
+        )
+    }
+
+    func testCaptureOriginatedReturnSchedulesHeldButtonCleanupBeforeMainActorProjection() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: sender,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(controller.capture.isSuppressed)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success)
+
+        // Models watchdog / tap-disable / external capture fail-safe. The
+        // suppression callback closes admission synchronously, while its
+        // state-machine projection is intentionally left unable to run yet.
+        controller.capture.release(reason: .watchdogTimeout)
+        sender.waitForDrain()
+
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(
+            session.sentPointerButtonEvents,
+            [(0, false)],
+            "capture-originated return must schedule cleanup before MainActor"
+        )
+    }
+
     /// Regression B: generation safety. Buttons accepted on session A must
     /// never be released into replacement session B; A's stale held-button
     /// record is dropped without injecting frames into B.
