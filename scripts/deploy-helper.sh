@@ -21,6 +21,7 @@
 #   scripts/deploy-helper.sh hello|ping|list  # preset request frames
 #   scripts/deploy-helper.sh select <id>      # SELECT_DISPLAY frame (id = display id)
 #   scripts/deploy-helper.sh pointer <id>     # select display, then move/click/scroll
+#   scripts/deploy-helper.sh boundary-align <id> <edge> # drive UHID cursor to remote edge
 #   scripts/deploy-helper.sh dump             # pull captured frames + stderr log
 #   scripts/deploy-helper.sh stop             # SHUTDOWN frame, then clean up processes
 #
@@ -250,6 +251,24 @@ case "$mode" in
         send "$FRAME_HID_REL4"
         echo "hid sequence sent (create + 4 relative moves)"
         ;;
+    boundary-align)
+        id="${2:?boundary-align requires a display id}"
+        edge="${3:?boundary-align requires left|right|top|bottom}"
+        if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+            echo "invalid display id: $id" >&2
+            exit 1
+        fi
+        case "$edge" in
+            left | right | top | bottom) ;;
+            *)
+                echo "invalid edge: $edge (expected left|right|top|bottom)" >&2
+                exit 1
+                ;;
+        esac
+        deploy
+        adb -s "$DEVICE" shell \
+            "app_process -cp $REMOTE_APK / com.crossinput.helper.RemoteBoundaryAlignmentProbeMain $id $edge"
+        ;;
     dump)
         adb -s "$DEVICE" pull "$REMOTE_OUT" /tmp/cxi-helper-stdout.bin >/dev/null
         echo "== stdout frames ($(wc -c </tmp/cxi-helper-stdout.bin) bytes):"
@@ -283,7 +302,7 @@ case "$mode" in
         ;;
     *)
         echo "unknown mode: $mode" >&2
-        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|pointer <id>|hid|dump|stop]" >&2
+        echo "usage: $0 [build|deploy|start|send <hex>|hello|ping|list|select <id>|pointer <id>|hid|boundary-align <id> <edge>|dump|stop]" >&2
         exit 1
         ;;
 esac
