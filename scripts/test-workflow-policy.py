@@ -214,6 +214,12 @@ def main():
                            "            await ensureLabels();\n"),
          "ISSUE_BACKFILL_POLICY")
 
+    case("issue label color reconciliation removed",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           " || (data.color || '').toLowerCase() !== color.toLowerCase()",
+                           ""),
+         "ISSUE_BACKFILL_POLICY")
+
     # Automation referencing a label nothing guarantees exists.
     case("labeler references unmanaged label",
          lambda root: edit(os.path.join(root, ".github", "labeler.yml"),
