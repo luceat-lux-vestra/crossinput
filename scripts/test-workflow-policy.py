@@ -213,6 +213,13 @@ def main():
                            "labels: type/bug", "labels: type/gone"),
          "LABEL_UNMANAGED")
 
+    case("issue backfill loses dry-run default",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             "      dry_run:\n        description: Report proposed changes without mutating labels\n        required: true\n        type: boolean\n        default: true\n",
+             "      dry_run:\n        description: Report proposed changes without mutating labels\n        required: true\n        type: boolean\n        default: false\n"),
+         "ISSUE_BACKFILL_UNSAFE")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
