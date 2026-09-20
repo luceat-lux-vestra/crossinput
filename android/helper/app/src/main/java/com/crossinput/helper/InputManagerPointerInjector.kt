@@ -38,6 +38,17 @@ data class PointerDelivery(
     }
 }
 
+enum class PointerBoundary(val wireValue: Int) {
+    LEFT(0),
+    RIGHT(1),
+    TOP(2),
+    BOTTOM(3);
+
+    companion object {
+        fun fromWire(value: Int): PointerBoundary? = entries.firstOrNull { it.wireValue == value }
+    }
+}
+
 interface PointerInjector {
     /** Whether this backend can honor the selected display explicitly. */
     val routing: PointerRouting
@@ -49,6 +60,7 @@ interface PointerInjector {
     fun selectDisplay(display: Display): Boolean
     fun refreshMetrics(displayId: Int)
     fun moveRelative(dx: Int, dy: Int): PointerDelivery
+    fun alignBoundary(boundary: PointerBoundary): PointerDelivery = PointerDelivery.FAILED
     fun button(button: Int, down: Boolean): PointerDelivery
     fun scroll(horizontal: Float, vertical: Float): PointerDelivery
     fun close()
@@ -268,6 +280,29 @@ class InputManagerPointerInjector(
         val nextX = (currentX + dx).coerceIn(0f, displayWidth - 1f)
         val nextY = (currentY + dy).coerceIn(0f, displayHeight - 1f)
 
+        if (!injectMoveEvent(nextX, nextY)) return PointerDelivery.FAILED
+        val deliveredDx = (nextX - currentX).toInt()
+        val deliveredDy = (nextY - currentY).toInt()
+        currentX = nextX
+        currentY = nextY
+        return PointerDelivery.deliveredMovement(deliveredDx, deliveredDy)
+    }
+
+    override fun alignBoundary(boundary: PointerBoundary): PointerDelivery {
+        if (!initialized || displayWidth <= 0 || displayHeight <= 0) {
+            log.warn("InputManagerPointerInjector", "alignBoundary called before target selected")
+            return PointerDelivery.FAILED
+        }
+        val nextX = when (boundary) {
+            PointerBoundary.LEFT -> 0f
+            PointerBoundary.RIGHT -> displayWidth - 1f
+            PointerBoundary.TOP, PointerBoundary.BOTTOM -> currentX
+        }
+        val nextY = when (boundary) {
+            PointerBoundary.TOP -> 0f
+            PointerBoundary.BOTTOM -> displayHeight - 1f
+            PointerBoundary.LEFT, PointerBoundary.RIGHT -> currentY
+        }
         if (!injectMoveEvent(nextX, nextY)) return PointerDelivery.FAILED
         val deliveredDx = (nextX - currentX).toInt()
         val deliveredDy = (nextY - currentY).toInt()
