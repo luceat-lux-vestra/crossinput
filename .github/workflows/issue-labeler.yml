@@ -142,13 +142,14 @@ jobs:
               }
             }
 
+            if (context.eventName === 'workflow_dispatch' && !backfill) {
+              core.notice('Backfill is disabled; no labels or issues are mutated.');
+              return;
+            }
+
             if (!dryRun) await ensureLabels();
 
             if (context.eventName === 'workflow_dispatch') {
-              if (!backfill) {
-                core.notice('Backfill is disabled; no issues reconciled.');
-                return;
-              }
               const issues = await github.paginate(github.rest.issues.listForRepo, {
                 ...context.repo,
                 state: 'open',
