@@ -157,6 +157,8 @@ final class InputSenderTests: XCTestCase {
         await settleMainActor()
         XCTAssertEqual(machine.state, .remoteActive)
         XCTAssertTrue(capture.isSuppressed)
+        XCTAssertEqual(machine.remoteReturnPolicy, .alignBeforeReturn,
+                       "external target must snapshot the DeX boundary policy")
 
         // Travel into DeX, then exactly back to the virtual origin. The old
         // model could return from raw-delta accounting; the new external
