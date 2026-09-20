@@ -202,6 +202,18 @@ def main():
                            "    runs-on: ubuntu-latest\n"),
          "HYGIENE_NO_TIMEOUT")
 
+    case("issue backfill dry-run disabled",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "      dry_run:\n        description: Report proposed changes without mutating labels\n        required: true\n        type: boolean\n        default: true\n",
+                           "      dry_run:\n        description: Report proposed changes without mutating labels\n        required: true\n        type: boolean\n        default: false\n"),
+         "ISSUE_BACKFILL_POLICY")
+
+    case("issue backfill mutation guard removed",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "            if (!dryRun) await ensureLabels();\n",
+                           "            await ensureLabels();\n"),
+         "ISSUE_BACKFILL_POLICY")
+
     # Automation referencing a label nothing guarantees exists.
     case("labeler references unmanaged label",
          lambda root: edit(os.path.join(root, ".github", "labeler.yml"),
