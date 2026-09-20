@@ -55,7 +55,7 @@ Making the released app bootstrap the matching helper itself remains part of rel
 
 | Component | Requirement |
 |---|---|
-| macOS | 14+; Apple Silicon preferred |
+| macOS | 15+ for current development/CoreHID host ownership; Apple Silicon preferred. Historical v0.1.1 was built for macOS 14+. |
 | Android | Android 10+; Samsung Galaxy/DeX is the primary supported use case |
 | Device setup | Developer options + Wireless debugging |
 | adb | 37+ with mDNS wireless-debugging support |
