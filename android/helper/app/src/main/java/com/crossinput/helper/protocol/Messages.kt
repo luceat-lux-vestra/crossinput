@@ -8,6 +8,17 @@ import java.nio.charset.StandardCharsets
  * CXI message payload codecs (little-endian), per protocol/protocol.md.
  * Parsers are for Mac → Android messages; builders are for Android → Mac responses.
  */
+enum class PointerAlignmentEdge(val code: Int) {
+    LEFT(0),
+    RIGHT(1),
+    TOP(2),
+    BOTTOM(3);
+
+    companion object {
+        fun fromCode(code: Int): PointerAlignmentEdge? = entries.firstOrNull { it.code == code }
+    }
+}
+
 object Messages {
 
     // Log levels (LOG_EVENT payload, level u8)
@@ -48,6 +59,12 @@ object Messages {
     fun pointerScroll(payload: ByteArray): Pair<Float, Float> {
         val bb = le(payload, 0)
         return Pair(bb.float, bb.float)
+    }
+
+    fun pointerAlignEdge(payload: ByteArray): PointerAlignmentEdge {
+        if (payload.size != 1) throw ProtocolException("pointer align edge payload must be 1 byte")
+        return PointerAlignmentEdge.fromCode(payload[0].toInt() and 0xFF)
+            ?: throw ProtocolException("invalid pointer alignment edge")
     }
 
     data class KeyEvent(val keyCode: Int, val metaState: Int, val action: Int, val repeatCount: Int)
