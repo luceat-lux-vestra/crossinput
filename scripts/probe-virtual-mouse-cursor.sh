@@ -74,25 +74,40 @@ cleanup() {
             "$USER_ID" "$SHELL_PACKAGE" "$PROBE_MAC" >/dev/null 2>&1
         sleep 0.3
 
-        if list_associations | grep -Fqi "$PROBE_MAC"; then
+        AFTER_ASSOCIATIONS=""
+        if ! AFTER_ASSOCIATIONS="$(list_associations)"; then
+            echo "cleanup failure: unable to verify companion association removal" >&2
+            cleanup_failed=1
+        elif grep -Fqi "$PROBE_MAC" <<<"$AFTER_ASSOCIATIONS"; then
             echo "cleanup failure: temporary companion association still exists" >&2
             cleanup_failed=1
         fi
 
-        AFTER_ROLE="$(role_holders)"
-        if [ "$AFTER_ROLE" != "$BEFORE_ROLE" ]; then
+        AFTER_ROLE=""
+        if ! AFTER_ROLE="$(role_holders)"; then
+            echo "cleanup failure: unable to verify companion role-holder state" >&2
+            cleanup_failed=1
+        elif [ "$AFTER_ROLE" != "$BEFORE_ROLE" ]; then
             echo "cleanup failure: companion role-holder state did not return to baseline" >&2
             cleanup_failed=1
         fi
     fi
 
+    INPUT_DUMP=""
+    input_verified=0
     for _ in 1 2 3 4 5; do
-        if ! adb -s "$DEVICE" shell dumpsys input 2>/dev/null | grep -Fq "$PROBE_DEVICE_NAME"; then
-            break
+        if INPUT_DUMP="$(adb -s "$DEVICE" shell dumpsys input 2>/dev/null)"; then
+            input_verified=1
+            if ! grep -Fq "$PROBE_DEVICE_NAME" <<<"$INPUT_DUMP"; then
+                break
+            fi
         fi
         sleep 0.2
     done
-    if adb -s "$DEVICE" shell dumpsys input 2>/dev/null | grep -Fq "$PROBE_DEVICE_NAME"; then
+    if [ "$input_verified" -ne 1 ]; then
+        echo "cleanup failure: unable to verify temporary input-device removal" >&2
+        cleanup_failed=1
+    elif grep -Fq "$PROBE_DEVICE_NAME" <<<"$INPUT_DUMP"; then
         echo "cleanup failure: temporary VirtualMouse input device still exists" >&2
         cleanup_failed=1
     fi
