@@ -278,6 +278,15 @@ class Controller(
                     log.warn("Main", "pointer move delivery status=${result.status}")
                 }
             }
+            Protocol.TYPE_POINTER_ALIGN_BOUNDARY -> {
+                val boundary = PointerBoundary.fromWire(Messages.pointerAlignBoundary(frame.payload))
+                    ?: throw ProtocolException("invalid pointer boundary")
+                val result = pointer.alignBoundary(boundary)
+                writePointerResult(frame, result)
+                if (result.status != PointerDelivery.Status.DELIVERED) {
+                    log.warn("Main", "pointer boundary alignment status=${result.status}")
+                }
+            }
             Protocol.TYPE_POINTER_BUTTON -> {
                 val btn = Messages.pointerButton(frame.payload)
                 val result = pointer.button(btn.button, btn.down)
@@ -332,6 +341,7 @@ class Controller(
             return
         }
         val capabilities = Cxi.CAPABILITY_SEMANTIC_POINTER_RESULT or
+            Cxi.CAPABILITY_REMOTE_BOUNDARY_ALIGNMENT or
             if (pointer.supportsExplicitDisplayRouting) {
                 Cxi.CAPABILITY_EXPLICIT_POINTER_ROUTING
             } else {
