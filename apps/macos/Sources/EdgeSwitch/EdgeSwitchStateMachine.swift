@@ -327,7 +327,11 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     public func forceReturn(reason: TransitionReason = .emergencyReturn) {
         run {
             switch stateStorage {
-            case .edgeArmed, .remoteActive:
+            case .edgeArmed:
+                virtualAxisPosition = 0
+                hasReceivedFirstMove = false
+                transition(to: .localActive, reason: reason)
+            case .remoteActive:
                 returnToMacOS(reason: reason)
             default: break
             }
