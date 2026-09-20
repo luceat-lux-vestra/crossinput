@@ -21,9 +21,10 @@ Dependabot proposes dependency updates, but proposal automation is not PR-time a
 
 1. ordinary-PR reliability;
 2. live Dependency Graph support;
-3. merged-main evidence;
-4. one atomic checked-in policy + live ruleset update;
-5. fresh authoritative readback.
+3. one atomic checked-in policy + live ruleset update;
+4. fresh authoritative post-merge policy/ruleset readback.
+
+Dependency Review is PR-diff-scoped and therefore has no merged-main execution proof.
 
 ## GAP — workflow semantic/security scanners
 
