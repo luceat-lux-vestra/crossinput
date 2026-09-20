@@ -307,7 +307,6 @@ final class ControlHandoffController: @unchecked Sendable {
         let alignmentProfile: RemoteBoundaryProfile? = lifecycleLock.withLock {
             guard self.controlEpoch == controlEpoch,
                   (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)),
-                  activeSuppressionGeneration != nil,
                   activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn else { return nil }
             return activeRemoteBoundaryProfile
         }
@@ -366,7 +365,6 @@ final class ControlHandoffController: @unchecked Sendable {
         let stillCurrent = lifecycleLock.withLock {
             self.controlEpoch == controlEpoch
                 && (edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled))
-                && activeSuppressionGeneration != nil
                 && activeRemoteBoundaryProfile?.returnPolicy == .alignBeforeReturn
         }
         guard stillCurrent, capture.isSuppressed else { return }
