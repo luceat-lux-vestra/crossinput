@@ -38,6 +38,13 @@ object Messages {
         return Pair(bb.int, bb.int)
     }
 
+    fun pointerAlignBoundary(payload: ByteArray): Int {
+        if (payload.size != 1) throw ProtocolException("pointer boundary payload must be 1 byte")
+        val value = payload[0].toInt() and 0xFF
+        if (value !in 0..3) throw ProtocolException("invalid pointer boundary $value")
+        return value
+    }
+
     data class PointerButton(val button: Int, val down: Boolean)
 
     fun pointerButton(payload: ByteArray): PointerButton {
