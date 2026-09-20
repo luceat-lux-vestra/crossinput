@@ -127,6 +127,113 @@ final class InputSenderTests: XCTestCase {
                                                .pointerMoveRel, .pointerScroll])
     }
 
+    func testExternalTargetReturnAlignsRealBoundaryBeforeHysteresis() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine
+        )
+        controller.updateRemoteTarget(RemoteTarget(
+            id: RemoteTargetID(rawValue: 2),
+            name: "Desktop",
+            kind: .external,
+            availability: .available,
+            width: 1920,
+            height: 1080,
+            densityDpi: 160,
+            rotation: 0,
+            uniqueId: "dex-test"
+        ))
+
+        machine.activate()
+        capture.onScreenEdge?(.left)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        // Travel into DeX, then exactly back to the virtual origin. The old
+        // model could return from raw-delta accounting; the new external
+        // policy must stay remote and inject a control-plane move to the real
+        // DeX right edge first.
+        capture.onPointerEvent?(PointerEvent(.move(dx: -300, dy: 0)))
+        sender.waitForDrain()
+        await settleMainActor()
+
+        capture.onPointerEvent?(PointerEvent(.move(dx: 300, dy: 0)))
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertEqual(session.pointerMovementEvents.map { $0.0 }, [-300, 300, 15_360],
+                       "real-boundary alignment must run immediately after the candidate movement")
+        XCTAssertEqual(session.pointerMovementEvents.map { $0.1 }, [0, 0, 0])
+
+        capture.onPointerEvent?(PointerEvent(.move(dx: 59, dy: 0)))
+        sender.waitForDrain()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive,
+                       "confirmed real edge still requires post-boundary hysteresis")
+
+        capture.onPointerEvent?(PointerEvent(.move(dx: 1, dy: 0)))
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+        _ = controller
+    }
+
+    func testPhoneTargetKeepsClampAwareReturnWithoutSyntheticAlignment() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine
+        )
+        controller.updateRemoteTarget(RemoteTarget(
+            id: RemoteTargetID(rawValue: 0),
+            name: "Phone",
+            kind: .phone,
+            availability: .available,
+            width: 1440,
+            height: 3040,
+            densityDpi: 480,
+            rotation: 0,
+            uniqueId: "phone-test"
+        ))
+
+        machine.activate()
+        capture.onScreenEdge?(.left)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        capture.onPointerEvent?(PointerEvent(.move(dx: -300, dy: 0)))
+        sender.waitForDrain()
+        await settleMainActor()
+        capture.onPointerEvent?(PointerEvent(.move(dx: 360, dy: 0)))
+        sender.waitForDrain()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertEqual(session.pointerMovementEvents.map { $0.0 }, [-300, 360],
+                       "non-external targets must not receive the DeX alignment barrier")
+        _ = controller
+    }
+
     func testKeyboardDeliveryDoesNotWaitForStalledPointerRequest() {
         let session = FakeSession(delay: 200_000_000)
         let reference = SessionReference()
