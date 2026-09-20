@@ -102,6 +102,11 @@ def main():
              {"context": "Ghost Check", "workflow": "ci.yml", "job": "ghost"})),
          "GATE_MISSING_JOB")
 
+    case("missing staged producer",
+         lambda root: policy_edit(root, lambda policy: policy["staged_status_checks"][0].update(
+             {"job": "missing-staged"})),
+         "GATE_MISSING_JOB")
+
     # Path filters are the classic silent fail-open: the check never starts, so
     # it never turns red, and a strict ruleset can still be satisfied.
     case("path filter on required workflow",
