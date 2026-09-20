@@ -535,7 +535,14 @@ final class ControlHandoffController: @unchecked Sendable {
             lifecycleLock.withLock {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
-                activeRemoteBoundaryProfile = nil
+                // Activation publishes local ownership but does not end a
+                // remote epoch. An edge callback can legitimately snapshot
+                // the target before this asynchronous activation transition
+                // reaches the MainActor; clearing it here would make the
+                // ensuing external remote epoch fail closed spuriously.
+                if reason != .activation {
+                    activeRemoteBoundaryProfile = nil
+                }
             }
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
