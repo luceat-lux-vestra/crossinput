@@ -207,8 +207,10 @@ class PointerDispatcher(
                 PointerBoundary.LEFT, PointerBoundary.RIGHT -> width
                 PointerBoundary.TOP, PointerBoundary.BOTTOM -> height
             }
-            val magnitude = maxOf(MIN_RAW_DISTANCE, axis * MULTIPLIER)
-                .coerceAtMost(MAX_RAW_DISTANCE)
+            val magnitude = maxOf(
+                MIN_RAW_DISTANCE.toLong(),
+                axis.toLong() * MULTIPLIER,
+            ).coerceAtMost(MAX_RAW_DISTANCE.toLong()).toInt()
             return when (boundary) {
                 PointerBoundary.LEFT -> -magnitude to 0
                 PointerBoundary.RIGHT -> magnitude to 0
