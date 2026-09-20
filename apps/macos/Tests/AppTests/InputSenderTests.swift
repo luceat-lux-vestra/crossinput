@@ -113,6 +113,58 @@ final class InputSenderTests: XCTestCase {
                                                .pointerMoveRel, .pointerScroll])
     }
 
+    func testFailedRemoteCleanupBlocksSameSessionReentryUntilReplacement() async {
+        final class CleanupFailingSession:
+            FakeSession, @unchecked Sendable {
+            override func send(_ frame: CxiFrame) throws {
+                if frame.type == .pointerButton,
+                   frame.requestId == 0 {
+                    throw ConnectionError.protocolError(
+                        "injected cleanup failure"
+                    )
+                }
+                try super.send(frame)
+            }
+        }
+
+        let session = CleanupFailingSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(
+            downDone.wait(timeout: .now() + 1),
+            .success
+        )
+        XCTAssertTrue(sender.isHandoffReady)
+
+        sender.releaseRemotelyHeldButtons()
+        sender.waitForDrain()
+
+        XCTAssertTrue(
+            session.isConnected,
+            "injected semantic cleanup failure keeps transport apparently live"
+        )
+        XCTAssertFalse(
+            sender.isHandoffReady,
+            "failed persistent-state cleanup must fence same-session reentry"
+        )
+
+        let replacement = FakeSession()
+        reference.set(replacement)
+
+        XCTAssertTrue(
+            sender.isHandoffReady,
+            "a new session generation starts without the old stuck state"
+        )
+    }
+
     func testRemoteCleanupFenceBlocksReentryUntilOldPointerWorkSettles() async {
         let fixture = makeFixture()
         let capture = InputCapture(pointerRestoreOverride: {})
@@ -1375,7 +1427,10 @@ final class InputSenderTests: XCTestCase {
         let cleanup = sender.releaseHeldButtonsForCurrentSession()
 
         XCTAssertEqual(cleanup,
-                       InputSender.HeldButtonCleanupResult(attempted: 3, succeeded: 2),
+                       InputSender.HeldButtonCleanupResult(
+                           sessionGeneration: reference.snapshot().generation,
+                           attempted: 3,
+                           succeeded: 2),
                        "accounting must report the failed send as attempted-but-not-succeeded")
         XCTAssertEqual(cleanup?.failed, 1)
 

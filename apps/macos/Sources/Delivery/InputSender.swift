@@ -100,6 +100,10 @@ public final class InputSender: @unchecked Sendable {
     /// New handoff admission is suspended while old persistent remote state
     /// is draining. Guarded by stateLock.
     private var remoteCleanupPending = false
+    /// If best-effort persistent-state cleanup fails, the same session
+    /// generation must never receive a new handoff. A replacement session has
+    /// a new generation and starts clean.
+    private var failedRemoteCleanupSessionGeneration: UInt64?
     /// Aggregate metadata only — never input values or payloads. Mutated
     /// under stateLock; flushed to the log only after the lock is released.
     private var coalescedScrollBatchCount = 0
@@ -161,8 +165,13 @@ public final class InputSender: @unchecked Sendable {
     /// from the previous epoch has fully crossed the keyboard/pointer queues.
     /// Local host ownership never waits on this fence; it gates re-entry only.
     public var isHandoffReady: Bool {
-        guard hasLiveConnection else { return false }
-        return stateLock.withLock { !remoteCleanupPending }
+        let snapshot = session.snapshot()
+        guard snapshot.connection?.isConnected == true else { return false }
+        return stateLock.withLock {
+            !remoteCleanupPending
+                && failedRemoteCleanupSessionGeneration
+                    != snapshot.generation
+        }
     }
 
     /// Admits one captured event into the bounded pointer-batch queue.
@@ -359,8 +368,13 @@ public final class InputSender: @unchecked Sendable {
             guard let self else { return }
             pointerQueue.async { [weak self] in
                 guard let self else { return }
-                _ = self.releaseHeldButtonsForCurrentSession()
+                let cleanup = self.releaseHeldButtonsForCurrentSession()
                 self.stateLock.withLock {
+                    if let cleanup,
+                       cleanup.failed > 0 {
+                        self.failedRemoteCleanupSessionGeneration =
+                            cleanup.sessionGeneration
+                    }
                     self.remoteCleanupPending = false
                 }
             }
@@ -382,6 +396,7 @@ public final class InputSender: @unchecked Sendable {
     /// attempt/succeeded/failed accounting is unit-testable without parsing
     /// log output; never contains button identifiers or payloads.
     struct HeldButtonCleanupResult: Equatable {
+        let sessionGeneration: UInt64
         let attempted: Int
         let succeeded: Int
         var failed: Int { attempted - succeeded }
@@ -416,7 +431,11 @@ public final class InputSender: @unchecked Sendable {
                 // Swallowed by design: cleanup must never trap local control.
             }
         }
-        let result = HeldButtonCleanupResult(attempted: buttons.count, succeeded: succeeded)
+        let result = HeldButtonCleanupResult(
+            sessionGeneration: snapshot.generation,
+            attempted: buttons.count,
+            succeeded: succeeded
+        )
         // Metadata only (AGENTS.md rule 4): attempt/success/failure counts.
         Diagnostics.log("remote held-pointer-buttons cleanup "
             + "attempted=\(result.attempted) succeeded=\(result.succeeded) "
