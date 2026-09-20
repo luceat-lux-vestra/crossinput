@@ -1212,11 +1212,9 @@ final class InputSenderTests: XCTestCase {
         sender.waitForDrain()
 
         XCTAssertFalse(controller.capture.isSuppressed)
-        XCTAssertEqual(
-            session.sentPointerButtonEvents,
-            [(0, false)],
-            "held button cleanup cannot depend on later MainActor projection"
-        )
+        XCTAssertEqual(session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.1, false)
     }
 
     func testCaptureOriginatedReturnSchedulesHeldButtonCleanupBeforeMainActorProjection() async {
@@ -1252,11 +1250,9 @@ final class InputSenderTests: XCTestCase {
         sender.waitForDrain()
 
         XCTAssertFalse(controller.capture.isSuppressed)
-        XCTAssertEqual(
-            session.sentPointerButtonEvents,
-            [(0, false)],
-            "capture-originated return must schedule cleanup before MainActor"
-        )
+        XCTAssertEqual(session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.1, false)
     }
 
     /// Regression B: generation safety. Buttons accepted on session A must
