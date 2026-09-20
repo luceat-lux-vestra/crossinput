@@ -216,9 +216,27 @@ def check_permissions(workflows, policy, findings):
 
 def check_trust_boundaries(workflows, findings):
     for filename, workflow in workflows.items():
-        privileged = "pull_request_target" in triggers(workflow)
+        trigger_map = triggers(workflow)
+        privileged = "pull_request_target" in trigger_map
+        if privileged:
+            config = trigger_map.get("pull_request_target")
+            branches = config.get("branches") if isinstance(config, dict) else None
+            if branches != [policy_branch := "main"]:
+                findings.add(
+                    "TRUST_PRT_SCOPE",
+                    filename,
+                    f"pull_request_target must be limited to {policy_branch!r}; got {branches!r}",
+                )
         for job_id, job in (workflow.get("jobs") or {}).items():
             where = f"{filename}:{job_id}"
+            if privileged:
+                condition = str(job.get("if") or "")
+                if "github.repository == 'luceat-lux-vestra/crossinput'" not in condition:
+                    findings.add(
+                        "TRUST_PRT_SCOPE",
+                        where,
+                        "pull_request_target job must carry an explicit repository guard",
+                    )
             for step in steps_of(job):
                 if not isinstance(step, dict):
                     continue
