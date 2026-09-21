@@ -31,6 +31,12 @@
       "workflow": "failure-triage.yml",
       "job": "failure-triage",
       "trigger": "pull_request_target"
+    },
+    {
+      "context": "Dependency Review",
+      "workflow": "dependency-review.yml",
+      "job": "review",
+      "promotion_evidence": "PR #159 exact HEAD adc9ceaf8e386fe5e267bfe88c75337175ec3703 produced successful Dependency Review run 35501846617. Final promotion still requires live protected-main ruleset mutation/readback in the same promotion session."
     }
   ],
   "protected_branch": "main",
@@ -83,14 +89,7 @@
       "issues"
     ]
   },
-  "staged_status_checks": [
-    {
-      "context": "Dependency Review",
-      "workflow": "dependency-review.yml",
-      "job": "review",
-      "promotion": "Promote only after ordinary PR reliability and live Dependency Graph support. Dependency Review is PR-diff-scoped and has no merged-main producer; after promotion, verify the atomic checked-in/live ruleset state by fresh readback."
-    }
-  ],
+  "staged_status_checks": [],
   "workflow_static_analysis": {
     "required_in_context": "Evidence & Tooling Validation",
     "script": "scripts/check-actions-security.sh",
