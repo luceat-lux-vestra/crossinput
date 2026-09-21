@@ -402,6 +402,7 @@ def check_issue_labeler_safety(root, workflows, findings):
         "LABEL_BACKFILL_GUARD": 'if (context.eventName === "workflow_dispatch" && backfill)',
         "LABEL_NOOP_NOTICE": "No backlog reconciliation selected; no label or issue mutation performed.",
         "LABEL_CLASSIFIER_MODULE": 'require("./scripts/issue-metadata.cjs")',
+        "LABEL_DEFAULT_BRANCH_GUARD": "Mutating backfill must run from",
     }
     for code, fragment in required.items():
         if fragment not in text:
