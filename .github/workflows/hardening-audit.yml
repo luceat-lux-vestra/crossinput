@@ -36,10 +36,11 @@ jobs:
       - name: Static and live hardening audit
         id: audit
         env:
-          # A scoped administration-read credential is preferred. If it is not
-          # provisioned, the ordinary token is attempted; any inaccessible live
-          # readback remains a finding so the owned drift issue is opened rather
-          # than silently claiming that live settings were verified.
+          # The ordinary token continuously verifies only controls it can read
+          # authoritatively. Known administration-only surfaces are explicitly
+          # classified as MANUAL_UNVERIFIED in hardening-policy.json; unexpected
+          # readback loss remains fatal. A scoped admin-read credential may turn
+          # those manual controls into real live evidence without changing policy.
           GH_TOKEN: ${{ secrets.HARDENING_AUDIT_TOKEN || github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
@@ -78,52 +79,81 @@ jobs:
   report:
     name: report
     needs: detect
-    if: always() && needs.detect.result != 'success'
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       issues: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.detect.result != 'success'
         with:
           name: hardening-audit
         continue-on-error: true
 
-      - name: Upsert the owned drift issue
+      - name: Reconcile the owned drift issue
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- hardening-audit -->';
             const title = 'chore(repo): hardening drift detected';
-            let report = 'The audit report artifact was not available; see the workflow run.';
-            try {
-              report = fs.readFileSync('hardening-audit.txt', 'utf8').trim() || report;
-            } catch (error) {
-              if (error.code !== 'ENOENT') throw error;
-            }
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
               `/actions/runs/${context.runId}`;
-            const body = [
-              marker,
-              `Scheduled hardening audit reported drift on \`${context.sha}\`.`,
-              '',
-              '```',
-              report.slice(0, 55000),
-              '```',
-              '',
-              `Run: ${runUrl}`,
-              '',
-              'This issue is maintained idempotently by `.github/workflows/hardening-audit.yml`.',
-              'It reports control drift only and never speaks to ADR-0012 physical-device',
-              'evidence acceptance.',
-            ].join('\n');
 
             const existing = await github.paginate(github.rest.issues.listForRepo, {
               ...context.repo, state: 'all', labels: 'area/ci', per_page: 100,
             });
             const owned = existing.find(issue =>
               !issue.pull_request && issue.title === title && (issue.body || '').includes(marker));
+
+            if (process.env.DETECT_RESULT === 'success') {
+              if (owned && owned.state === 'open') {
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: owned.number,
+                  body: [
+                    marker,
+                    `Hardening audit recovered on \`${context.sha}\`.`,
+                    '',
+                    `Run: ${runUrl}`,
+                    '',
+                    'Known administration-only controls may still be reported as MANUAL_UNVERIFIED;',
+                    'this recovery means the scheduled detector found no confirmed drift and no',
+                    'unexpected readback failure in the controls it is authorized to verify.',
+                  ].join('\n'),
+                });
+                await github.rest.issues.update({
+                  ...context.repo, issue_number: owned.number, state: 'closed',
+                });
+              }
+              return;
+            }
+
+            let auditReport = 'The audit report artifact was not available; see the workflow run.';
+            try {
+              auditReport = fs.readFileSync('hardening-audit.txt', 'utf8').trim() || auditReport;
+            } catch (error) {
+              if (error.code !== 'ENOENT') throw error;
+            }
+            const body = [
+              marker,
+              `Scheduled hardening audit reported drift on \`${context.sha}\`.`,
+              '',
+              '```',
+              auditReport.slice(0, 55000),
+              '```',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'This issue is maintained idempotently by `.github/workflows/hardening-audit.yml`.',
+              'It reports confirmed drift or unexpected audit/readback failure only. Known',
+              'administration-only MANUAL_UNVERIFIED controls remain visible in the artifact',
+              'but do not by themselves create/reopen this issue.',
+              'It never speaks to ADR-0012 physical-device evidence acceptance.',
+            ].join('\n');
 
             if (!owned) {
               await github.rest.issues.create({
