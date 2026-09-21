@@ -109,28 +109,46 @@ def check_required_gates(workflows, policy, findings):
                          f"job name {job.get('name')!r} no longer produces required context "
                          f"{context!r}; the ruleset check would never report")
 
+        trigger = entry.get("trigger", "pull_request")
+        trusted_target = (
+            trigger == "pull_request_target"
+            and filename == "failure-triage.yml"
+            and job_id == "failure-triage"
+        )
+        if trigger not in {"pull_request", "pull_request_target"}:
+            findings.add("GATE_TRIGGER_UNSUPPORTED", where,
+                         f"{filename} declares unsupported required trigger {trigger!r}")
+            continue
+        if trigger == "pull_request_target" and not trusted_target:
+            findings.add("GATE_TARGET_TRIGGER_SCOPE", where,
+                         "pull_request_target is allowed only for "
+                         "failure-triage.yml:failure-triage")
+            continue
+
         on = triggers(workflow)
-        pull_request = on.get("pull_request", None)
-        if "pull_request" not in on:
+        event_config = on.get(trigger)
+        if trigger not in on:
             findings.add("GATE_NOT_ON_PR", where,
-                         f"{filename} does not run on pull_request; the required context "
+                         f"{filename} does not run on {trigger}; the required context "
                          f"would never be reported")
-        elif isinstance(pull_request, dict):
+        elif isinstance(event_config, dict):
             for filter_key in ("paths", "paths-ignore"):
-                if filter_key in pull_request:
+                if filter_key in event_config:
                     findings.add("GATE_PATH_FILTER", where,
-                                 f"{filename} pull_request has a {filter_key} filter; the required "
+                                 f"{filename} {trigger} has a {filter_key} filter; the required "
                                  f"context can silently never start on some PRs")
-            if "branches-ignore" in pull_request:
+            if "branches-ignore" in event_config:
                 findings.add("GATE_BRANCH_FILTER", where,
-                             f"{filename} pull_request uses branches-ignore")
-            branches = pull_request.get("branches")
+                             f"{filename} {trigger} uses branches-ignore")
+            branches = event_config.get("branches")
             if branches is not None and policy["protected_branch"] not in branches:
                 findings.add("GATE_BRANCH_FILTER", where,
-                             f"{filename} pull_request branches {branches} exclude "
+                             f"{filename} {trigger} branches {branches} exclude "
                              f"{policy['protected_branch']!r}")
 
-        if job.get("if") is not None:
+        condition = job.get("if")
+        expected_guard = f"github.repository == '{policy['repository_full_name']}'"
+        if condition is not None and not (trusted_target and condition == expected_guard):
             findings.add("GATE_CONDITIONAL", where,
                          f"required job has an `if:` condition and can be skipped "
                          f"(a skipped required check never turns red)")
