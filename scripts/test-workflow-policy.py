@@ -293,6 +293,37 @@ def main():
                            "labels: type/bug", "labels: type/gone"),
          "LABEL_UNMANAGED")
 
+    # Manual issue backlog reconciliation is destructive metadata automation;
+    # prove that its safe defaults and dry-run guards cannot silently regress.
+    case("issue backfill requires explicit opt-in",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             "backfill:\n        description: Reconcile all open issues\n"
+             "        required: true\n        default: false\n",
+             "backfill:\n        description: Reconcile all open issues\n"
+             "        required: true\n        default: true\n"),
+         "LABEL_BACKFILL_POLICY")
+
+    case("issue backfill defaults to dry-run",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             "dry_run:\n        description: Report intended changes without mutating labels or issues\n"
+             "        required: true\n        default: true\n",
+             "dry_run:\n        description: Report intended changes without mutating labels or issues\n"
+             "        required: true\n        default: false\n"),
+         "LABEL_BACKFILL_POLICY")
+
+    case("issue dry-run blocks issue mutation",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "              if (dryRun) return;\n",
+                           "              if (false) return;\n"),
+         "LABEL_DRYRUN_MUTATION")
+
+    case("issue dry-run blocks label catalog mutation",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "              if (!dryRun) await ensureLabels();\n",
+                           "              await ensureLabels();\n"),
+         "LABEL_CATALOG_GUARD")
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
