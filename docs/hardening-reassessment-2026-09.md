@@ -47,6 +47,15 @@ The existing custom CodeQL authority already covers the security-relevant langua
 
 Existing issue-label automation remains in place. This reassessment does not create another taxonomy or classifier.
 
+A follow-up quality review found that the legacy manual `workflow_dispatch` path treated dispatch itself as permission to mutate every open issue. That is weaker than the repository's current fail-closed bulk-operation standard.
+
+The reconciler now requires two independent operator decisions:
+
+- `backfill=false` by default, so an ordinary manual dispatch is a no-op;
+- `dry_run=true` by default, so even an explicitly selected backlog pass reports changes before mutation.
+
+Dry-run covers the complete mutation boundary: it cannot create/update the canonical label catalog, remove conflicting type labels, or add issue labels. The required repository policy checker has adversarial fixtures that independently break the backfill opt-in, dry-run default, issue-mutation guard, and label-catalog guard and requires each mutation to fail CI.
+
 ## Exit criteria
 
 - exact final PR HEAD passes all existing required contexts;
@@ -54,6 +63,7 @@ Existing issue-label automation remains in place. This reassessment does not cre
 - Dependency Review behavior is observed and its live prerequisite is classified;
 - hardening audit remains able to detect repository-policy drift;
 - merged-main evidence is read back before closure;
+- issue-label backlog reconciliation is reviewed in dry-run before any live bulk mutation;
 - runtime/device evidence remains governed exclusively by its existing ADR/task proof gates.
 
 `UNKNOWN`, `UNVERIFIED`, and `INSUFFICIENT EVIDENCE` remain FAIL for claimed controls.
