@@ -330,6 +330,13 @@ def main():
              root, lambda policy: policy.update({"codeql_authority": "default-setup"})),
          "CODEQL_AUTHORITY")
 
+    case("CodeQL external tools override",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "          build-mode: ${{ matrix.build-mode }}\n",
+                           "          build-mode: ${{ matrix.build-mode }}\n"
+                           "          tools: https://example.invalid/codeql-bundle.tar.zst\n"),
+         "CODEQL_TOOLS_OVERRIDE")
+
     # An unparsable workflow must abort the audit (exit 2), never pass quietly.
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, "repo")
