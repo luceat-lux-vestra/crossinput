@@ -7,6 +7,17 @@ on:
       - edited
       - reopened
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: Reconcile all open issues
+        required: true
+        default: false
+        type: boolean
+      dry_run:
+        description: Report intended changes without mutating labels or issues
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -23,11 +34,16 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      BACKFILL: ${{ github.event_name == 'workflow_dispatch' && inputs.backfill || false }}
     steps:
       - name: Classify issues
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
+            const dryRun = process.env.DRY_RUN === 'true';
+            const backfill = process.env.BACKFILL === 'true';
             const labelDefs = [
               ['type/bug', 'B60205', 'A defect in existing functionality'],
               ['type/feature', '1D76DB', 'A new user-facing capability'],
@@ -41,15 +57,18 @@ jobs:
               ['area/docs', 'FEF2C0', 'Documentation'],
               ['priority/medium', 'FBCA04', 'Default triage priority'],
             ];
-            for (const [name, color, description] of labelDefs) {
-              try {
-                const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
-                if ((data.description || '') !== description) {
-                  await github.rest.issues.updateLabel({ ...context.repo, name, description });
+
+            async function ensureLabels() {
+              for (const [name, color, description] of labelDefs) {
+                try {
+                  const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
+                  if ((data.description || '') !== description) {
+                    await github.rest.issues.updateLabel({ ...context.repo, name, description });
+                  }
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                  await github.rest.issues.createLabel({ ...context.repo, name, color, description });
                 }
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
               }
             }
 
@@ -91,14 +110,13 @@ jobs:
               const names = labels.map(x => x.name);
               const existingTypes = names.filter(x => x.startsWith('type/'));
               const toAdd = [...areas].filter(x => !names.includes(x));
+              const toRemove = [];
 
               // Only an explicit title prefix owns type reconciliation. Otherwise
               // preserve a maintainer-selected type and default unlabeled Issues to task.
               if (explicitType) {
                 for (const name of existingTypes) {
-                  if (name !== explicitType) {
-                    await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
-                  }
+                  if (name !== explicitType) toRemove.push(name);
                 }
                 if (!names.includes(explicitType)) toAdd.push(explicitType);
               } else if (existingTypes.length === 0) {
@@ -108,18 +126,40 @@ jobs:
               // Area inference is additive because Issue labels may be manually curated;
               // unlike PR path labels there is no authoritative ownership signal for removal.
               if (!names.some(x => x.startsWith('priority/'))) toAdd.push('priority/medium');
-              if (toAdd.length) {
-                await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: [...new Set(toAdd)] });
+
+              const uniqueAdd = [...new Set(toAdd)];
+              core.info(
+                `#${issue.number} dry_run=${dryRun} add=${uniqueAdd.join(',') || '-'} remove=${toRemove.join(',') || '-'}`
+              );
+              if (dryRun) return;
+
+              for (const name of toRemove) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
+              }
+              if (uniqueAdd.length) {
+                await github.rest.issues.addLabels({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  labels: uniqueAdd,
+                });
               }
             }
 
-            if (context.eventName === 'workflow_dispatch') {
+            if (context.eventName === 'issues') {
+              await ensureLabels();
+              await classify(context.payload.issue);
+              return;
+            }
+
+            if (context.eventName === 'workflow_dispatch' && backfill) {
+              if (!dryRun) await ensureLabels();
               const issues = await github.paginate(github.rest.issues.listForRepo, {
                 ...context.repo,
                 state: 'open',
                 per_page: 100,
               });
               for (const issue of issues) await classify(issue);
-            } else {
-              await classify(context.payload.issue);
+              return;
             }
+
+            core.notice('No backlog reconciliation selected; no label or issue mutation performed.');
