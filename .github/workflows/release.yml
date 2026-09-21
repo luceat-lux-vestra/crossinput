@@ -30,6 +30,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Validate release tag input
         shell: bash
@@ -37,6 +39,12 @@ jobs:
           set -euo pipefail
           [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
             echo "invalid release tag: ${RELEASE_TAG}" >&2
+            exit 1
+          }
+          expected_ref="refs/tags/${RELEASE_TAG}"
+          test "${GITHUB_REF}" = "${expected_ref}" || {
+            echo "release/recovery must execute from exact tag ref ${expected_ref}; got ${GITHUB_REF}" >&2
+            echo "for recovery use: gh workflow run release.yml --ref ${RELEASE_TAG} -f tag=${RELEASE_TAG}" >&2
             exit 1
           }
 
@@ -92,6 +100,11 @@ jobs:
             echo "dmg=${DMG}"
             echo "checksum=${CHECKSUM}"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: Attest verified DMG build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.artifact.outputs.dmg }}
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
