@@ -128,5 +128,10 @@
     "attestation_action": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     "mutation_order": "verify source/artifact -> attest -> publish -> readback",
     "consumer_verification": "gh attestation verify <DMG> -R luceat-lux-vestra/crossinput"
+  },
+  "manual_live_readbacks": {
+    "codeql": "CodeQL default-setup administration state requires repository administration read authority; custom CodeQL workflow remains the checked-in authority.",
+    "actions/permissions": "Repository Actions execution policy is an administration surface; scheduled low-privilege audit records it as manual-unverified when unreadable.",
+    "actions/permissions/workflow": "Default GITHUB_TOKEN workflow permissions are an administration surface; scheduled low-privilege audit records them as manual-unverified when unreadable."
   }
 }
