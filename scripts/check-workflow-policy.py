@@ -303,6 +303,60 @@ def check_hygiene(workflows, findings):
                              "job does not declare `timeout-minutes:`")
 
 
+def check_issue_backfill_safety(workflows, findings):
+    workflow = workflows.get("issue-labeler.yml")
+    if workflow is None:
+        findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml",
+                     "managed issue metadata has no workflow")
+        return
+
+    dispatch = triggers(workflow).get("workflow_dispatch")
+    inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+    if not isinstance(inputs, dict):
+        findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml",
+                     "workflow_dispatch must declare explicit backfill/dry_run inputs")
+        return
+
+    for name, expected_default in (("backfill", True), ("dry_run", True)):
+        config = inputs.get(name)
+        if not isinstance(config, dict):
+            findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml",
+                         f"workflow_dispatch input {name!r} is missing")
+            continue
+        if config.get("type") != "boolean" or config.get("default") is not expected_default:
+            findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml",
+                         f"{name} must be a boolean with default=true")
+
+    jobs = workflow.get("jobs") or {}
+    job = jobs.get("classify") or {}
+    script_step = next((step for step in steps_of(job)
+                        if isinstance(step, dict)
+                        and str(step.get("uses") or "").startswith("actions/github-script@")), None)
+    if script_step is None:
+        findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml:classify",
+                     "missing github-script metadata reconciler")
+        return
+
+    env = script_step.get("env") or {}
+    if "DRY_RUN" not in env or "BACKFILL" not in env:
+        findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml:classify",
+                     "dispatch controls must be passed explicitly through step env")
+
+    script = str((script_step.get("with") or {}).get("script") or "")
+    for marker in (
+        "const dryRun = process.env.DRY_RUN === 'true';",
+        "const backfill = process.env.BACKFILL === 'true';",
+        "if (!dryRun) await ensureLabels();",
+        "(data.color || '').toLowerCase() !== color.toLowerCase()",
+        "updateLabel({ ...context.repo, name, color, description })",
+        "if (!backfill)",
+        "if (dryRun) return;",
+    ):
+        if marker not in script:
+            findings.add("ISSUE_BACKFILL_POLICY", "issue-labeler.yml:classify",
+                         f"missing fail-safe mutation boundary: {marker}")
+
+
 def managed_labels(root):
     """Labels the labeler workflows create/maintain, i.e. guaranteed to exist."""
     names = set()
@@ -528,6 +582,7 @@ def main():
     check_permissions(workflows, policy, findings)
     check_trust_boundaries(workflows, policy, findings)
     check_hygiene(workflows, findings)
+    check_issue_backfill_safety(workflows, findings)
     check_labels(args.root, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
     if args.live:
