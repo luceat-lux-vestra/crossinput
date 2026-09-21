@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -77,8 +78,73 @@ def policy_edit(root, mutate):
         json.dump(policy, handle, indent=2)
 
 
+def run_embedded_failure_triage(body):
+    path = workflow(ROOT, "failure-triage.yml")
+    with open(path, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "python3 - <<'PY'")
+        end = next(i for i, line in enumerate(lines[start + 1:], start + 1)
+                   if line.strip() == "PY")
+    except StopIteration as error:
+        raise AssertionError("failure-triage embedded Python heredoc not found") from error
+
+    script = textwrap.dedent("\n".join(lines[start + 1:end])) + "\n"
+    env = os.environ.copy()
+    env.update({
+        "PR_BODY": body,
+        "PR_AUTHOR_TYPE": "User",
+        "PR_AUTHOR_LOGIN": "luceat-lux-vestra",
+    })
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def embedded_failure_triage_baseline():
+    body = """<!-- failure-triage:v1:start -->
+## Failure remediation
+
+- [x] Not remediation for an observed failure
+- [ ] Remediation for an observed failure
+
+Observed:
+<!-- not applicable -->
+
+Classification:
+<!-- not applicable -->
+
+Basis:
+<!-- not applicable -->
+
+Root cause:
+<!-- not applicable -->
+
+Remediation:
+<!-- not applicable -->
+
+Proof:
+<!-- candidate-side semantic execution of the embedded validator -->
+<!-- failure-triage:v1:end -->"""
+    status, output = run_embedded_failure_triage(body)
+    if status != 0:
+        FAILURES.append(
+            "embedded failure-triage validator: expected exit 0 for valid "
+            f"non-remediation body, got {status}\n{output}"
+        )
+    else:
+        print("  ok  embedded failure-triage validator self-tests execute")
+
+
 def main():
     baseline()
+    embedded_failure_triage_baseline()
 
     # A required producer is renamed: the ruleset context would simply never be
     # reported again and the PR would sit "expected" forever - or, worse, the
