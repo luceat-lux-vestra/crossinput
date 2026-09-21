@@ -36,7 +36,7 @@
       "context": "Dependency Review",
       "workflow": "dependency-review.yml",
       "job": "review",
-      "promotion_evidence": "PR #159 exact HEAD adc9ceaf8e386fe5e267bfe88c75337175ec3703 produced successful Dependency Review run 35501846617. Final promotion still requires live protected-main ruleset mutation/readback in the same promotion session."
+      "promotion_evidence": "PR #159 exact HEAD adc9ceaf8e386fe5e267bfe88c75337175ec3703 produced successful Dependency Review run 35501846617. PR #186 promoted the checked-in gate; authoritative 2026-09-22 readback confirmed live ruleset 21739720 requires Dependency Review with GitHub Actions integration id 15368 and no bypass actors."
     }
   ],
   "protected_branch": "main",
