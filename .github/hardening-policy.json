@@ -73,7 +73,9 @@
   },
   "workflows_allowed_write_permissions": {
     "release.yml": [
-      "contents"
+      "contents",
+      "id-token",
+      "attestations"
     ],
     "codeql.yml": [
       "security-events"
@@ -116,5 +118,15 @@
         "reassessment_trigger": "Issue #157: restore only when the stable action-managed bundle accepts Kotlin 2.4.20 and exact-head extraction/analyze/upload succeeds"
       }
     ]
+  },
+  "release_provenance": {
+    "workflow": "release.yml",
+    "job": "dmg",
+    "recovery_ref": "exact immutable v* tag",
+    "artifact": "DMG",
+    "attestation": "GitHub artifact build provenance",
+    "attestation_action": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+    "mutation_order": "verify source/artifact -> attest -> publish -> readback",
+    "consumer_verification": "gh attestation verify <DMG> -R luceat-lux-vestra/crossinput"
   }
 }

@@ -339,6 +339,49 @@ def main():
              '              core.setFailed(`Mutating bulk operation rejected`);\n'),
          "LABEL_DEFAULT_BRANCH_GUARD")
 
+
+    # Release provenance is a security contract, not documentation. Mutations
+    # must turn the already-required Evidence & Tooling Validation context red.
+    case("release recovery must run from exact tag ref",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             '          expected_ref="refs/tags/${RELEASE_TAG}"\n',
+             ''),
+         "RELEASE_REF_GUARD")
+
+    case("release attestation action cannot disappear",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             "      - name: Attest verified DMG build provenance\n",
+             "      - name: Removed provenance step\n"),
+         "RELEASE_ATTESTATION")
+
+    case("release attestation must precede publication",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             "      - name: Attest verified DMG build provenance\n",
+             "      - name: Create or refresh GitHub Release\n"
+             "        if: ${{ false }}\n"
+             "        run: echo negative-fixture\n\n"
+             "      - name: Attest verified DMG build provenance\n"),
+         "RELEASE_ATTESTATION_ORDER")
+
+    case("release attestation permissions cannot be removed",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             "      attestations: write\n",
+             "      attestations: read\n"),
+         "RELEASE_ATTESTATION_PERMISSION")
+
+    case("release attestation cannot drift to custom predicate mode",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             "          subject-path: ${{ steps.artifact.outputs.dmg }}\n",
+             "          subject-path: ${{ steps.artifact.outputs.dmg }}\n"
+             "          predicate-type: https://example.invalid/custom\n"
+             "          predicate: '{}'\n"),
+         "RELEASE_ATTESTATION_MODE")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(

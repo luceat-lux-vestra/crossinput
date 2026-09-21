@@ -444,6 +444,95 @@ def check_codeql_authority(root, workflows, policy, findings):
                         )
 
 
+
+def check_release_provenance(root, workflows, policy, findings):
+    expected = policy.get("release_provenance")
+    if not expected:
+        return
+
+    filename = expected.get("workflow")
+    workflow = workflows.get(filename)
+    if workflow is None:
+        findings.add("RELEASE_PROVENANCE", filename or "<missing>",
+                     "release provenance policy names a missing workflow")
+        return
+
+    jobs = workflow.get("jobs") or {}
+    job = jobs.get(expected.get("job", "dmg"))
+    if job is None:
+        findings.add("RELEASE_PROVENANCE", filename,
+                     "release provenance requires the canonical dmg job")
+        return
+
+    permissions = job.get("permissions") or {}
+    for scope in ("contents", "id-token", "attestations"):
+        if permissions.get(scope) != "write":
+            findings.add("RELEASE_ATTESTATION_PERMISSION", filename,
+                         f"release job must grant job-local {scope}: write")
+
+    path = os.path.join(root, ".github", "workflows", filename)
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+
+    ref_fragments = [
+        'expected_ref="refs/tags/${RELEASE_TAG}"',
+        'test "${GITHUB_REF}" = "${expected_ref}"',
+        'gh workflow run release.yml --ref ${RELEASE_TAG} -f tag=${RELEASE_TAG}',
+    ]
+    for fragment in ref_fragments:
+        if fragment not in text:
+            findings.add("RELEASE_REF_GUARD", filename,
+                         f"exact-tag recovery provenance guard is missing: {fragment}")
+
+    expected_action = expected.get("attestation_action")
+    attestation_fragments = [
+        "Attest verified DMG build provenance",
+        expected_action,
+        "subject-path: ${{ steps.artifact.outputs.dmg }}",
+    ]
+    for fragment in attestation_fragments:
+        if not fragment or fragment not in text:
+            findings.add("RELEASE_ATTESTATION", filename,
+                         f"release attestation contract is missing: {fragment}")
+
+    attest_steps = [
+        step for step in steps_of(job)
+        if isinstance(step, dict) and step.get("name") == "Attest verified DMG build provenance"
+    ]
+    if len(attest_steps) != 1:
+        findings.add("RELEASE_ATTESTATION", filename,
+                     f"expected exactly one build-provenance attestation step, got {len(attest_steps)}")
+    else:
+        attest_step = attest_steps[0]
+        if attest_step.get("uses") != expected_action:
+            findings.add("RELEASE_ATTESTATION", filename,
+                         f"attestation action drifted to {attest_step.get('uses')!r}")
+        inputs = attest_step.get("with") or {}
+        if inputs.get("subject-path") != "${{ steps.artifact.outputs.dmg }}":
+            findings.add("RELEASE_ATTESTATION", filename,
+                         "attestation subject must be the exact verified DMG output")
+        # actions/attest defaults to SLSA build provenance only when no SBOM or
+        # custom-predicate inputs are supplied. Pin that semantic mode, not just
+        # the action SHA/name, so a future edit cannot silently change the claim.
+        forbidden = {
+            key for key in ("sbom-path", "predicate-type", "predicate", "predicate-path")
+            if key in inputs
+        }
+        if forbidden:
+            findings.add("RELEASE_ATTESTATION_MODE", filename,
+                         "DMG attestation must remain default SLSA build provenance; "
+                         f"found alternate predicate inputs: {sorted(forbidden)}")
+        if inputs.get("push-to-registry") not in (None, False, "false"):
+            findings.add("RELEASE_ATTESTATION_MODE", filename,
+                         "file DMG provenance must not use registry-push attestation mode")
+
+    verify_pos = text.find("Verify version, signature, and DMG integrity")
+    attest_pos = text.find("Attest verified DMG build provenance")
+    publish_pos = text.find("Create or refresh GitHub Release")
+    if min(verify_pos, attest_pos, publish_pos) < 0 or not (verify_pos < attest_pos < publish_pos):
+        findings.add("RELEASE_ATTESTATION_ORDER", filename,
+                     "artifact verification must precede attestation, and attestation must precede release mutation")
+
 def gh_api(path, findings, where):
     try:
         completed = subprocess.run(
@@ -603,6 +692,7 @@ def main():
     check_labels(args.root, findings)
     check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
+    check_release_provenance(args.root, workflows, policy, findings)
     if args.live:
         check_live(args.repo, policy, findings)
 
