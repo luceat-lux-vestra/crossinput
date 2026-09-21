@@ -419,6 +419,24 @@ def check_codeql_authority(root, workflows, policy, findings):
                      "policy names default setup as CodeQL authority but a custom workflow "
                      "is also present; analysis would be duplicated")
 
+    if authority == "custom-workflow" and has_custom:
+        workflow = workflows["codeql.yml"]
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            for step in steps_of(job):
+                if not isinstance(step, dict):
+                    continue
+                uses = str(step.get("uses") or "")
+                if uses.startswith("github/codeql-action/init@"):
+                    with_block = step.get("with") or {}
+                    if "tools" in with_block:
+                        findings.add(
+                            "CODEQL_TOOLS_OVERRIDE",
+                            f"codeql.yml:{job_id}",
+                            "custom CodeQL authority must use the bundle managed by the "
+                            "pinned github/codeql-action; external tools overrides require "
+                            "a separately reviewed supply-chain policy",
+                        )
+
 
 def gh_api(path, findings, where):
     try:
