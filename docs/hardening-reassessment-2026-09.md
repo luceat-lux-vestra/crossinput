@@ -13,18 +13,13 @@ This pass re-evaluates CrossInput's existing repository hardening against curren
 - custom CodeQL authority for Actions, Python, and Swift; Java/Kotlin is an explicit temporary capability exception tracked by #157;
 - protected-main and immutable publication-tag intent.
 
-## GAP — dependency admission
+## PASS — dependency admission
 
 Dependabot proposes dependency updates, but proposal automation is not PR-time admission control.
 
-`Dependency Review` is added as a staged candidate. It is not inserted into the live required-context ruleset in this change. Promotion requires:
+PR #159 proved `Dependency Review` on the exact candidate after live Dependency Graph enablement. PR #186 promoted the checked-in required-context contract, and authoritative 2026-09-22 readback confirmed live ruleset `21739720` requires `Dependency Review` with GitHub Actions integration id `15368` and no bypass actors.
 
-1. ordinary-PR reliability;
-2. live Dependency Graph support;
-3. one atomic checked-in policy + live ruleset update;
-4. fresh authoritative post-merge policy/ruleset readback.
-
-Dependency Review is PR-diff-scoped and therefore has no merged-main execution proof.
+Dependency Review is PR-diff-scoped and therefore has no merged-main execution proof; its post-promotion proof is checked-in/live policy reconciliation.
 
 ## GAP — workflow semantic/security scanners
 
