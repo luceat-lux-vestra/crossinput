@@ -57,3 +57,10 @@ Existing issue-label automation remains in place. This reassessment does not cre
 - runtime/device evidence remains governed exclusively by its existing ADR/task proof gates.
 
 `UNKNOWN`, `UNVERIFIED`, and `INSUFFICIENT EVIDENCE` remain FAIL for claimed controls.
+
+
+## Follow-up — backlog reconciliation safety
+
+A post-merge quality review found that normal issue-event classification was live-proven, but manual `workflow_dispatch` still mutated the full open backlog without a review-first default.
+
+The bulk path now uses explicit `backfill` and `dry_run` booleans with `dry_run=true` by default. Dry-run performs no issue or label-catalog mutation, planned add/remove actions are logged first, and the required hardening checker has negative fixtures for unsafe default/guard drift. Normal issue opened/edited/reopened behavior is unchanged.
