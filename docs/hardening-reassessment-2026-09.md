@@ -10,7 +10,7 @@ This pass re-evaluates CrossInput's existing repository hardening against curren
 - strict required-context producer validation;
 - full-SHA action pins and least-privilege workflow checks;
 - trusted issue/PR metadata automation;
-- custom CodeQL for Actions, Java/Kotlin, Python, and Swift;
+- custom CodeQL authority for Actions, Python, and Swift; Java/Kotlin is an explicit temporary capability exception tracked by #157;
 - protected-main and immutable publication-tag intent.
 
 ## GAP — dependency admission
@@ -39,9 +39,15 @@ The repository-owned policy checker already catches pinning, permissions, requir
 
 The script runs inside the already-required `Evidence & Tooling Validation` context and the recurring hardening audit. No extra required context or ruleset churn is introduced.
 
-## PASS — CodeQL
+## PARTIAL — CodeQL; Java/Kotlin capability exception
 
-The existing custom CodeQL authority already covers the security-relevant languages in this repository: Actions, Java/Kotlin, Python, and Swift. No second CodeQL authority is added.
+The custom CodeQL authority remains singular and uses only the pinned official `github/codeql-action` managed bundle.
+
+Actions, Python, and Swift analysis remain active. Exact run 35563677611 proved that the stable CodeQL CLI 2.27.0 bundled by `github/codeql-action` v4.38.1 rejects the maintained Kotlin 2.4.20 compiler path as too recent. The Java/Kotlin leg is therefore temporarily removed rather than made green with the previously used third-party nightly tools override.
+
+This is not a claim that Java/Kotlin source is security-scanned by CodeQL. Android Helper Build + Test remains the authoritative product gate for that surface. Issue #157 is the explicit reassessment trigger: restore Java/Kotlin only when the stable action-managed bundle accepts Kotlin 2.4.20 and exact-head extraction, analysis, and upload all succeed.
+
+The repository policy rejects any future external `tools:` override. Kotlin will not be downgraded solely to satisfy an advisory scanner, and default setup will not be enabled alongside the custom workflow.
 
 ## Metadata
 
