@@ -373,6 +373,15 @@ def main():
              "      attestations: read\n"),
          "RELEASE_ATTESTATION_PERMISSION")
 
+    case("release attestation cannot drift to custom predicate mode",
+         lambda root: edit(
+             workflow(root, "release.yml"),
+             "          subject-path: ${{ steps.artifact.outputs.dmg }}\n",
+             "          subject-path: ${{ steps.artifact.outputs.dmg }}\n"
+             "          predicate-type: https://example.invalid/custom\n"
+             "          predicate: '{}'\n"),
+         "RELEASE_ATTESTATION_MODE")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
