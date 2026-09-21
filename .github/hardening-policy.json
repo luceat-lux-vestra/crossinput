@@ -25,6 +25,12 @@
       "context": "Evidence & Tooling Validation",
       "workflow": "ci.yml",
       "job": "scripts"
+    },
+    {
+      "context": "failure-triage",
+      "workflow": "failure-triage.yml",
+      "job": "failure-triage",
+      "trigger": "pull_request_target"
     }
   ],
   "protected_branch": "main",
