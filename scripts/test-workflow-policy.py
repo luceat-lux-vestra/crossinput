@@ -332,6 +332,13 @@ def main():
              '            const body = (context.payload.issue.body || "").toLowerCase();\n'),
          "LABEL_BODY_INFERENCE")
 
+    case("mutating issue backfill requires default-branch guard",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             '              core.setFailed(`Mutating backfill must run from ${defaultBranchRef}; got ${context.ref}`);\n',
+             '              core.setFailed(`Mutating bulk operation rejected`);\n'),
+         "LABEL_DEFAULT_BRANCH_GUARD")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
