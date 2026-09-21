@@ -7,6 +7,17 @@ on:
       - edited
       - reopened
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: Reconcile all open issues
+        required: true
+        default: false
+        type: boolean
+      dry_run:
+        description: Report intended changes without mutating labels or issues
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -22,104 +33,122 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # Required only for canonical label maintenance and issue-label reconciliation.
       issues: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      BACKFILL: ${{ github.event_name == 'workflow_dispatch' && inputs.backfill || false }}
     steps:
+      - name: Fetch trusted default-branch classifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
       - name: Classify issues
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
+            const { reconcileIssue } = require("./scripts/issue-metadata.cjs");
+            const dryRun = process.env.DRY_RUN === "true";
+            const backfill = process.env.BACKFILL === "true";
+            const defaultBranchRef = `refs/heads/${context.payload.repository.default_branch}`;
+
+            if (context.eventName === "workflow_dispatch" && !dryRun && context.ref !== defaultBranchRef) {
+              core.setFailed(`Mutating backfill must run from ${defaultBranchRef}; got ${context.ref}`);
+              return;
+            }
+
             const labelDefs = [
-              ['type/bug', 'B60205', 'A defect in existing functionality'],
-              ['type/feature', '1D76DB', 'A new user-facing capability'],
-              ['type/task', '0E8A16', 'Implementation, maintenance, test, CI, or documentation task'],
-              ['type/epic', '6F42C1', 'Large multi-issue work stream'],
-              ['area/macos-app', 'FFA36C', 'macOS app implementation'],
-              ['area/android-helper', 'C5DEF5', 'Android helper implementation'],
-              ['area/protocol', '5EBEFF', 'CXI protocol and fixtures'],
-              ['area/ci', '0E8A16', 'CI/CD and automation'],
-              ['area/release', 'FBCA04', 'Packaging and release automation'],
-              ['area/docs', 'FEF2C0', 'Documentation'],
-              ['priority/medium', 'FBCA04', 'Default triage priority'],
+              ["type/bug", "B60205", "A defect in existing functionality"],
+              ["type/feature", "1D76DB", "A new user-facing capability"],
+              ["type/task", "0E8A16", "Implementation, maintenance, test, CI, or documentation task"],
+              ["type/epic", "6F42C1", "Large multi-issue work stream"],
+              ["area/macos-app", "FFA36C", "macOS app implementation"],
+              ["area/android-helper", "C5DEF5", "Android helper implementation"],
+              ["area/protocol", "5EBEFF", "CXI protocol and fixtures"],
+              ["area/ci", "0E8A16", "CI/CD and automation"],
+              ["area/release", "FBCA04", "Packaging and release automation"],
+              ["area/docs", "FEF2C0", "Documentation"],
+              ["priority/medium", "FBCA04", "Default triage priority"],
             ];
-            for (const [name, color, description] of labelDefs) {
-              try {
-                const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
-                if ((data.description || '') !== description) {
-                  await github.rest.issues.updateLabel({ ...context.repo, name, description });
+
+            async function ensureLabels() {
+              for (const [name, color, description] of labelDefs) {
+                try {
+                  const { data } = await github.rest.issues.getLabel({ ...context.repo, name });
+                  if (
+                    (data.description || "") !== description ||
+                    (data.color || "").toLowerCase() !== color.toLowerCase()
+                  ) {
+                    await github.rest.issues.updateLabel({
+                      ...context.repo,
+                      name,
+                      color,
+                      description,
+                    });
+                  }
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                  await github.rest.issues.createLabel({
+                    ...context.repo,
+                    name,
+                    color,
+                    description,
+                  });
                 }
-              } catch (error) {
-                if (error.status !== 404) throw error;
-                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
               }
             }
 
             async function classify(issue) {
-              if (issue.pull_request) return;
-              const title = (issue.title || '').trim().toLowerCase();
-              const body = (issue.body || '').toLowerCase();
-
-              let explicitType = null;
-              if (/^(fix|bug)(\([^)]*\))?:|^\[bug\]/.test(title)) explicitType = 'type/bug';
-              else if (/^(feat|feature)(\([^)]*\))?:|^\[feature\]/.test(title)) explicitType = 'type/feature';
-              else if (/^epic(\([^)]*\))?:/.test(title)) explicitType = 'type/epic';
-
-              const areas = new Set();
-              if (/\(macos\)|\bmacos\b/.test(title) || /apps\/macos|appkit|quartz|cgevent|inputcapture|controlhandoffcontroller/.test(body)) {
-                areas.add('area/macos-app');
-              }
-              if (/\(android\)|\bandroid\b/.test(title) || /android\/helper|android helper (?:implementation|source|module|build|code|bug)|\buhid\b|inputmanager/.test(body)) {
-                areas.add('area/android-helper');
-              }
-              if (/\(protocol\)|\bprotocol\b/.test(title) || /protocol\/|cxi protocol|golden fixture/.test(body)) {
-                areas.add('area/protocol');
-              }
-              if (/\(ci\)|^ci:|github/.test(title) || /github actions|\.github\/|dependabot|branch protection|ruleset/.test(body)) {
-                areas.add('area/ci');
-              }
-              if (/\brelease\b/.test(title) || /package-macos|codesign|notari|\.dmg\b/.test(body)) {
-                areas.add('area/release');
-              }
-              if (/^docs[:(]|documentation/.test(title) || /### documentation location/.test(body)) {
-                areas.add('area/docs');
-              }
-
+              if (!issue || issue.pull_request) return;
               const { data: labels } = await github.rest.issues.listLabelsOnIssue({
                 ...context.repo,
                 issue_number: issue.number,
                 per_page: 100,
               });
-              const names = labels.map(x => x.name);
-              const existingTypes = names.filter(x => x.startsWith('type/'));
-              const toAdd = [...areas].filter(x => !names.includes(x));
+              const decision = reconcileIssue({ ...issue, labels });
 
-              // Only an explicit title prefix owns type reconciliation. Otherwise
-              // preserve a maintainer-selected type and default unlabeled Issues to task.
-              if (explicitType) {
-                for (const name of existingTypes) {
-                  if (name !== explicitType) {
-                    await github.rest.issues.removeLabel({ ...context.repo, issue_number: issue.number, name });
-                  }
-                }
-                if (!names.includes(explicitType)) toAdd.push(explicitType);
-              } else if (existingTypes.length === 0) {
-                toAdd.push('type/task');
+              core.info(
+                `#${issue.number} dry_run=${dryRun} expected=${decision.expectedType || "none"} add=${decision.add.join(",") || "-"} remove=${decision.remove.join(",") || "-"} diagnostics=${decision.diagnostics.join(",") || "-"}`
+              );
+              for (const diagnostic of decision.diagnostics) {
+                core.warning(`#${issue.number}: ${diagnostic}; no heuristic type repair applied`);
               }
 
-              // Area inference is additive because Issue labels may be manually curated;
-              // unlike PR path labels there is no authoritative ownership signal for removal.
-              if (!names.some(x => x.startsWith('priority/'))) toAdd.push('priority/medium');
-              if (toAdd.length) {
-                await github.rest.issues.addLabels({ ...context.repo, issue_number: issue.number, labels: [...new Set(toAdd)] });
+              if (dryRun) return;
+
+              for (const name of decision.remove) {
+                await github.rest.issues.removeLabel({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  name,
+                });
+              }
+              if (decision.add.length) {
+                await github.rest.issues.addLabels({
+                  ...context.repo,
+                  issue_number: issue.number,
+                  labels: decision.add,
+                });
               }
             }
 
-            if (context.eventName === 'workflow_dispatch') {
+            if (context.eventName === "issues") {
+              await ensureLabels();
+              await classify(context.payload.issue);
+              return;
+            }
+
+            if (context.eventName === "workflow_dispatch" && backfill) {
+              if (!dryRun) await ensureLabels();
               const issues = await github.paginate(github.rest.issues.listForRepo, {
                 ...context.repo,
-                state: 'open',
+                state: "open",
                 per_page: 100,
               });
               for (const issue of issues) await classify(issue);
-            } else {
-              await classify(context.payload.issue);
+              return;
             }
+
+            core.notice("No backlog reconciliation selected; no label or issue mutation performed.");

@@ -293,11 +293,64 @@ def main():
                            "labels: type/bug", "labels: type/gone"),
          "LABEL_UNMANAGED")
 
+    # Manual issue backlog reconciliation is destructive metadata automation;
+    # prove that its safe defaults and dry-run guards cannot silently regress.
+    case("issue backfill requires explicit opt-in",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             "backfill:\n        description: Reconcile all open issues\n"
+             "        required: true\n        default: false\n",
+             "backfill:\n        description: Reconcile all open issues\n"
+             "        required: true\n        default: true\n"),
+         "LABEL_BACKFILL_POLICY")
+
+    case("issue backfill defaults to dry-run",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             "dry_run:\n        description: Report intended changes without mutating labels or issues\n"
+             "        required: true\n        default: true\n",
+             "dry_run:\n        description: Report intended changes without mutating labels or issues\n"
+             "        required: true\n        default: false\n"),
+         "LABEL_BACKFILL_POLICY")
+
+    case("issue dry-run blocks issue mutation",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "              if (dryRun) return;\n",
+                           "              if (false) return;\n"),
+         "LABEL_DRYRUN_MUTATION")
+
+    case("issue dry-run blocks label catalog mutation",
+         lambda root: edit(workflow(root, "issue-labeler.yml"),
+                           "              if (!dryRun) await ensureLabels();\n",
+                           "              await ensureLabels();\n"),
+         "LABEL_CATALOG_GUARD")
+    case("issue body inference is forbidden",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             '            const { reconcileIssue } = require("./scripts/issue-metadata.cjs");\n',
+             '            const { reconcileIssue } = require("./scripts/issue-metadata.cjs");\n'
+             '            const body = (context.payload.issue.body || "").toLowerCase();\n'),
+         "LABEL_BODY_INFERENCE")
+
+    case("mutating issue backfill requires default-branch guard",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             '              core.setFailed(`Mutating backfill must run from ${defaultBranchRef}; got ${context.ref}`);\n',
+             '              core.setFailed(`Mutating bulk operation rejected`);\n'),
+         "LABEL_DEFAULT_BRANCH_GUARD")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
              root, lambda policy: policy.update({"codeql_authority": "default-setup"})),
          "CODEQL_AUTHORITY")
+
+    case("CodeQL external tools override",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "          build-mode: ${{ matrix.build-mode }}\n",
+                           "          build-mode: ${{ matrix.build-mode }}\n"
+                           "          tools: https://example.invalid/codeql-bundle.tar.zst\n"),
+         "CODEQL_TOOLS_OVERRIDE")
 
     # An unparsable workflow must abort the audit (exit 2), never pass quietly.
     with tempfile.TemporaryDirectory() as tmp:

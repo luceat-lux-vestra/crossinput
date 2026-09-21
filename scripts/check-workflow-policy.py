@@ -359,6 +359,60 @@ def check_labels(root, findings):
                                  f"guarantees exists")
 
 
+
+def check_issue_labeler_safety(root, workflows, findings):
+    workflow = workflows.get("issue-labeler.yml")
+    if workflow is None:
+        findings.add("LABEL_BACKFILL_POLICY", "issue-labeler.yml",
+                     "issue label automation is missing")
+        return
+
+    dispatch = triggers(workflow).get("workflow_dispatch")
+    inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+    if not isinstance(inputs, dict):
+        findings.add("LABEL_BACKFILL_POLICY", "issue-labeler.yml",
+                     "workflow_dispatch must declare explicit backfill/dry_run inputs")
+        return
+
+    backfill = inputs.get("backfill")
+    dry_run = inputs.get("dry_run")
+    if not isinstance(backfill, dict) or backfill.get("default") is not False:
+        findings.add("LABEL_BACKFILL_POLICY", "issue-labeler.yml",
+                     "manual backlog mutation must require backfill=true explicitly")
+    if not isinstance(dry_run, dict) or dry_run.get("default") is not True:
+        findings.add("LABEL_BACKFILL_POLICY", "issue-labeler.yml",
+                     "workflow_dispatch dry_run must default to true")
+
+    job = (workflow.get("jobs") or {}).get("classify") or {}
+    env = job.get("env") or {}
+    if "inputs.dry_run" not in str(env.get("DRY_RUN") or ""):
+        findings.add("LABEL_DRYRUN_ENV", "issue-labeler.yml:classify",
+                     "DRY_RUN must derive from workflow_dispatch dry_run input")
+    if "inputs.backfill" not in str(env.get("BACKFILL") or ""):
+        findings.add("LABEL_BACKFILL_ENV", "issue-labeler.yml:classify",
+                     "BACKFILL must derive from workflow_dispatch backfill input")
+
+    path = os.path.join(root, ".github", "workflows", "issue-labeler.yml")
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+
+    required = {
+        "LABEL_DRYRUN_MUTATION": "if (dryRun) return;",
+        "LABEL_CATALOG_GUARD": "if (!dryRun) await ensureLabels();",
+        "LABEL_BACKFILL_GUARD": 'if (context.eventName === "workflow_dispatch" && backfill)',
+        "LABEL_NOOP_NOTICE": "No backlog reconciliation selected; no label or issue mutation performed.",
+        "LABEL_CLASSIFIER_MODULE": 'require("./scripts/issue-metadata.cjs")',
+        "LABEL_DEFAULT_BRANCH_GUARD": "Mutating backfill must run from",
+    }
+    for code, fragment in required.items():
+        if fragment not in text:
+            findings.add(code, "issue-labeler.yml",
+                         f"missing fail-safe issue-labeler contract fragment: {fragment}")
+
+    if "issue.body" in text or "const body =" in text:
+        findings.add("LABEL_BODY_INFERENCE", "issue-labeler.yml",
+                     "issue body text must not be used as authoritative metadata classification input")
+
 def check_codeql_authority(root, workflows, policy, findings):
     """Static half of the single-authority rule; --live checks default setup."""
     authority = policy["codeql_authority"]
@@ -370,6 +424,24 @@ def check_codeql_authority(root, workflows, policy, findings):
         findings.add("CODEQL_AUTHORITY", ".github/workflows/codeql.yml",
                      "policy names default setup as CodeQL authority but a custom workflow "
                      "is also present; analysis would be duplicated")
+
+    if authority == "custom-workflow" and has_custom:
+        workflow = workflows["codeql.yml"]
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            for step in steps_of(job):
+                if not isinstance(step, dict):
+                    continue
+                uses = str(step.get("uses") or "")
+                if uses.startswith("github/codeql-action/init@"):
+                    with_block = step.get("with") or {}
+                    if "tools" in with_block:
+                        findings.add(
+                            "CODEQL_TOOLS_OVERRIDE",
+                            f"codeql.yml:{job_id}",
+                            "custom CodeQL authority must use the bundle managed by the "
+                            "pinned github/codeql-action; external tools overrides require "
+                            "a separately reviewed supply-chain policy",
+                        )
 
 
 def gh_api(path, findings, where):
@@ -529,6 +601,7 @@ def main():
     check_trust_boundaries(workflows, policy, findings)
     check_hygiene(workflows, findings)
     check_labels(args.root, findings)
+    check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
     if args.live:
         check_live(args.repo, policy, findings)
