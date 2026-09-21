@@ -324,6 +324,14 @@ def main():
                            "              if (!dryRun) await ensureLabels();\n",
                            "              await ensureLabels();\n"),
          "LABEL_CATALOG_GUARD")
+    case("issue body inference is forbidden",
+         lambda root: edit(
+             workflow(root, "issue-labeler.yml"),
+             '            const { reconcileIssue } = require("./scripts/issue-metadata.cjs");\n',
+             '            const { reconcileIssue } = require("./scripts/issue-metadata.cjs");\n'
+             '            const body = (context.payload.issue.body || "").toLowerCase();\n'),
+         "LABEL_BODY_INFERENCE")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
