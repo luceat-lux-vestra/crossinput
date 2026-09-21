@@ -51,6 +51,9 @@ jobs:
       - name: GitHub Actions static security
         run: bash scripts/check-actions-security.sh
 
+      - name: Issue metadata semantics
+        run: node --test scripts/issue-metadata.test.cjs
+
       - name: Physical-evidence tooling contract
         # Integrity of the verifier only. No device evidence is generated here.
         run: |
