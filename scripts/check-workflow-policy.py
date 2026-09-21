@@ -495,6 +495,37 @@ def check_release_provenance(root, workflows, policy, findings):
             findings.add("RELEASE_ATTESTATION", filename,
                          f"release attestation contract is missing: {fragment}")
 
+    attest_steps = [
+        step for step in steps_of(job)
+        if isinstance(step, dict) and step.get("name") == "Attest verified DMG build provenance"
+    ]
+    if len(attest_steps) != 1:
+        findings.add("RELEASE_ATTESTATION", filename,
+                     f"expected exactly one build-provenance attestation step, got {len(attest_steps)}")
+    else:
+        attest_step = attest_steps[0]
+        if attest_step.get("uses") != expected_action:
+            findings.add("RELEASE_ATTESTATION", filename,
+                         f"attestation action drifted to {attest_step.get('uses')!r}")
+        inputs = attest_step.get("with") or {}
+        if inputs.get("subject-path") != "${{ steps.artifact.outputs.dmg }}":
+            findings.add("RELEASE_ATTESTATION", filename,
+                         "attestation subject must be the exact verified DMG output")
+        # actions/attest defaults to SLSA build provenance only when no SBOM or
+        # custom-predicate inputs are supplied. Pin that semantic mode, not just
+        # the action SHA/name, so a future edit cannot silently change the claim.
+        forbidden = {
+            key for key in ("sbom-path", "predicate-type", "predicate", "predicate-path")
+            if key in inputs
+        }
+        if forbidden:
+            findings.add("RELEASE_ATTESTATION_MODE", filename,
+                         "DMG attestation must remain default SLSA build provenance; "
+                         f"found alternate predicate inputs: {sorted(forbidden)}")
+        if inputs.get("push-to-registry") not in (None, False, "false"):
+            findings.add("RELEASE_ATTESTATION_MODE", filename,
+                         "file DMG provenance must not use registry-push attestation mode")
+
     verify_pos = text.find("Verify version, signature, and DMG integrity")
     attest_pos = text.find("Attest verified DMG build provenance")
     publish_pos = text.find("Create or refresh GitHub Release")
