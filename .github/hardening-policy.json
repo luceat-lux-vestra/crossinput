@@ -100,5 +100,22 @@
     },
     "negative_control": true
   },
-  "repository_full_name": "luceat-lux-vestra/crossinput"
+  "repository_full_name": "luceat-lux-vestra/crossinput",
+  "codeql_coverage": {
+    "authority": "custom-workflow",
+    "active_languages": [
+      "actions",
+      "python",
+      "swift"
+    ],
+    "exceptions": [
+      {
+        "surface": "java-kotlin",
+        "disposition": "temporarily unavailable",
+        "evidence": "github/codeql-action v4.38.1 managed CodeQL CLI 2.27.0 rejects the maintained Kotlin 2.4.20 compiler path as too recent",
+        "forbidden_workaround": "Do not use an external/nightly tools override or downgrade Kotlin solely to obtain a green advisory scanner",
+        "reassessment_trigger": "Issue #157: restore only when the stable action-managed bundle accepts Kotlin 2.4.20 and exact-head extraction/analyze/upload succeeds"
+      }
+    ]
+  }
 }
