@@ -57,6 +57,21 @@ The reconciler now requires two independent operator decisions:
 
 Dry-run covers the complete mutation boundary: it cannot create/update the canonical label catalog, remove conflicting type labels, or add issue labels. The required repository policy checker has adversarial fixtures that independently break the backfill opt-in, dry-run default, issue-mutation guard, and label-catalog guard and requires each mutation to fail CI.
 
+## Hardening drift signal quality
+
+A resumed quality review found that the scheduled hardening audit conflated two different states:
+
+- confirmed repository/policy drift or an unexpected loss of a normally-readable control;
+- a known administration-only endpoint that the low-privilege scheduled token is not authorized to read.
+
+Those are no longer reported as the same failure.
+
+`.github/hardening-policy.json` now declares the exact administration-only readbacks: CodeQL default-setup administration state, repository Actions execution policy, and default workflow-token policy. If the scheduled token cannot read one of those, the audit emits `MANUAL_UNVERIFIED`: visible evidence that the control was **not** live-proven, but not false evidence of repository drift. An unexpected readback failure anywhere outside that explicit inventory remains fatal.
+
+The scheduled detector does not receive a permanent administration PAT. Exact merge/exit audits may still use a scoped admin-read credential to convert those manual controls into authoritative live proof.
+
+The owned drift issue now also has a complete lifecycle: a non-clean detector creates/reopens/updates it, while a later clean detector records recovery and closes it. Static policy validation and a negative fixture prevent either the manual-readback inventory or recovery-close path from silently disappearing.
+
 ## Exit criteria
 
 - exact final PR HEAD passes all existing required contexts;
