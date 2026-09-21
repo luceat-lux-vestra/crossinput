@@ -399,13 +399,18 @@ def check_issue_labeler_safety(root, workflows, findings):
     required = {
         "LABEL_DRYRUN_MUTATION": "if (dryRun) return;",
         "LABEL_CATALOG_GUARD": "if (!dryRun) await ensureLabels();",
-        "LABEL_BACKFILL_GUARD": "if (context.eventName === 'workflow_dispatch' && backfill)",
+        "LABEL_BACKFILL_GUARD": 'if (context.eventName === "workflow_dispatch" && backfill)',
         "LABEL_NOOP_NOTICE": "No backlog reconciliation selected; no label or issue mutation performed.",
+        "LABEL_CLASSIFIER_MODULE": 'require("./scripts/issue-metadata.cjs")',
     }
     for code, fragment in required.items():
         if fragment not in text:
             findings.add(code, "issue-labeler.yml",
                          f"missing fail-safe issue-labeler contract fragment: {fragment}")
+
+    if "issue.body" in text or "const body =" in text:
+        findings.add("LABEL_BODY_INFERENCE", "issue-labeler.yml",
+                     "issue body text must not be used as authoritative metadata classification input")
 
 def check_codeql_authority(root, workflows, policy, findings):
     """Static half of the single-authority rule; --live checks default setup."""
