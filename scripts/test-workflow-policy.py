@@ -189,6 +189,20 @@ def main():
                            "    if: github.actor != 'dependabot[bot]'\n"),
          "GATE_CONDITIONAL")
 
+    case("pull_request_target outside audited failure triage",
+         lambda root: policy_edit(
+             root,
+             lambda policy: policy["required_status_checks"][0].update(
+                 {"trigger": "pull_request_target"})),
+         "GATE_TARGET_TRIGGER_SCOPE")
+
+    case("unexpected condition on required failure triage",
+         lambda root: edit(
+             workflow(root, "failure-triage.yml"),
+             "    if: github.repository == 'luceat-lux-vestra/crossinput'\n",
+             "    if: github.actor != 'dependabot[bot]'\n"),
+         "GATE_CONDITIONAL")
+
     case("continue-on-error on required job",
          lambda root: edit(workflow(root, "ci.yml"),
                            "  markdown:\n    name: Documentation Validation\n",
