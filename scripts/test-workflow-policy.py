@@ -169,8 +169,8 @@ def main():
          "GATE_MISSING_JOB")
 
     case("missing staged producer",
-         lambda root: policy_edit(root, lambda policy: policy["staged_status_checks"][0].update(
-             {"job": "missing-staged"})),
+         lambda root: policy_edit(root, lambda policy: policy.setdefault("staged_status_checks", []).append(
+             {"context": "Ghost Staged Check", "workflow": "dependency-review.yml", "job": "missing-staged"})),
          "GATE_MISSING_JOB")
 
     # Path filters are the classic silent fail-open: the check never starts, so
