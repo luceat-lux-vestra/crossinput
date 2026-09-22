@@ -147,18 +147,16 @@ private final class BoundarySessionFake: SessionConnection, @unchecked Sendable 
     }
 
     var requestTypes: [MessageType] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _requestTypes
+        lock.withLock { _requestTypes }
     }
 
     func connect() async throws {}
 
     func request(_ type: MessageType, payload: Data,
                  timeout: TimeInterval?) async throws -> CxiFrame {
-        lock.lock()
-        _requestTypes.append(type)
-        lock.unlock()
+        lock.withLock {
+            _requestTypes.append(type)
+        }
         if delayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: delayNanoseconds)
         }
