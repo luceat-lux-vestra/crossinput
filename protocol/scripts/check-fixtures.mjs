@@ -12,11 +12,12 @@ const T = {
   0x0004: "CREATE_HID_DEVICE", 0x0005: "DESTROY_HID_DEVICE", 0x0006: "HID_REPORT",
   0x0007: "PING", 0x0008: "SHUTDOWN",
   0x0009: "POINTER_MOVE_REL", 0x000A: "POINTER_BUTTON", 0x000B: "POINTER_SCROLL",
-  0x000C: "KEY_EVENT",
+  0x000C: "KEY_EVENT", 0x000D: "BOUNDARY_WATCH_START", 0x000E: "BOUNDARY_WATCH_STOP",
   0x8001: "HELLO_ACK", 0x8002: "DISPLAY_LIST", 0x8003: "DISPLAY_CHANGED",
   0x8004: "HID_CREATED", 0x8005: "HID_ERROR", 0x8006: "PONG",
   0x8007: "LOG_EVENT", 0x8008: "FATAL_ERROR",
-  0x8009: "POINTER_RESULT",
+  0x8009: "POINTER_RESULT", 0x800A: "BOUNDARY_WATCH_READY",
+  0x800B: "BOUNDARY_REACHED", 0x800C: "BOUNDARY_WATCH_ERROR",
 };
 const codes = Object.fromEntries(Object.entries(T).map(([v, k]) => [k, Number(v)]));
 
@@ -105,6 +106,14 @@ function decodePayload(type, payload) {
       return { horizontal: payload.readFloatLE(0), vertical: payload.readFloatLE(4) };
     case "KEY_EVENT":
       return { keyCode: u16(payload, 0), metaState: payload.readUInt32LE(2), action: payload[6], repeatCount: payload[7] };
+    case "BOUNDARY_WATCH_START":
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        displayId: u32(payload, 8),
+        edge: ["LEFT", "RIGHT", "TOP", "BOTTOM"][payload[12]] ?? payload[12],
+      };
+    case "BOUNDARY_WATCH_STOP":
+      return { controlToken: payload.readBigUInt64LE(0).toString() };
     case "CREATE_HID_DEVICE":
       return { descriptorBase64: lengthPrefixed(payload, 0).toString("base64") };
     case "DESTROY_HID_DEVICE":
@@ -145,6 +154,24 @@ function decodePayload(type, payload) {
         deliveredDy: payload.readInt32LE(5),
       };
     }
+    case "BOUNDARY_WATCH_READY":
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        displayId: u32(payload, 8),
+        mode: ["DELIVERED_COORDINATES", "COMPOSITOR"][payload[12]] ?? payload[12],
+        layerStack: payload.readInt32LE(13),
+      };
+    case "BOUNDARY_REACHED":
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        displayId: u32(payload, 8),
+        edge: ["LEFT", "RIGHT", "TOP", "BOTTOM"][payload[12]] ?? payload[12],
+      };
+    case "BOUNDARY_WATCH_ERROR":
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        code: ["", "TARGET_MISMATCH", "ORACLE_UNAVAILABLE", "BACKEND_CHANGED", "OBSERVATION_FAILED"][payload[8]] ?? payload[8],
+      };
     default:
       fail(`no decoder for type ${type}`);
   }
