@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 REMOTE_APK="/data/local/tmp/crossinput-sf-stall-probe.apk"
-RIGHT_STEPS="${1:-180}"
+RIGHT_STEPS="${1:-600}"
 SETTLE_MS="${2:-20}"
 
 if [ -n "${DEVICE:-}" ]; then

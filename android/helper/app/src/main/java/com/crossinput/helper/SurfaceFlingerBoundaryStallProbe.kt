@@ -84,7 +84,7 @@ object SurfaceFlingerBoundaryStallProbe {
     private const val PRODUCT = 0xc077
     private const val DEVICE_NAME = "CrossInput Boundary Probe"
 
-    private const val RIGHT_STEPS = 180
+    private const val MAX_RIGHT_SAMPLES = 600
     private const val RIGHT_DX = 16
     private const val RECOVERY_STEPS = 12
     private const val RECOVERY_DX = -32
@@ -93,8 +93,8 @@ object SurfaceFlingerBoundaryStallProbe {
 
     private const val POSITION_EPSILON = 0.25
     private const val MIN_MOVEMENT_PX = 100.0
-    private const val MIN_FINAL_PLATEAU_SAMPLES = 5
-    private const val MIN_PLATEAU_SEPARATION = 2
+    private const val MIN_FINAL_PLATEAU_SAMPLES = 8
+    private const val MIN_PLATEAU_SEPARATION = 3
     private const val MIN_RECOVERY_PX = 50.0
 
     private const val MAX_DUMP_BYTES = 4 * 1024 * 1024
@@ -102,7 +102,8 @@ object SurfaceFlingerBoundaryStallProbe {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val rightSteps = args.getOrNull(0)?.toIntOrNull()?.coerceIn(20, 400) ?: RIGHT_STEPS
+        val maxRightSamples = args.getOrNull(0)?.toIntOrNull()?.coerceIn(40, 1_000)
+            ?: MAX_RIGHT_SAMPLES
         val settleMs = args.getOrNull(1)?.toLongOrNull()?.coerceIn(0L, 250L)
             ?: POST_REPORT_SETTLE_MS
 
@@ -130,7 +131,10 @@ object SurfaceFlingerBoundaryStallProbe {
             val rightXs = mutableListOf(initial.position.x)
             val dumpLatencies = mutableListOf(initial.dumpMs)
 
-            repeat(rightSteps) {
+            var edgeDetected = false
+            var metrics: BoundaryStallMetrics? = null
+
+            for (sampleIndex in 0 until maxRightSamples) {
                 if (!sendRelative(fd, RIGHT_DX, 0)) {
                     return fail("uhid-right-report-write")
                 }
@@ -147,10 +151,31 @@ object SurfaceFlingerBoundaryStallProbe {
 
                 rightXs += sample.position.x
                 dumpLatencies += sample.dumpMs
+
+                val candidate = BoundaryStallAnalysis.analyze(rightXs, POSITION_EPSILON)
+                if (candidate != null) {
+                    metrics = candidate
+                    val movement = candidate.maxX - candidate.startX
+                    val plateauDominatesInterior =
+                        candidate.finalPlateauSamples >=
+                            candidate.longestInteriorPlateauSamples + MIN_PLATEAU_SEPARATION
+
+                    if (
+                        movement >= MIN_MOVEMENT_PX &&
+                        candidate.finalPlateauSamples >= MIN_FINAL_PLATEAU_SAMPLES &&
+                        plateauDominatesInterior
+                    ) {
+                        edgeDetected = true
+                        break
+                    }
+                }
             }
 
-            val metrics = BoundaryStallAnalysis.analyze(rightXs, POSITION_EPSILON)
+            val finalMetrics = metrics
                 ?: return fail("no-rightward-compositor-movement")
+            if (!edgeDetected) {
+                return fail("right-sample-cap-reached-without-stable-plateau")
+            }
 
             val recoveryXs = mutableListOf<Double>()
             repeat(RECOVERY_STEPS) {
@@ -172,29 +197,29 @@ object SurfaceFlingerBoundaryStallProbe {
                 dumpLatencies += sample.dumpMs
             }
 
-            val recoveryMinX = recoveryXs.minOrNull() ?: metrics.maxX
-            val recoveryDelta = metrics.maxX - recoveryMinX
-            val movement = metrics.maxX - metrics.startX
+            val recoveryMinX = recoveryXs.minOrNull() ?: finalMetrics.maxX
+            val recoveryDelta = finalMetrics.maxX - recoveryMinX
+            val movement = finalMetrics.maxX - finalMetrics.startX
             val plateauDominatesInterior =
-                metrics.finalPlateauSamples >=
-                    metrics.longestInteriorPlateauSamples + MIN_PLATEAU_SEPARATION
+                finalMetrics.finalPlateauSamples >=
+                    finalMetrics.longestInteriorPlateauSamples + MIN_PLATEAU_SEPARATION
 
             println("=== SURFACEFLINGER BOUNDARY STALL ORACLE ===")
             println("sprite_name=$identityName")
             println("layer_stack=$identityStack")
             println("right_samples=${rightXs.size}")
-            println("start_x=${format(metrics.startX)}")
-            println("max_x=${format(metrics.maxX)}")
+            println("start_x=${format(finalMetrics.startX)}")
+            println("max_x=${format(finalMetrics.maxX)}")
             println("rightward_compositor_movement_px=${format(movement)}")
-            println("final_plateau_samples=${metrics.finalPlateauSamples}")
-            println("longest_interior_plateau_samples=${metrics.longestInteriorPlateauSamples}")
+            println("final_plateau_samples=${finalMetrics.finalPlateauSamples}")
+            println("longest_interior_plateau_samples=${finalMetrics.longestInteriorPlateauSamples}")
             println("plateau_dominates_interior=$plateauDominatesInterior")
             println("recovery_left_px=${format(recoveryDelta)}")
             printLatency("binder_dump_ms", dumpLatencies)
 
             val result = when {
                 movement < MIN_MOVEMENT_PX -> "FAIL_MOVEMENT_TOO_SMALL"
-                metrics.finalPlateauSamples < MIN_FINAL_PLATEAU_SAMPLES -> "FAIL_NO_STABLE_EDGE_PLATEAU"
+                finalMetrics.finalPlateauSamples < MIN_FINAL_PLATEAU_SAMPLES -> "FAIL_NO_STABLE_EDGE_PLATEAU"
                 !plateauDominatesInterior -> "FAIL_PLATEAU_NOT_DISTINGUISHABLE"
                 recoveryDelta < MIN_RECOVERY_PX -> "FAIL_NO_RECOVERY_LIVENESS"
                 else -> "PASS"
