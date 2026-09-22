@@ -21,7 +21,11 @@ class BoundaryWatchControllerLifecycleTest {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
         val oracle = BlockingOracle()
-        val controller = BoundaryWatchController(writer, Logger(writer)) { oracle }
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { oracle },
+        )
         val result = AtomicReference<BoundaryWatchController.StartResult>()
 
         val starter = Thread {
@@ -53,9 +57,11 @@ class BoundaryWatchControllerLifecycleTest {
     fun activeWatchDisplayChangeEmitsFailClosedError() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
-        val controller = BoundaryWatchController(writer, Logger(writer)) {
-            FixedOracle()
-        }
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { FixedOracle() },
+        )
 
         val started = controller.start(
             token = 77L,
@@ -128,9 +134,11 @@ class BoundaryWatchControllerLifecycleTest {
     fun backendFailoverInvalidatesActiveCompositorWatchImmediately() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
-        val controller = BoundaryWatchController(writer, Logger(writer)) {
-            FixedOracle()
-        }
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { FixedOracle() },
+        )
 
         val started = controller.start(
             token = 91L,
@@ -159,9 +167,11 @@ class BoundaryWatchControllerLifecycleTest {
     fun unrelatedDisplayChangeDoesNotPoisonSelectedDisplayGeneration() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
-        val controller = BoundaryWatchController(writer, Logger(writer)) {
-            FixedOracle()
-        }
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { FixedOracle() },
+        )
 
         controller.invalidateForDisplayChange(3)
         val started = controller.start(
