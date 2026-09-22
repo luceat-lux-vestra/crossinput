@@ -560,6 +560,12 @@ final class ControlHandoffController: @unchecked Sendable {
             return
         }
 
+        let mode = prepared.mode == .compositor ? "compositor" : "delivered-coordinates"
+        Diagnostics.log(
+            "boundary watch prepared mode=\(mode) target=\(prepared.targetID) " +
+                "layerStack=\(prepared.layerStack)"
+        )
+
         guard switchMachine.remotePrepared() else {
             lifecycleLock.withLock {
                 if activeBoundaryWatch?.controlToken == prepared.controlToken {
