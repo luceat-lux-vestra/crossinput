@@ -25,8 +25,8 @@ internal data class SurfaceFlingerSpritePosition(
 
 internal class BoundaryPlateauTracker(
     private val epsilon: Double = 0.25,
-    private val requiredSamples: Int = 3,
-    private val minimumDurationNanos: Long = 40_000_000L,
+    private val requiredSamples: Int = 5,
+    private val minimumDurationNanos: Long = 80_000_000L,
 ) {
     private var maxProgress: Double? = null
     private var plateauSamples = 0
@@ -340,15 +340,18 @@ class BoundaryWatchController(
 
             var reached = false
             var observationFailed = false
+            var staleSample = false
             synchronized(lock) {
                 val state = watch
                 if (
                     state == null || state.token != snapshot.token ||
                     state.displayId != snapshot.displayId
                 ) {
-                    continue
-                }
-                if (sample.name != snapshot.spriteName || sample.layerStack != snapshot.layerStack) {
+                    staleSample = true
+                } else if (
+                    sample.name != snapshot.spriteName ||
+                    sample.layerStack != snapshot.layerStack
+                ) {
                     watch = null
                     workerRunning = false
                     observationFailed = true
@@ -362,6 +365,7 @@ class BoundaryWatchController(
                 }
             }
 
+            if (staleSample) continue
             if (observationFailed) {
                 emitError(snapshot.token, ERROR_OBSERVATION_FAILED)
                 return
