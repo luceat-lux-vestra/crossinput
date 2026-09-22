@@ -492,7 +492,9 @@ final class ControlHandoffController: @unchecked Sendable {
             sender.releaseRemotelyHeldButtons()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
-            beginBoundaryPreparation(edge: switchMachine.entryEdge)
+            if switchMachine.requiresRemotePreparation {
+                beginBoundaryPreparation(edge: switchMachine.entryEdge)
+            }
         }
     }
 
