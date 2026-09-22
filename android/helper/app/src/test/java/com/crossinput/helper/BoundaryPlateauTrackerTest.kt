@@ -20,6 +20,23 @@ class BoundaryPlateauTrackerTest {
     }
 
     @Test
+    fun plateauCandidateStartsOnlyAfterRepeatedPostProgressObservation() {
+        val tracker = BoundaryPlateauTracker(
+            requiredSamples = 8,
+            minimumDurationNanos = 0,
+            minimumPlateauSeparation = 3,
+        )
+        tracker.reset(100.0)
+
+        assertFalse(tracker.isPlateauCandidate())
+        assertFalse(tracker.observe(110.0, 0))
+        assertFalse(tracker.isPlateauCandidate())
+
+        assertFalse(tracker.observe(110.0, 1))
+        assertTrue(tracker.isPlateauCandidate())
+    }
+
+    @Test
     fun sustainedPlateauRequiresSamplesAndDurationAfterForwardProgress() {
         val tracker = BoundaryPlateauTracker(
             requiredSamples = 3,
