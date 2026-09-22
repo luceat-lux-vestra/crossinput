@@ -67,8 +67,8 @@ class PointerDispatcherTest {
         assertTrue(dispatcher.selectDisplay(display))
         assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
         assertTrue(
-            dispatcher.requiresCompositorBoundaryAuthority(),
             "desktop requirement must survive initial UHID unavailability",
+            dispatcher.requiresCompositorBoundaryAuthority(),
         )
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid).close()
@@ -168,8 +168,8 @@ class PointerDispatcherTest {
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
         assertTrue(
-            dispatcher.requiresCompositorBoundaryAuthority(),
             "runtime fallback must not erase the desktop boundary contract",
+            dispatcher.requiresCompositorBoundaryAuthority(),
         )
         verify(uhid).close()
         verify(inputManager, times(1)).moveRelative(5, 6)
