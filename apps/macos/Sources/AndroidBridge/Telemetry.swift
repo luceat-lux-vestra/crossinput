@@ -20,6 +20,7 @@ public struct RequestObservation: Sendable, Equatable {
         case pointerMoveRel = "POINTER_MOVE_REL"
         case pointerButton = "POINTER_BUTTON"
         case pointerScroll = "POINTER_SCROLL"
+        case boundaryWatchStart = "BOUNDARY_WATCH_START"
         case shutdown = "SHUTDOWN"
         case other = "OTHER"
         public init(of type: MessageType) {
@@ -31,6 +32,7 @@ public struct RequestObservation: Sendable, Equatable {
             case .pointerMoveRel: self = .pointerMoveRel
             case .pointerButton: self = .pointerButton
             case .pointerScroll: self = .pointerScroll
+            case .boundaryWatchStart: self = .boundaryWatchStart
             case .shutdown: self = .shutdown
             default: self = .other
             }

@@ -72,6 +72,43 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(gate.lastAppliedSequence, deactivation.sequence)
     }
 
+    func testPreparedEntryStaysLocalUntilRemoteReady() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+
+        machine.pointerAtEdge(.right, requiresPreparation: true)
+
+        XCTAssertEqual(machine.state, .edgeArmed)
+        XCTAssertTrue(machine.requiresRemotePreparation)
+        XCTAssertTrue(machine.remotePrepared())
+        XCTAssertEqual(machine.state, .remoteActive)
+    }
+
+    func testEdgeExitCancelsPreparedAcquisition() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.pointerAtEdge(.right, requiresPreparation: true)
+
+        machine.cancelEdgePreparation()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(machine.requiresRemotePreparation)
+        XCTAssertFalse(machine.remotePrepared())
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testAuthoritativeBoundaryEventReturnsRemoteControl() {
+        let machine = EdgeSwitchStateMachine()
+        machine.activate()
+        machine.pointerAtEdge(.right, requiresPreparation: true)
+        XCTAssertTrue(machine.remotePrepared())
+
+        machine.boundaryReached()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(machine.requiresRemotePreparation)
+    }
+
     func testMovementIntoAndroidNeverReturnsOnAllEdges() {
         let movements: [(ScreenEdge, Int32, Int32)] = [
             (.left, -500, 0), (.right, 500, 0), (.top, 0, -500), (.bottom, 0, 500),

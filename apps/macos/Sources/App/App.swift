@@ -87,6 +87,7 @@ final class AppModel: ObservableObject {
     let sessionController: SessionController
     let handoffController: ControlHandoffController
     let inputCapabilityController: InputCapabilityController
+    private let boundaryWatchClient: BoundaryWatchClient
     private let targetController: TargetSelectionController
 
     var capture: InputCapture { handoffController.capture }
@@ -100,6 +101,8 @@ final class AppModel: ObservableObject {
         let reference = SessionReference()
         sessionController = SessionController(reference: reference)
         let sender = InputSender(session: reference)
+        let boundaryWatchClient = BoundaryWatchClient(session: reference)
+        self.boundaryWatchClient = boundaryWatchClient
         // Forward InputSender semantic failures through the unified sink
         // (lock-protected; safe from the delivery queue).
         sender.onDeliveryObservation = { [weak sessionController] observation in
@@ -107,6 +110,7 @@ final class AppModel: ObservableObject {
         }
         handoffController = ControlHandoffController(
             sender: sender,
+            boundaryWatch: boundaryWatchClient,
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
             captureStop: captureStop
@@ -131,9 +135,11 @@ final class AppModel: ObservableObject {
             self?.handleSessionUnavailable(reason)
         }
         targetController.onChange = { [weak self] targets, selected, state in
-            self?.targets = targets
-            self?.selectedTarget = selected
-            self?.targetState = state
+            guard let self else { return }
+            self.targets = targets
+            self.selectedTarget = selected
+            self.targetState = state
+            self.handoffController.updateRemoteTarget(selected?.id.rawValue)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
@@ -411,6 +417,10 @@ final class AppModel: ObservableObject {
     }
 
     private func handleUnsolicited(_ frame: CxiFrame) {
+        if let signal = boundaryWatchClient.decodeSignal(frame) {
+            handoffController.handleBoundarySignal(signal)
+            return
+        }
         switch frame.type {
         case .logEvent:
             if let log = try? Messages.decodeLogEvent(frame.payload) {
@@ -518,96 +528,3 @@ private struct AppMenu: View {
             }
 
             if !model.hostDisplays.isEmpty {
-                Divider()
-                Text("Remote target is at…")
-                ForEach(model.hostDisplays) { display in
-                    Picker(
-                        display.label,
-                        selection: Binding<ScreenEdge?>(
-                            get: {
-                                model.hostDisplays.first(where: { $0.id == display.id })?.edge
-                            },
-                            set: { model.setAndroidEdge($0, for: display.id) })) {
-                        Text("None").tag(ScreenEdge?.none)
-                        ForEach(ScreenEdge.allCases, id: \.self) { edge in
-                            Text(edge.rawValue.capitalized).tag(ScreenEdge?.some(edge))
-                        }
-                    }
-                }
-            }
-
-            if model.controlState == .remote {
-                Divider()
-                Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
-            }
-
-            Divider()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-        }
-        .onAppear {
-            model.refreshHostDisplays()
-            model.refreshInputCapabilities()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.refreshInputCapabilities()
-        }
-    }
-
-    @MainActor
-    private var statusText: String {
-        switch model.sessionState {
-        case .disconnected: return "Not connected"
-        case .connecting: return "Connecting…"
-        case .ready:
-            if let inputStatus = model.inputControlStatusText,
-               model.controlState == .disabled {
-                return inputStatus
-            }
-            switch model.controlState {
-            case .disabled: return "Edge Switch disabled"
-            case .local: return "Local"
-            case let .arming(edge): return "Arming (\(edge.rawValue))"
-            case .remote: return "Remote"
-            case .returning: return "Returning"
-            }
-        case .reconnecting: return "Reconnecting…"
-        case let .failed(message): return "Error: \(message)"
-        }
-    }
-}
-
-private enum AppConnectionError: LocalizedError {
-    case noAvailableTarget
-
-    var errorDescription: String? {
-        "No available Android target was discovered"
-    }
-}
-
-/// Failure/late-only diagnostics logging for production telemetry.
-extension AppModel {
-    nonisolated static func logFailureReason(_ observation: RequestObservation) {
-        switch observation.outcome {
-        case .success:
-            return // successes are noise; never logged
-        case .timedOut(let requestType, let budget):
-            Diagnostics.log("request timeout type=\(requestType.rawValue) budget=\(budget)s")
-        case .streamClosed(let requestType):
-            Diagnostics.log("request stream-closed type=\(requestType.rawValue)")
-        case .writeFailed(let requestType):
-            Diagnostics.log("request write-failed type=\(requestType.rawValue)")
-        case .unexpectedResponse(let requestType):
-            Diagnostics.log("request unexpected-response type=\(requestType.rawValue)")
-        case .malformedResponse(let requestType):
-            Diagnostics.log("request malformed-response type=\(requestType.rawValue)")
-        case .helperReportedFailure(let requestType):
-            Diagnostics.log("request helper-failure type=\(requestType.rawValue)")
-        case .lateResponse(let requestKind, let delay):
-            Diagnostics.log("late response after timeout type=\(requestKind.rawValue) delayBeyondDeadline=\(delay)s")
-        case .partialDelivery(let requestType):
-            Diagnostics.log("pointer partial-delivery type=\(requestType.rawValue) (product fail-safe)")
-        case .otherFailure(let requestType, _):
-            Diagnostics.log("request other-failure type=\(requestType.rawValue)")
-        }
-    }
-}

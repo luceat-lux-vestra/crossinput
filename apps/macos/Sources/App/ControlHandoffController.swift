@@ -23,6 +23,7 @@ final class ControlHandoffController: @unchecked Sendable {
     var onStateChange: ((ControlState) -> Void)?
 
     private let sender: InputSender
+    private let boundaryWatch: any BoundaryWatchServicing
     private let capabilityController: InputCapabilityController
     private let captureStart: @MainActor () -> Bool
     private let captureStop: @MainActor () -> Void
@@ -36,15 +37,21 @@ final class ControlHandoffController: @unchecked Sendable {
     private var lifecycleStarted = false
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
+    private var selectedRemoteTargetID: UInt32?
+    private var pendingBoundaryToken: UInt64?
+    private var activeBoundaryWatch: PreparedBoundaryWatch?
+    private var boundaryTokenCounter: UInt64 = 0
 
     @MainActor
     init(sender: InputSender,
+         boundaryWatch: any BoundaryWatchServicing = UnavailableBoundaryWatchService(),
          capture: InputCapture = InputCapture(),
          switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
          capabilityController: InputCapabilityController = InputCapabilityController(),
          captureStart: (@MainActor () -> Bool)? = nil,
          captureStop: (@MainActor () -> Void)? = nil) {
         self.sender = sender
+        self.boundaryWatch = boundaryWatch
         self.capture = capture
         self.switchMachine = switchMachine
         self.capabilityController = capabilityController
@@ -66,7 +73,10 @@ final class ControlHandoffController: @unchecked Sendable {
             // remoteActive with no live transport trapped the user until the
             // watchdog fired (issue #50).
             guard let self, self.isEdgeSwitchEnabled, self.sender.hasLiveConnection else { return }
-            self.switchMachine.pointerAtEdge(edge)
+            self.switchMachine.pointerAtEdge(edge, requiresPreparation: true)
+        }
+        capture.onListeningPointerMove = { [weak self] dx, dy in
+            self?.cancelBoundaryPreparationIfMovingAway(dx: dx, dy: dy)
         }
         capture.onPointerEvent = { [weak self] event in
             self?.enqueue(event)
@@ -167,6 +177,12 @@ final class ControlHandoffController: @unchecked Sendable {
             edgeSwitchEnabled = false
             controlEpoch &+= 1
             activeSuppressionGeneration = nil
+            pendingBoundaryToken = nil
+            let activeWatch = activeBoundaryWatch
+            activeBoundaryWatch = nil
+            if let activeWatch {
+                boundaryWatch.stop(activeWatch)
+            }
             // An event callback that wins this lock before Disable is admitted
             // before the generation barrier and is cancelled below. Anything
             // after the barrier sees the disabled gate and cannot be forwarded.
@@ -198,6 +214,56 @@ final class ControlHandoffController: @unchecked Sendable {
     func remoteUnavailable() {
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
+    @MainActor
+    func updateRemoteTarget(_ targetID: UInt32?) {
+        let previous: UInt32? = lifecycleLock.withLock {
+            let old = selectedRemoteTargetID
+            selectedRemoteTargetID = targetID
+            return old
+        }
+        guard previous != targetID else { return }
+
+        let active: PreparedBoundaryWatch? = lifecycleLock.withLock {
+            pendingBoundaryToken = nil
+            let value = activeBoundaryWatch
+            activeBoundaryWatch = nil
+            return value
+        }
+        if let active { boundaryWatch.stop(active) }
+
+        if switchMachine.state == .edgeArmed || switchMachine.state == .remoteActive {
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+        }
+    }
+
+    @MainActor
+    func handleBoundarySignal(_ signal: BoundaryWatchSignal) {
+        switch signal {
+        case let .reached(token, targetID, edge):
+            let active = lifecycleLock.withLock { activeBoundaryWatch }
+            guard let active,
+                  active.mode == .compositor,
+                  active.controlToken == token,
+                  active.targetID == targetID,
+                  selectedRemoteTargetID == targetID,
+                  switchMachine.state == .remoteActive,
+                  capture.isSuppressed,
+                  edge == Self.remoteReturnEdge(for: switchMachine.entryEdge) else {
+                return
+            }
+            switchMachine.boundaryReached()
+
+        case let .failed(token, _):
+            let matches = lifecycleLock.withLock {
+                activeBoundaryWatch?.controlToken == token || pendingBoundaryToken == token
+            }
+            guard matches else { return }
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+        }
     }
 
     func applyEdgeConfig(_ apply: (InputCapture) -> Void) {
@@ -298,15 +364,21 @@ final class ControlHandoffController: @unchecked Sendable {
             // rule (issue #45): return-direction movement counts even when
             // the helper's display-bound clamp reported zero accepted
             // movement; inward movement only counts what was accepted.
-            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
-                                       requestedDy: CGFloat(requestedDy),
-                                       deliveredDx: CGFloat(deliveredDx),
-                                       deliveredDy: CGFloat(deliveredDy))
+            let mode = lifecycleLock.withLock { activeBoundaryWatch?.mode }
+            if mode != .compositor {
+                switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
+                                           requestedDy: CGFloat(requestedDy),
+                                           deliveredDx: CGFloat(deliveredDx),
+                                           deliveredDy: CGFloat(deliveredDy))
+            }
         case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
-            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
-                                       requestedDy: CGFloat(requestedDy),
-                                       deliveredDx: CGFloat(deliveredDx),
-                                       deliveredDy: CGFloat(deliveredDy))
+            let mode = lifecycleLock.withLock { activeBoundaryWatch?.mode }
+            if mode != .compositor {
+                switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
+                                           requestedDy: CGFloat(requestedDy),
+                                           deliveredDx: CGFloat(deliveredDx),
+                                           deliveredDy: CGFloat(deliveredDy))
+            }
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:
@@ -360,6 +432,12 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
+            let prepared = lifecycleLock.withLock { activeBoundaryWatch }
+            if switchMachine.requiresRemotePreparation && prepared == nil {
+                sender.cancelPendingPointerEvents()
+                switchMachine.forceReturn(reason: .remoteUnavailable)
+                return
+            }
             guard isEdgeSwitchEnabled else {
                 sender.cancelPendingPointerEvents()
                 capture.release(reason: .captureStopped)
@@ -372,6 +450,9 @@ final class ControlHandoffController: @unchecked Sendable {
             if let generation = capture.suppress() {
                 currentSuppressionGeneration = generation
                 lifecycleLock.withLock { activeSuppressionGeneration = generation }
+            } else if !capture.isSuppressed {
+                sender.cancelPendingPointerEvents()
+                switchMachine.forceReturn(reason: .remoteUnavailable)
             }
         case .localActive, .returning, .disabled:
             // Lifecycle invariant (issue #62 code-gate): when local suppression
@@ -384,15 +465,131 @@ final class ControlHandoffController: @unchecked Sendable {
             // effort and session-generation-scoped; external-control takeovers
             // arrive here via the same transition after InputCapture's
             // synchronous onPointerStateReset.
-            lifecycleLock.withLock {
+            let activeWatch: PreparedBoundaryWatch? = lifecycleLock.withLock {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
+                pendingBoundaryToken = nil
+                let value = activeBoundaryWatch
+                activeBoundaryWatch = nil
+                return value
             }
+            if let activeWatch { boundaryWatch.stop(activeWatch) }
             sender.cancelPendingPointerEvents()
             sender.releaseRemotelyHeldButtons()
             capture.release(reason: releaseReason(for: reason))
         case .edgeArmed:
-            break
+            beginBoundaryPreparation(edge: switchMachine.entryEdge)
+        }
+    }
+
+
+    @MainActor
+    private func beginBoundaryPreparation(edge: ScreenEdge) {
+        let context: (token: UInt64, targetID: UInt32)? = lifecycleLock.withLock {
+            guard edgeSwitchEnabled, let targetID = selectedRemoteTargetID else { return nil }
+            boundaryTokenCounter &+= 1
+            if boundaryTokenCounter == 0 { boundaryTokenCounter &+= 1 }
+            let token = boundaryTokenCounter
+            pendingBoundaryToken = token
+            return (token, targetID)
+        }
+
+        guard let context else {
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+            return
+        }
+
+        let returnEdge = Self.remoteReturnEdge(for: edge)
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let prepared = try await self.boundaryWatch.start(
+                    controlToken: context.token,
+                    targetID: context.targetID,
+                    edge: returnEdge
+                )
+                await self.completeBoundaryPreparation(prepared)
+            } catch {
+                await self.failBoundaryPreparation(
+                    token: context.token,
+                    reason: String(describing: error)
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private func completeBoundaryPreparation(_ prepared: PreparedBoundaryWatch) {
+        let accepted = lifecycleLock.withLock {
+            guard edgeSwitchEnabled,
+                  pendingBoundaryToken == prepared.controlToken,
+                  selectedRemoteTargetID == prepared.targetID else {
+                return false
+            }
+            pendingBoundaryToken = nil
+            activeBoundaryWatch = prepared
+            return true
+        }
+
+        guard accepted, switchMachine.state == .edgeArmed else {
+            lifecycleLock.withLock {
+                if activeBoundaryWatch?.controlToken == prepared.controlToken {
+                    activeBoundaryWatch = nil
+                }
+            }
+            boundaryWatch.stop(prepared)
+            return
+        }
+
+        guard switchMachine.remotePrepared() else {
+            lifecycleLock.withLock {
+                if activeBoundaryWatch?.controlToken == prepared.controlToken {
+                    activeBoundaryWatch = nil
+                }
+            }
+            boundaryWatch.stop(prepared)
+            return
+        }
+    }
+
+    @MainActor
+    private func failBoundaryPreparation(token: UInt64, reason: String) {
+        let stillPending = lifecycleLock.withLock {
+            guard pendingBoundaryToken == token else { return false }
+            pendingBoundaryToken = nil
+            return true
+        }
+        guard stillPending else { return }
+        Diagnostics.log("boundary watch preparation failed reason=\(reason)")
+        switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
+    private func cancelBoundaryPreparationIfMovingAway(dx: Int32, dy: Int32) {
+        guard switchMachine.state == .edgeArmed else { return }
+        let edge = switchMachine.entryEdge
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: edge,
+            dx: CGFloat(dx),
+            dy: CGFloat(dy)
+        )
+        guard directed < 0 else { return }
+
+        let cancelled = lifecycleLock.withLock {
+            guard pendingBoundaryToken != nil else { return false }
+            pendingBoundaryToken = nil
+            return true
+        }
+        if cancelled {
+            switchMachine.cancelEdgePreparation()
+        }
+    }
+
+    private static func remoteReturnEdge(for hostEntryEdge: ScreenEdge) -> RemoteBoundaryEdge {
+        switch hostEntryEdge {
+        case .left: return .right
+        case .right: return .left
+        case .top: return .bottom
+        case .bottom: return .top
         }
     }
 
@@ -413,7 +610,7 @@ final class ControlHandoffController: @unchecked Sendable {
         case .remoteUnavailable: return .remoteUnavailable
         case .externalControlTakeover: return .externalControl
         case .deactivated: return .captureStopped
-        case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered:
+        case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered, .edgeExited:
             return .normalReturn
         }
     }

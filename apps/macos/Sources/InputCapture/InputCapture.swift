@@ -141,6 +141,10 @@ public final class InputCapture: @unchecked Sendable {
     /// can release any captured pointer buttons before the triggering event is
     /// passed through to macOS.
     public var onPointerStateReset: (@Sendable () -> Void)?
+    /// Called for local pointer movement while listening. Used only to cancel
+    /// an in-flight edge preparation when the user moves back into macOS.
+    public var onListeningPointerMove: (@Sendable (Int32, Int32) -> Void)?
+
     /// Called when the pointer reaches a screen edge while listening.
     /// 0=left 1=right 2=top 3=bottom (ScreenEdge rawValue).
     public var onScreenEdge: (@Sendable (ScreenEdge) -> Void)?
@@ -423,14 +427,18 @@ public final class InputCapture: @unchecked Sendable {
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             updatePosition(event)
+            let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
+            let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
             if let suppressedGeneration {
-                let dx = Int32(event.getIntegerValueField(.mouseEventDeltaX))
-                let dy = Int32(event.getIntegerValueField(.mouseEventDeltaY))
                 beforeSuppressedEventEmission?()
                 emitPointerEvent(PointerEvent(.move(dx: dx, dy: dy)), generation: suppressedGeneration)
                 holdPointerAtEdge(generation: suppressedGeneration)
                 return nil // consume: pointer held at the edge
             }
+            // Notify before edge detection. The event that first reaches the
+            // edge therefore sees localActive and cannot cancel its own arm;
+            // only a later movement away from an already-armed edge can.
+            onListeningPointerMove?(dx, dy)
             detectEdge()
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
