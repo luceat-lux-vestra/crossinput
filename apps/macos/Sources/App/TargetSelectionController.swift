@@ -99,6 +99,9 @@ final class TargetSelectionController {
         } else {
             targets.append(target)
         }
+        if selectedTarget?.id == target.id {
+            selectedTarget = target
+        }
         if selectedTarget == nil, target.kind == .external {
             publish()
             return target
