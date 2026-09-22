@@ -66,6 +66,7 @@ class PointerDispatcher(
 
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
+    private var compositorBoundaryRequired = false
 
     @Synchronized
     fun selectedDisplayId(): Int? = selectedDisplay?.displayId
@@ -77,9 +78,24 @@ class PointerDispatcher(
         else -> PointerBoundaryAuthority.UNAVAILABLE
     }
 
+    /**
+     * True when the selected target was classified as a desktop system sink.
+     *
+     * That classification survives a runtime UHID -> InputManager failover:
+     * #145 proved delivered/requested relative coordinates are not valid
+     * screen-boundary authority for this target class, so a later Control
+     * acquisition must fail closed instead of silently reviving the legacy
+     * distance model.
+     */
+    @Synchronized
+    fun requiresCompositorBoundaryAuthority(): Boolean = compositorBoundaryRequired
+
     @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
+        compositorBoundaryRequired =
+            mode == PointerBackendMode.UHID ||
+                (mode == PointerBackendMode.AUTO && isSystemRouteCandidate(display))
         if (mode == PointerBackendMode.UHID) {
             // Forced UHID deliberately trades away explicit target routing.
             // Warn loudly and drive the system-routed device anyway instead of
@@ -149,6 +165,7 @@ class PointerDispatcher(
         if (active !== inputManager) inputManager.close()
         active = null
         selectedDisplay = null
+        compositorBoundaryRequired = false
     }
 
     private fun deliver(send: (PointerInjector) -> PointerDelivery): PointerDelivery {
