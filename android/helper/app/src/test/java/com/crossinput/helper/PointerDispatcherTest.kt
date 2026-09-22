@@ -34,6 +34,7 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = true)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.COMPOSITOR, dispatcher.boundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         // The UHID contract must stay honest: system routing never claims a
         // target-specific selection.
@@ -48,6 +49,7 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = false)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid, never()).selectSystemRoute()
     }

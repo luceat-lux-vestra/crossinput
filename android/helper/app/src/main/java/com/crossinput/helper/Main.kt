@@ -66,15 +66,17 @@ object Main {
         val uhidPointer = UhidPointerInjector(log, hid)
         val pointer = PointerDispatcher(log, uhidPointer, inputManagerPointer, pointerMode)
         val discovery = DisplayDiscovery(context, writerLock, log, pointer::refreshMetrics)
+        val boundaryWatch = BoundaryWatchController(writerLock, log)
         val keyboard = KeyboardBackend(log, context, hid, mode)
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { mainLooper.quitSafely() },
             destroyKeyboard = keyboard::destroy,
+            destroyBoundaryWatch = boundaryWatch::close,
             destroyPointer = pointer::close,
             destroyHid = hid::destroyAll,
             flush = { writerLock.withLock { it.flush() } },
         )
-        val controller = Controller(discovery, hid, pointer, keyboard, writerLock, log)
+        val controller = Controller(discovery, hid, pointer, boundaryWatch, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
         val stdinThread = Thread {
@@ -127,6 +129,7 @@ object Main {
 class MainShutdownLifecycle(
     private val requestMainLoopQuit: () -> Unit,
     private val destroyKeyboard: () -> Unit,
+    private val destroyBoundaryWatch: () -> Unit = {},
     private val destroyPointer: () -> Unit = {},
     private val destroyHid: () -> Unit,
     private val flush: () -> Unit,
@@ -144,12 +147,16 @@ class MainShutdownLifecycle(
             destroyKeyboard()
         } finally {
             try {
-                destroyPointer()
+                destroyBoundaryWatch()
             } finally {
                 try {
-                    destroyHid()
+                    destroyPointer()
                 } finally {
-                    flush()
+                    try {
+                        destroyHid()
+                    } finally {
+                        flush()
+                    }
                 }
             }
         }
@@ -250,7 +257,8 @@ enum class KeyboardBackendMode(val token: String) {
 class Controller(
     private val discovery: DisplayDiscovery,
     private val hid: HidDeviceManager,
-    private val pointer: PointerInjector,
+    private val pointer: PointerDispatcher,
+    private val boundaryWatch: BoundaryWatchController,
     private val keyboard: KeyboardInjector,
     private val writerLock: WriterLock,
     private val log: Logger,
@@ -274,6 +282,9 @@ class Controller(
                 val (dx, dy) = Messages.pointerMoveRel(frame.payload)
                 val result = pointer.moveRelative(dx, dy)
                 writePointerResult(frame, result)
+                if (result.status == PointerDelivery.Status.DELIVERED) {
+                    boundaryWatch.onPointerMove(dx, dy, pointer.boundaryAuthority())
+                }
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer move delivery status=${result.status}")
                 }
@@ -296,6 +307,10 @@ class Controller(
             }
             Protocol.TYPE_KEY_EVENT -> {
                 keyboard.keyEvent(Messages.keyEvent(frame.payload))
+            }
+            Protocol.TYPE_BOUNDARY_WATCH_START -> handleBoundaryWatchStart(frame)
+            Protocol.TYPE_BOUNDARY_WATCH_STOP -> {
+                boundaryWatch.stop(Messages.boundaryWatchStop(frame.payload))
             }
             Protocol.TYPE_PING -> writerLock.withLock {
                 it.write(Protocol.TYPE_PONG, frame.requestId, Messages.pong())
@@ -332,6 +347,7 @@ class Controller(
             return
         }
         val capabilities = Cxi.CAPABILITY_SEMANTIC_POINTER_RESULT or
+            Cxi.CAPABILITY_BOUNDARY_WATCH or
             if (pointer.supportsExplicitDisplayRouting) {
                 Cxi.CAPABILITY_EXPLICIT_POINTER_ROUTING
             } else {
@@ -358,6 +374,54 @@ class Controller(
         }
     }
 
+    private fun handleBoundaryWatchStart(frame: Frame) {
+        val request = Messages.boundaryWatchStart(frame.payload)
+        val selectedId = pointer.selectedDisplayId()
+        val display = discovery.find(request.displayId)
+        if (display == null || selectedId != request.displayId) {
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(
+                        request.controlToken,
+                        BoundaryWatchController.ERROR_TARGET_MISMATCH,
+                    ),
+                )
+            }
+            return
+        }
+
+        val result = boundaryWatch.start(
+            token = request.controlToken,
+            displayId = request.displayId,
+            layerStack = display.layerStack,
+            edge = request.edge,
+            authority = pointer.boundaryAuthority(),
+        )
+        val error = result.errorCode
+        writerLock.withLock {
+            if (error == null) {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_READY,
+                    frame.requestId,
+                    Messages.boundaryWatchReady(
+                        request.controlToken,
+                        request.displayId,
+                        result.mode,
+                        result.layerStack,
+                    ),
+                )
+            } else {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(request.controlToken, error),
+                )
+            }
+        }
+    }
+
     private fun handleListDisplays(frame: Frame) {
         val displays = discovery.displays()
         log.info("Main", "listing ${displays.size} display(s)")
@@ -367,6 +431,7 @@ class Controller(
     }
 
     private fun handleSelectDisplay(frame: Frame) {
+        boundaryWatch.invalidateForTargetChange()
         val displayId = Messages.selectDisplayId(frame.payload)
         val display = discovery.find(displayId)
         if (display == null) {

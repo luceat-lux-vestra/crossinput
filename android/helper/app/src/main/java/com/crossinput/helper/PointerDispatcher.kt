@@ -68,6 +68,16 @@ class PointerDispatcher(
     private var active: PointerInjector? = null
 
     @Synchronized
+    fun selectedDisplayId(): Int? = selectedDisplay?.displayId
+
+    @Synchronized
+    fun boundaryAuthority(): PointerBoundaryAuthority = when (active) {
+        uhid -> PointerBoundaryAuthority.COMPOSITOR
+        inputManager -> PointerBoundaryAuthority.DELIVERED_COORDINATES
+        else -> PointerBoundaryAuthority.UNAVAILABLE
+    }
+
+    @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
         if (mode == PointerBackendMode.UHID) {
