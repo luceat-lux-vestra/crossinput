@@ -171,6 +171,7 @@ class BoundaryWatchController internal constructor(
     private val writer: WriterLock,
     private val log: Logger,
     private val oracleFactory: () -> BoundarySpriteOracle = { SurfaceFlingerSpriteOracle() },
+    private val trackerFactory: () -> BoundaryPlateauTracker = { BoundaryPlateauTracker() },
 ) {
     data class StartResult(
         val mode: Int,
@@ -249,7 +250,7 @@ class BoundaryWatchController internal constructor(
                     layerStack = layerStack,
                     edge = edge,
                     spriteName = first.name,
-                    tracker = BoundaryPlateauTracker().also {
+                    tracker = trackerFactory().also {
                         it.reset(progress(edge, first))
                     },
                 )
