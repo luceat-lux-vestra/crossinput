@@ -43,6 +43,8 @@ internal class BoundaryPlateauTracker(
         longestInteriorPlateauSamples = 1
     }
 
+    fun isPlateauCandidate(): Boolean = hasAdvanced && plateauSamples >= 2
+
     fun observe(progress: Double, nowNanos: Long): Boolean {
         val currentMax = maxProgress
         if (currentMax == null) {
@@ -198,6 +200,7 @@ class BoundaryWatchController internal constructor(
     private val log: Logger,
     private val oracleFactory: () -> BoundarySpriteOracle = { SurfaceFlingerSpriteOracle() },
     private val trackerFactory: () -> BoundaryPlateauTracker = { BoundaryPlateauTracker() },
+    private val scoutDelayMillis: Long = 80L,
 ) {
     data class StartResult(
         val mode: Int,
@@ -421,6 +424,7 @@ class BoundaryWatchController internal constructor(
             var reached = false
             var observationFailed = false
             var staleSample = false
+            var confirmingPlateau = false
             synchronized(lock) {
                 val state = watch
                 if (
@@ -440,6 +444,7 @@ class BoundaryWatchController internal constructor(
                 } else {
                     state.lastSampledIntentSequence = snapshot.intentSequence
                     reached = state.tracker.observe(progress(state.edge, sample), System.nanoTime())
+                    confirmingPlateau = state.tracker.isPlateauCandidate()
                     if (reached) {
                         state.emitted = true
                         workerRunning = false
@@ -455,6 +460,16 @@ class BoundaryWatchController internal constructor(
             if (reached) {
                 emitReached(snapshot.token, snapshot.displayId, snapshot.edge)
                 return
+            }
+
+            if (!confirmingPlateau && scoutDelayMillis > 0) {
+                try {
+                    Thread.sleep(scoutDelayMillis)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    synchronized(lock) { workerRunning = false }
+                    return
+                }
             }
         }
     }
