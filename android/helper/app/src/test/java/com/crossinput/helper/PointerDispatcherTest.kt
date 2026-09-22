@@ -35,6 +35,7 @@ class PointerDispatcherTest {
 
         assertTrue(dispatcher.selectDisplay(display))
         assertEquals(PointerBoundaryAuthority.COMPOSITOR, dispatcher.boundaryAuthority())
+        assertTrue(dispatcher.requiresCompositorBoundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         // The UHID contract must stay honest: system routing never claims a
         // target-specific selection.
@@ -50,6 +51,7 @@ class PointerDispatcherTest {
 
         assertTrue(dispatcher.selectDisplay(display))
         assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertFalse(dispatcher.requiresCompositorBoundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid, never()).selectSystemRoute()
     }
@@ -63,6 +65,11 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = true)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertTrue(
+            dispatcher.requiresCompositorBoundaryAuthority(),
+            "desktop requirement must survive initial UHID unavailability",
+        )
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid).close()
     }
@@ -159,6 +166,11 @@ class PointerDispatcherTest {
         dispatcher.selectDisplay(display)
 
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertTrue(
+            dispatcher.requiresCompositorBoundaryAuthority(),
+            "runtime fallback must not erase the desktop boundary contract",
+        )
         verify(uhid).close()
         verify(inputManager, times(1)).moveRelative(5, 6)
     }
