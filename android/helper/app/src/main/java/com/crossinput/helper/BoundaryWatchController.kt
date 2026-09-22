@@ -187,6 +187,8 @@ class BoundaryWatchController internal constructor(
         val tracker: BoundaryPlateauTracker,
         var returnIntentSequence: Long = 0,
         var lastSampledIntentSequence: Long = 0,
+        var returnIntentGeneration: Long = 0,
+        var returnIntentActive: Boolean = false,
         var emitted: Boolean = false,
     )
 
@@ -324,6 +326,10 @@ class BoundaryWatchController internal constructor(
 
             when (intentDirection(state.edge, dx, dy)) {
                 1 -> {
+                    if (!state.returnIntentActive) {
+                        state.returnIntentActive = true
+                        state.returnIntentGeneration++
+                    }
                     state.returnIntentSequence++
                     if (!workerRunning) {
                         workerRunning = true
@@ -331,6 +337,10 @@ class BoundaryWatchController internal constructor(
                     }
                 }
                 -1 -> {
+                    if (state.returnIntentActive) {
+                        state.returnIntentActive = false
+                        state.returnIntentGeneration++
+                    }
                     state.tracker.reset()
                     state.lastSampledIntentSequence = state.returnIntentSequence
                 }
@@ -370,6 +380,7 @@ class BoundaryWatchController internal constructor(
                     edge = state.edge,
                     spriteName = state.spriteName,
                     intentSequence = state.returnIntentSequence,
+                    intentGeneration = state.returnIntentGeneration,
                 )
             }
 
@@ -387,7 +398,9 @@ class BoundaryWatchController internal constructor(
                 val state = watch
                 if (
                     state == null || state.token != snapshot.token ||
-                    state.displayId != snapshot.displayId
+                    state.displayId != snapshot.displayId ||
+                    !state.returnIntentActive ||
+                    state.returnIntentGeneration != snapshot.intentGeneration
                 ) {
                     staleSample = true
                 } else if (
@@ -426,6 +439,7 @@ class BoundaryWatchController internal constructor(
         val edge: Int,
         val spriteName: String,
         val intentSequence: Long,
+        val intentGeneration: Long,
     )
 
     private fun failRuntime(token: Long, code: Int) {
