@@ -20,20 +20,25 @@ Validation` required check (static) and weekly via `.github/workflows/hardening-
 (static plus a live readback of rulesets, CodeQL setup and Actions policy).
 
 - **Required checks on `main`:** `macOS App Build + Test`, `Android Helper Build + Test`,
-  `Documentation Validation`, `Evidence & Tooling Validation`, all produced by `ci.yml`
-  on every pull request with no path or condition filters, under a strict ruleset with
-  no bypass actors and squash-only merges.
+  `Documentation Validation`, `Evidence & Tooling Validation`, `failure-triage`, and
+  `Dependency Review`. The first four are always produced by `ci.yml`; the latter two
+  are produced by their dedicated workflows. The active ruleset is strict, has no bypass
+  actors, requires review-thread resolution, and allows squash-only merges.
 - **Code scanning authority:** the custom `.github/workflows/codeql.yml` workflow is the
-  single authority (Actions, Java/Kotlin, Swift, Python). GitHub's CodeQL *default setup*
-  is intentionally left `not-configured`; enabling it would duplicate analysis, and the
-  audit fails if it is ever turned on while the custom workflow remains authoritative.
+  single authority. Actions, Python, and Swift are active. Java/Kotlin is a documented
+  temporary capability exception tracked by issue #157 because the stable action-managed
+  CodeQL bundle does not yet accept the maintained Kotlin 2.4.20 compiler path. GitHub's
+  CodeQL *default setup* is intentionally left `not-configured`; enabling it would create
+  a competing authority, and the hardening policy rejects that drift.
 - **Actions policy:** repository settings require full-SHA action pins, the default
   workflow token is read-only, and workflows may not approve pull requests. Write
   permissions are job-scoped and enumerated in `.github/hardening-policy.json`.
 - **Releases:** `v*` tags are immutable (deletion and update blocked, no bypass). The
-  release workflow builds only from the tag's exact commit, verifies checkout identity,
-  and re-verifies tag, commit and asset identity after publishing. An inconclusive
-  release lookup aborts rather than creating a release.
+  release workflow builds only from the tag's exact reviewed-`main` commit, verifies
+  checkout/version/signature/DMG identity, generates the checksum, attests the verified
+  DMG build provenance with GitHub artifact attestations, publishes only after those
+  checks, and re-verifies tag, commit and asset identity after publication. An
+  inconclusive release lookup aborts rather than creating or mutating a release.
 
 CI never satisfies the ADR-0012 physical-device evidence gate. The audit checks that the
 evidence analyzers and verifiers are present and unbroken; acceptance of a device cycle
