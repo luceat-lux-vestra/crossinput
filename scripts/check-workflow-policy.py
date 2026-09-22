@@ -48,9 +48,15 @@ class Findings:
     def skip(self, where, message):
         self.items.append(("SKIPPED", where, message))
 
+    def manual_unverified(self, where, message):
+        self.items.append(("MANUAL_UNVERIFIED", where, message))
+
     @property
     def fatal(self):
-        return [item for item in self.items if item[0] != "SKIPPED"]
+        return [
+            item for item in self.items
+            if item[0] not in {"SKIPPED", "MANUAL_UNVERIFIED"}
+        ]
 
 
 def load_workflows(root):
@@ -445,6 +451,43 @@ def check_codeql_authority(root, workflows, policy, findings):
 
 
 
+MANUAL_LIVE_READBACKS = {
+    "codeql",
+    "actions/permissions",
+    "actions/permissions/workflow",
+}
+
+
+def check_manual_live_readback_policy(policy, findings):
+    configured = policy.get("manual_live_readbacks")
+    if not isinstance(configured, dict):
+        findings.add(
+            "LIVE_READBACK_POLICY",
+            ".github/hardening-policy.json",
+            "manual_live_readbacks must be an object naming every admin-only readback",
+        )
+        return
+
+    actual = set(configured)
+    missing = MANUAL_LIVE_READBACKS - actual
+    unexpected = actual - MANUAL_LIVE_READBACKS
+    if missing or unexpected:
+        findings.add(
+            "LIVE_READBACK_POLICY",
+            ".github/hardening-policy.json",
+            f"manual live-readback inventory drifted; missing={sorted(missing)}, "
+            f"unexpected={sorted(unexpected)}",
+        )
+
+    for name, reason in configured.items():
+        if not isinstance(reason, str) or not reason.strip():
+            findings.add(
+                "LIVE_READBACK_POLICY",
+                ".github/hardening-policy.json",
+                f"manual live readback {name!r} requires a non-empty rationale",
+            )
+
+
 def check_release_provenance(root, workflows, policy, findings):
     expected = policy.get("release_provenance")
     if not expected:
@@ -533,24 +576,75 @@ def check_release_provenance(root, workflows, policy, findings):
         findings.add("RELEASE_ATTESTATION_ORDER", filename,
                      "artifact verification must precede attestation, and attestation must precede release mutation")
 
-def gh_api(path, findings, where):
+def check_hardening_audit_lifecycle(root, workflows, findings):
+    workflow = workflows.get("hardening-audit.yml")
+    if workflow is None:
+        findings.add("AUDIT_RECOVERY", "hardening-audit.yml", "missing hardening audit workflow")
+        return
+
+    report = (workflow.get("jobs") or {}).get("report")
+    if report is None:
+        findings.add("AUDIT_RECOVERY", "hardening-audit.yml:report", "missing report job")
+        return
+
+    if str(report.get("if") or "").strip() != "always()":
+        findings.add(
+            "AUDIT_RECOVERY",
+            "hardening-audit.yml:report",
+            "report job must run on both drift and recovery",
+        )
+
+    permissions = report.get("permissions") or {}
+    if permissions.get("issues") != "write":
+        findings.add(
+            "AUDIT_RECOVERY",
+            "hardening-audit.yml:report",
+            "recovery reporter must isolate issues: write at job scope",
+        )
+
+    path = os.path.join(root, ".github", "workflows", "hardening-audit.yml")
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    required = (
+        "DETECT_RESULT: ${{ needs.detect.result }}",
+        "if (process.env.DETECT_RESULT === 'success')",
+        "Hardening audit recovered",
+        "state: 'closed'",
+    )
+    for fragment in required:
+        if fragment not in text:
+            findings.add(
+                "AUDIT_RECOVERY",
+                "hardening-audit.yml:report",
+                f"owned-issue recovery contract missing: {fragment}",
+            )
+
+
+def gh_api(path, findings, where, manual=False):
+    def unreadable(message):
+        if manual:
+            findings.manual_unverified(where, message)
+        else:
+            findings.skip(where, message)
+
     try:
         completed = subprocess.run(
             ["gh", "api", path], capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.SubprocessError) as error:
-        findings.skip(where, f"live readback unavailable: {error}")
+        unreadable(f"live readback unavailable: {error}")
         return None
     if completed.returncode != 0:
-        findings.skip(where, f"live readback failed ({completed.stderr.strip()[:200]})")
+        unreadable(f"live readback failed ({completed.stderr.strip()[:200]})")
         return None
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        findings.skip(where, f"live readback returned non-JSON: {error}")
+        unreadable(f"live readback returned non-JSON: {error}")
         return None
 
 
 def check_live(repo, policy, findings):
+    manual = set((policy.get("manual_live_readbacks") or {}).keys())
     rulesets = gh_api(f"repos/{repo}/rulesets", findings, "rulesets")
     if rulesets is not None:
         branch = next((item for item in rulesets if item.get("target") == "branch"), None)
@@ -558,7 +652,12 @@ def check_live(repo, policy, findings):
         _check_branch_ruleset(repo, branch, policy, findings)
         _check_tag_ruleset(repo, tag, policy, findings)
 
-    default_setup = gh_api(f"repos/{repo}/code-scanning/default-setup", findings, "codeql")
+    default_setup = gh_api(
+        f"repos/{repo}/code-scanning/default-setup",
+        findings,
+        "codeql",
+        manual="codeql" in manual,
+    )
     if default_setup is not None:
         state = default_setup.get("state")
         authority = policy["codeql_authority"]
@@ -570,7 +669,12 @@ def check_live(repo, policy, findings):
             findings.add("CODEQL_AUTHORITY", "code-scanning/default-setup",
                          f"default setup is {state!r} but policy names it the authority")
 
-    actions = gh_api(f"repos/{repo}/actions/permissions", findings, "actions/permissions")
+    actions = gh_api(
+        f"repos/{repo}/actions/permissions",
+        findings,
+        "actions/permissions",
+        manual="actions/permissions" in manual,
+    )
     expected = policy["actions_policy"]
     if actions is not None and actions.get("sha_pinning_required") != expected["sha_pinning_required"]:
         findings.add("ACTIONS_POLICY_DRIFT", "actions/permissions",
@@ -578,7 +682,11 @@ def check_live(repo, policy, findings):
                      f"expected {expected['sha_pinning_required']}")
 
     workflow_permissions = gh_api(
-        f"repos/{repo}/actions/permissions/workflow", findings, "actions/permissions/workflow")
+        f"repos/{repo}/actions/permissions/workflow",
+        findings,
+        "actions/permissions/workflow",
+        manual="actions/permissions/workflow" in manual,
+    )
     if workflow_permissions is not None:
         for key in ("default_workflow_permissions", "can_approve_pull_request_reviews"):
             if workflow_permissions.get(key) != expected[key]:
@@ -692,6 +800,8 @@ def main():
     check_labels(args.root, findings)
     check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
+    check_manual_live_readback_policy(policy, findings)
+    check_hardening_audit_lifecycle(args.root, workflows, findings)
     check_release_provenance(args.root, workflows, policy, findings)
     if args.live:
         check_live(args.repo, policy, findings)
@@ -704,14 +814,24 @@ def main():
     for code, where, message in findings.items:
         print(f"{code}: {where}: {message}")
 
-    skipped = len(findings.items) - len(findings.fatal)
+    skipped = sum(1 for code, _, _ in findings.items if code == "SKIPPED")
+    manual = sum(1 for code, _, _ in findings.items if code == "MANUAL_UNVERIFIED")
     if findings.fatal:
-        print(f"\n{len(findings.fatal)} hardening finding(s), {skipped} skipped readback(s)",
-              file=sys.stderr)
+        print(
+            f"\n{len(findings.fatal)} hardening finding(s), "
+            f"{skipped} unexpected skipped readback(s), "
+            f"{manual} manual-unverified readback(s)",
+            file=sys.stderr,
+        )
         return 1
     if skipped and not args.allow_live_skip:
-        print(f"\n{skipped} live readback(s) could not be performed", file=sys.stderr)
+        print(f"\n{skipped} unexpected live readback(s) could not be performed", file=sys.stderr)
         return 1
+    if manual:
+        print(
+            f"\n{manual} admin-only live readback(s) remain MANUAL_UNVERIFIED; "
+            "this run does not claim those controls as live-proven."
+        )
     return 0
 
 

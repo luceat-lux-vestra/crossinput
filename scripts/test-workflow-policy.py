@@ -382,6 +382,21 @@ def main():
              "          predicate: '{}'\n"),
          "RELEASE_ATTESTATION_MODE")
 
+    # Scheduled drift must distinguish known administration-only readbacks
+    # from unexpected infrastructure loss, and its owned issue must recover.
+    case("manual live-readback inventory cannot silently shrink",
+         lambda root: policy_edit(
+             root,
+             lambda policy: policy["manual_live_readbacks"].pop("codeql")),
+         "LIVE_READBACK_POLICY")
+
+    case("hardening drift reporter must retain recovery close",
+         lambda root: edit(
+             workflow(root, "hardening-audit.yml"),
+             "                  ...context.repo, issue_number: owned.number, state: 'closed',\n",
+             "                  ...context.repo, issue_number: owned.number, state: 'open',\n"),
+         "AUDIT_RECOVERY")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
