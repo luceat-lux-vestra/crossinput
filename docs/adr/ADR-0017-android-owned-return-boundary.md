@@ -38,9 +38,13 @@ A preparation failure or stale response remains local.
 
 For explicit-display InputManager targets the helper reports
 `DELIVERED_COORDINATES`; the existing delivered-coordinate policy remains
-authoritative. For system-routed UHID desktop targets the helper reports
-`COMPOSITOR`; normal return is driven only by a validated asynchronous
-`BOUNDARY_REACHED` event.
+authoritative. For a target classified as a desktop system sink, that policy is
+never a fallback: the target selection epoch permanently requires compositor
+boundary authority even if UHID later degrades to InputManager. A later
+`BOUNDARY_WATCH_START` under non-compositor authority is rejected and remains
+local. For system-routed UHID desktop targets the helper reports `COMPOSITOR`;
+normal return is driven only by a validated asynchronous `BOUNDARY_REACHED`
+event.
 
 The compositor watcher:
 
