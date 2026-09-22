@@ -285,8 +285,10 @@ class Controller(
                 val (dx, dy) = Messages.pointerMoveRel(frame.payload)
                 val result = pointer.moveRelative(dx, dy)
                 writePointerResult(frame, result)
+                val authority = pointer.boundaryAuthority()
+                boundaryWatch.onPointerAuthorityObserved(authority)
                 if (result.status == PointerDelivery.Status.DELIVERED) {
-                    boundaryWatch.onPointerMove(dx, dy, pointer.boundaryAuthority())
+                    boundaryWatch.onPointerMove(dx, dy, authority)
                 }
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer move delivery status=${result.status}")
@@ -296,6 +298,7 @@ class Controller(
                 val btn = Messages.pointerButton(frame.payload)
                 val result = pointer.button(btn.button, btn.down)
                 writePointerResult(frame, result)
+                boundaryWatch.onPointerAuthorityObserved(pointer.boundaryAuthority())
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer button delivery status=${result.status}")
                 }
@@ -304,6 +307,7 @@ class Controller(
                 val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
                 val result = pointer.scroll(horizontal, vertical)
                 writePointerResult(frame, result)
+                boundaryWatch.onPointerAuthorityObserved(pointer.boundaryAuthority())
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer scroll delivery status=${result.status}")
                 }
