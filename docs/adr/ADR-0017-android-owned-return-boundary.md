@@ -51,6 +51,9 @@ The compositor watcher:
 - is isolated behind a runtime-detected Android adapter;
 - filters Sprite observations by the selected target's dynamic layerStack;
 - polls only while fresh return-direction pointer intent exists;
+- uses paced scout sampling while the compositor is still making progress, then
+  switches to fast confirmation only after repeated same-position observations
+  establish a plateau candidate;
 - never blocks semantic pointer delivery;
 - counts a plateau sample only when new return-direction input arrived since the
   previous sample;
