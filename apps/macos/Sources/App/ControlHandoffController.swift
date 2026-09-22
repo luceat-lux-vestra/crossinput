@@ -575,12 +575,19 @@ final class ControlHandoffController: @unchecked Sendable {
         )
         guard directed < 0 else { return }
 
-        let cancelled = lifecycleLock.withLock {
-            guard pendingBoundaryToken != nil else { return false }
+        let cancellation: (cancelled: Bool, active: PreparedBoundaryWatch?) = lifecycleLock.withLock {
+            guard pendingBoundaryToken != nil || activeBoundaryWatch != nil else {
+                return (false, nil)
+            }
             pendingBoundaryToken = nil
-            return true
+            let active = activeBoundaryWatch
+            activeBoundaryWatch = nil
+            return (true, active)
         }
-        if cancelled {
+        if let active = cancellation.active {
+            boundaryWatch.stop(active)
+        }
+        if cancellation.cancelled {
             switchMachine.cancelEdgePreparation()
         }
     }
