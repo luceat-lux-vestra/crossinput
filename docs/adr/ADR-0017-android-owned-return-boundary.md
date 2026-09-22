@@ -50,6 +50,12 @@ The compositor watcher:
 - never blocks semantic pointer delivery;
 - counts a plateau sample only when new return-direction input arrived since the
   previous sample;
+- does not accept a plateau until post-preflight compositor progress has been
+  observed in the return direction;
+- preserves the physically validated #194 discriminator: at least 8 samples in
+  the candidate final plateau and at least 3 samples of separation over the
+  longest completed interior same-position plateau, with the production duration
+  floor as an additional guard;
 - advances an internal return-intent generation on direction reversal so an
   in-flight sample from the superseded intent window cannot confirm;
 - requires macOS to accept a compositor confirmation only while current
