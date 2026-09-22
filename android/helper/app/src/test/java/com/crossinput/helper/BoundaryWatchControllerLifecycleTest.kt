@@ -81,6 +81,50 @@ class BoundaryWatchControllerLifecycleTest {
     }
 
     @Test
+    fun reversalInvalidatesInFlightSampleBeforeFreshIntentWindow() {
+        val output = ByteArrayOutputStream()
+        val writer = WriterLock(FrameWriter(output))
+        val oracle = ReversalRaceOracle()
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { oracle },
+            trackerFactory = {
+                BoundaryPlateauTracker(requiredSamples = 1, minimumDurationNanos = 0)
+            },
+        )
+
+        val started = controller.start(
+            token = 90L,
+            displayId = 2,
+            layerStack = 9,
+            edge = BoundaryWatchController.EDGE_RIGHT,
+            authority = PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertNull(started.errorCode)
+
+        controller.onPointerMove(10, 0, PointerBoundaryAuthority.COMPOSITOR)
+        assertTrue("old intent sample never started", oracle.oldSampleEntered.await(1, TimeUnit.SECONDS))
+
+        controller.onPointerMove(-10, 0, PointerBoundaryAuthority.COMPOSITOR)
+        oracle.releaseOldSample.countDown()
+
+        controller.onPointerMove(10, 0, PointerBoundaryAuthority.COMPOSITOR)
+        assertTrue(
+            "fresh intent did not reach a new sample; stale sample likely confirmed",
+            oracle.freshSampleEntered.await(1, TimeUnit.SECONDS),
+        )
+        assertEquals(
+            "stale pre-reversal sample must not emit a boundary frame",
+            0,
+            output.size(),
+        )
+
+        oracle.releaseFreshSample.countDown()
+        controller.close()
+    }
+
+    @Test
     fun backendFailoverInvalidatesActiveCompositorWatchImmediately() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
@@ -130,6 +174,39 @@ class BoundaryWatchControllerLifecycleTest {
 
         assertNull(started.errorCode)
         controller.close()
+    }
+
+    private class ReversalRaceOracle : BoundarySpriteOracle {
+        val oldSampleEntered = CountDownLatch(1)
+        val releaseOldSample = CountDownLatch(1)
+        val freshSampleEntered = CountDownLatch(1)
+        val releaseFreshSample = CountDownLatch(1)
+        private var samples = 0
+
+        @Synchronized
+        override fun sample(layerStack: Int): SurfaceFlingerSpritePosition {
+            samples++
+            when (samples) {
+                2 -> {
+                    oldSampleEntered.countDown()
+                    check(releaseOldSample.await(1, TimeUnit.SECONDS)) {
+                        "old sample was not released"
+                    }
+                }
+                3 -> {
+                    freshSampleEntered.countDown()
+                    check(releaseFreshSample.await(1, TimeUnit.SECONDS)) {
+                        "fresh sample was not released"
+                    }
+                }
+            }
+            return SurfaceFlingerSpritePosition(
+                name = "Sprite#0",
+                layerStack = layerStack,
+                x = 100.0,
+                y = 50.0,
+            )
+        }
     }
 
     private class FixedOracle : BoundarySpriteOracle {
