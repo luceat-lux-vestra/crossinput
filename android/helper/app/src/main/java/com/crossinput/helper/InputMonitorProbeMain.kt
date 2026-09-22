@@ -26,14 +26,12 @@ object InputMonitorProbeMain {
         val displayId = args.singleOrNull()?.toIntOrNull()
         if (displayId == null || displayId < 0) {
             System.err.println("PROBE_RESULT=INVALID_ARGUMENT expected_display_id")
-            System.exit(EXIT_USAGE)
             return
         }
 
         val context = systemContext()
         if (context == null) {
             System.err.println("PROBE_RESULT=NO_SYSTEM_CONTEXT")
-            System.exit(EXIT_UNAVAILABLE)
             return
         }
 
@@ -61,7 +59,6 @@ object InputMonitorProbeMain {
                         "PROBE_RESULT=ALLOWED api=${outcome.api} " +
                             "monitorClass=${sanitize(outcome.monitorClass)}",
                     )
-                    System.exit(EXIT_ALLOWED)
                     return
                 }
 
@@ -71,7 +68,6 @@ object InputMonitorProbeMain {
                             "exception=${outcome.exceptionClass} " +
                             "message=${sanitize(outcome.message)}",
                     )
-                    System.exit(EXIT_DENIED)
                     return
                 }
 
@@ -85,7 +81,6 @@ object InputMonitorProbeMain {
                 "exception=${unavailable?.exceptionClass ?: "none"} " +
                 "message=${sanitize(unavailable?.message)}",
         )
-        System.exit(EXIT_UNAVAILABLE)
     }
 
     private fun probeContextInputManager(context: Context, displayId: Int): ProbeOutcome {
@@ -100,7 +95,7 @@ object InputMonitorProbeMain {
             val method = klass.getMethod(
                 "monitorGestureInput",
                 String::class.java,
-                Int::class.javaPrimitiveType,
+                Integer.TYPE,
             )
             invokeAndDispose(
                 api = "InputManager.monitorGestureInput",
@@ -132,7 +127,7 @@ object InputMonitorProbeMain {
             val method = klass.getMethod(
                 "monitorGestureInput",
                 String::class.java,
-                Int::class.javaPrimitiveType,
+                Integer.TYPE,
             )
             invokeAndDispose(
                 api = "InputManagerGlobal.monitorGestureInput",
@@ -225,9 +220,4 @@ object InputMonitorProbeMain {
             val message: String?,
         ) : ProbeOutcome
     }
-
-    private const val EXIT_ALLOWED = 0
-    private const val EXIT_USAGE = 2
-    private const val EXIT_DENIED = 3
-    private const val EXIT_UNAVAILABLE = 4
 }
