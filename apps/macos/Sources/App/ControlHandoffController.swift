@@ -40,6 +40,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private var selectedRemoteTargetID: UInt32?
     private var pendingBoundaryToken: UInt64?
     private var activeBoundaryWatch: PreparedBoundaryWatch?
+    private var boundaryReturnIntentActive = false
     private var boundaryTokenCounter: UInt64 = 0
 
     @MainActor
@@ -178,6 +179,7 @@ final class ControlHandoffController: @unchecked Sendable {
             controlEpoch &+= 1
             activeSuppressionGeneration = nil
             pendingBoundaryToken = nil
+            boundaryReturnIntentActive = false
             let activeWatch = activeBoundaryWatch
             activeBoundaryWatch = nil
             if let activeWatch {
@@ -227,6 +229,7 @@ final class ControlHandoffController: @unchecked Sendable {
 
         let active: PreparedBoundaryWatch? = lifecycleLock.withLock {
             pendingBoundaryToken = nil
+            boundaryReturnIntentActive = false
             let value = activeBoundaryWatch
             activeBoundaryWatch = nil
             return value
@@ -244,8 +247,10 @@ final class ControlHandoffController: @unchecked Sendable {
         switch signal {
         case let .reached(token, targetID, edge):
             let active = lifecycleLock.withLock { activeBoundaryWatch }
+            let returnIntentActive = lifecycleLock.withLock { boundaryReturnIntentActive }
             guard let active,
                   active.mode == .compositor,
+                  returnIntentActive,
                   active.controlToken == token,
                   active.targetID == targetID,
                   selectedRemoteTargetID == targetID,
@@ -287,6 +292,7 @@ final class ControlHandoffController: @unchecked Sendable {
     ///   genuine remote failure (dropping an ordered button boundary can
     ///   strand remote button state).
     private func enqueue(_ event: PointerEvent) {
+        observeBoundaryReturnIntent(event)
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled) else { return nil }
             let epoch = controlEpoch
@@ -304,6 +310,7 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     private func enqueue(_ event: PointerEvent, suppressionGeneration: UInt64) {
+        observeBoundaryReturnIntent(event)
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled, activeSuppressionGeneration == suppressionGeneration else { return nil }
             let epoch = controlEpoch
@@ -470,6 +477,7 @@ final class ControlHandoffController: @unchecked Sendable {
                 controlEpoch &+= 1
                 activeSuppressionGeneration = nil
                 pendingBoundaryToken = nil
+                boundaryReturnIntentActive = false
                 let value = activeBoundaryWatch
                 activeBoundaryWatch = nil
                 return value
@@ -492,6 +500,7 @@ final class ControlHandoffController: @unchecked Sendable {
             if boundaryTokenCounter == 0 { boundaryTokenCounter &+= 1 }
             let token = boundaryTokenCounter
             pendingBoundaryToken = token
+            boundaryReturnIntentActive = false
             return (token, targetID)
         }
 
@@ -529,6 +538,7 @@ final class ControlHandoffController: @unchecked Sendable {
             }
             pendingBoundaryToken = nil
             activeBoundaryWatch = prepared
+            boundaryReturnIntentActive = false
             return true
         }
 
@@ -563,6 +573,20 @@ final class ControlHandoffController: @unchecked Sendable {
         guard stillPending else { return }
         Diagnostics.log("boundary watch preparation failed reason=\(reason)")
         switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
+    private func observeBoundaryReturnIntent(_ event: PointerEvent) {
+        guard case let .move(dx, dy) = event.kind else { return }
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: switchMachine.entryEdge,
+            dx: CGFloat(dx),
+            dy: CGFloat(dy)
+        )
+        guard directed != 0 else { return }
+        lifecycleLock.withLock {
+            guard activeBoundaryWatch?.mode == .compositor else { return }
+            boundaryReturnIntentActive = directed < 0
+        }
     }
 
     private func cancelBoundaryPreparationIfMovingAway(dx: Int32, dy: Int32) {
