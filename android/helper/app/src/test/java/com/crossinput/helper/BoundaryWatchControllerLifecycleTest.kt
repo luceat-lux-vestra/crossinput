@@ -81,6 +81,37 @@ class BoundaryWatchControllerLifecycleTest {
     }
 
     @Test
+    fun backendFailoverInvalidatesActiveCompositorWatchImmediately() {
+        val output = ByteArrayOutputStream()
+        val writer = WriterLock(FrameWriter(output))
+        val controller = BoundaryWatchController(writer, Logger(writer)) {
+            FixedOracle()
+        }
+
+        val started = controller.start(
+            token = 91L,
+            displayId = 2,
+            layerStack = 9,
+            edge = BoundaryWatchController.EDGE_RIGHT,
+            authority = PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertNull(started.errorCode)
+
+        controller.onPointerAuthorityObserved(PointerBoundaryAuthority.DELIVERED_COORDINATES)
+
+        val frame = FrameReader(ByteArrayInputStream(output.toByteArray())).readFrame()
+        requireNotNull(frame)
+        assertEquals(Protocol.TYPE_BOUNDARY_WATCH_ERROR, frame.type)
+        val payload = ByteBuffer.wrap(frame.payload).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(91L, payload.long)
+        assertEquals(
+            BoundaryWatchController.ERROR_BACKEND_CHANGED,
+            payload.get().toInt() and 0xFF,
+        )
+        controller.close()
+    }
+
+    @Test
     fun unrelatedDisplayChangeDoesNotPoisonSelectedDisplayGeneration() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
