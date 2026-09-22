@@ -67,24 +67,27 @@ class BoundaryPlateauTrackerTest {
     }
 
     @Test
-    fun backwardObservationResetsMovementProofWindow() {
+    fun backwardObservationKeepsHighWatermarkAndRecordsInteriorPlateau() {
         val tracker = BoundaryPlateauTracker(
             requiredSamples = 3,
             minimumDurationNanos = 0,
-            minimumPlateauSeparation = 0,
+            minimumPlateauSeparation = 3,
         )
         tracker.reset(100.0)
 
         assertFalse(tracker.observe(110.0, 0))
         assertFalse(tracker.observe(110.0, 1))
-        assertFalse(tracker.observe(90.0, 2))
+        assertFalse(tracker.observe(110.0, 2))
 
         assertFalse(tracker.observe(90.0, 3))
         assertFalse(tracker.observe(90.0, 4))
-        assertFalse(tracker.observe(90.0, 5))
+        assertFalse(tracker.observe(100.0, 5))
 
-        assertFalse(tracker.observe(100.0, 6))
-        assertFalse(tracker.observe(100.0, 7))
-        assertTrue(tracker.observe(100.0, 8))
+        assertFalse(tracker.observe(110.0, 6))
+        assertFalse(tracker.observe(110.0, 7))
+        assertFalse(tracker.observe(110.0, 8))
+        assertFalse(tracker.observe(110.0, 9))
+        assertFalse(tracker.observe(110.0, 10))
+        assertTrue(tracker.observe(110.0, 11))
     }
 }
