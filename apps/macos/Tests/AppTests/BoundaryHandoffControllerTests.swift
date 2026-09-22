@@ -38,6 +38,7 @@ final class BoundaryHandoffControllerTests: XCTestCase {
     func testDuplicateBoundaryConfirmationIsSingleShot() async {
         let fixture = makeFixture()
         await enterRemote(fixture)
+        await activateReturnIntent(fixture)
         let token = fixture.watch.latestToken
 
         fixture.controller.handleBoundarySignal(.reached(
@@ -64,6 +65,7 @@ final class BoundaryHandoffControllerTests: XCTestCase {
     func testStaleBoundaryTokenIsIgnored() async {
         let fixture = makeFixture()
         await enterRemote(fixture)
+        await activateReturnIntent(fixture)
         let activeToken = fixture.watch.latestToken
 
         fixture.controller.handleBoundarySignal(.reached(
@@ -75,6 +77,29 @@ final class BoundaryHandoffControllerTests: XCTestCase {
         await settle()
 
         XCTAssertEqual(fixture.machine.state, .remoteActive)
+        XCTAssertTrue(fixture.controller.capture.isSuppressed)
+    }
+
+    func testBoundaryConfirmationAfterDirectionReversalIsIgnored() async {
+        let fixture = makeFixture()
+        await enterRemote(fixture)
+
+        await activateReturnIntent(fixture)
+        fixture.controller.capture.onPointerEvent?(PointerEvent(.move(dx: 40, dy: 0)))
+        fixture.sender.waitForDrain()
+        fixture.machine.flushCallbacks()
+        await settle()
+
+        fixture.controller.handleBoundarySignal(.reached(
+            controlToken: fixture.watch.latestToken,
+            targetID: 2,
+            edge: .left
+        ))
+        fixture.machine.flushCallbacks()
+        await settle()
+
+        XCTAssertEqual(fixture.machine.state, .remoteActive,
+                       "confirmation from a superseded return-intent window must be ignored")
         XCTAssertTrue(fixture.controller.capture.isSuppressed)
     }
 
@@ -183,6 +208,14 @@ final class BoundaryHandoffControllerTests: XCTestCase {
         machine.activate()
         controller.updateRemoteTarget(2)
         return Fixture(sender: sender, controller: controller, machine: machine, watch: watch)
+    }
+
+    private func activateReturnIntent(_ fixture: Fixture) async {
+        fixture.controller.capture.onPointerEvent?(PointerEvent(.move(dx: -40, dy: 0)))
+        fixture.sender.waitForDrain()
+        fixture.machine.flushCallbacks()
+        await settle()
+        XCTAssertEqual(fixture.machine.state, .remoteActive)
     }
 
     private func enterRemote(_ fixture: Fixture) async {
