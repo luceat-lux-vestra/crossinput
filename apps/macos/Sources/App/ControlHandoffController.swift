@@ -372,7 +372,12 @@ final class ControlHandoffController: @unchecked Sendable {
             // the helper's display-bound clamp reported zero accepted
             // movement; inward movement only counts what was accepted.
             let mode = lifecycleLock.withLock { activeBoundaryWatch?.mode }
-            if mode != .compositor {
+            if mode == .compositor {
+                confirmBoundaryReturnIntent(
+                    requestedDx: requestedDx,
+                    requestedDy: requestedDy
+                )
+            } else {
                 switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
                                            requestedDy: CGFloat(requestedDy),
                                            deliveredDx: CGFloat(deliveredDx),
@@ -575,12 +580,28 @@ final class ControlHandoffController: @unchecked Sendable {
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
+    /// Closes compositor return intent immediately on a captured inward move.
+    /// Opening the gate waits for a confirmed remote delivery so locally shed
+    /// return-direction samples cannot authorize a stale boundary event.
     private func observeBoundaryReturnIntent(_ event: PointerEvent) {
         guard case let .move(dx, dy) = event.kind else { return }
         let directed = EdgeSwitchStateMachine.androidDirectedDelta(
             entryEdge: switchMachine.entryEdge,
             dx: CGFloat(dx),
             dy: CGFloat(dy)
+        )
+        guard directed > 0 else { return }
+        lifecycleLock.withLock {
+            guard activeBoundaryWatch?.mode == .compositor else { return }
+            boundaryReturnIntentActive = false
+        }
+    }
+
+    private func confirmBoundaryReturnIntent(requestedDx: Int32, requestedDy: Int32) {
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: switchMachine.entryEdge,
+            dx: CGFloat(requestedDx),
+            dy: CGFloat(requestedDy)
         )
         guard directed != 0 else { return }
         lifecycleLock.withLock {
