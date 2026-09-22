@@ -500,7 +500,8 @@ final class ControlHandoffController: @unchecked Sendable {
     @MainActor
     private func beginBoundaryPreparation(edge: ScreenEdge) {
         let context: (token: UInt64, targetID: UInt32)? = lifecycleLock.withLock {
-            guard edgeSwitchEnabled, let targetID = selectedRemoteTargetID else { return nil }
+            guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled),
+                  let targetID = selectedRemoteTargetID else { return nil }
             boundaryTokenCounter &+= 1
             if boundaryTokenCounter == 0 { boundaryTokenCounter &+= 1 }
             let token = boundaryTokenCounter
@@ -536,7 +537,7 @@ final class ControlHandoffController: @unchecked Sendable {
     @MainActor
     private func completeBoundaryPreparation(_ prepared: PreparedBoundaryWatch) {
         let accepted = lifecycleLock.withLock {
-            guard edgeSwitchEnabled,
+            guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled),
                   pendingBoundaryToken == prepared.controlToken,
                   selectedRemoteTargetID == prepared.targetID else {
                 return false
