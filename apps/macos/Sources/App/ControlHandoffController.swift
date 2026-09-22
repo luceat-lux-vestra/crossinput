@@ -429,6 +429,7 @@ final class ControlHandoffController: @unchecked Sendable {
     /// cleared on every entry to remoteActive (issue #68).
     private var usableSessionLogged = false
 
+    @MainActor
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
@@ -508,9 +509,9 @@ final class ControlHandoffController: @unchecked Sendable {
                     targetID: context.targetID,
                     edge: returnEdge
                 )
-                await self.completeBoundaryPreparation(prepared)
+                self.completeBoundaryPreparation(prepared)
             } catch {
-                await self.failBoundaryPreparation(
+                self.failBoundaryPreparation(
                     token: context.token,
                     reason: String(describing: error)
                 )
