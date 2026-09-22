@@ -340,8 +340,11 @@ unsolicited boundary event only when the token, live Session, selected target,
 and current Control still match. A stale event is ignored.
 
 `BOUNDARY_WATCH_STOP` is fire-and-forget cleanup. Local host return never waits
-for it. The helper must also invalidate old watches on target/backend/session
-changes.
+for it. The helper must also invalidate old watches on target/backend/session changes.
+For the selected display, add/change/remove callbacks invalidate both an active
+watch and any preflight generation that has not yet produced READY. Backend
+authority is revalidated after every semantic pointer class, not only movement,
+so UHID -> InputManager failover cannot leave a compositor watch authoritative.
 
 The acquisition rule is fail-closed:
 
