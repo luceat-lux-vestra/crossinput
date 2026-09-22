@@ -263,14 +263,13 @@ private final class BoundaryHandoffSession: SessionConnection, @unchecked Sendab
                  timeout: TimeInterval?) async throws -> CxiFrame {
         switch type {
         case .pointerMoveRel:
-            let move = try Messages.decodePointerMoveRel(payload)
             return CxiFrame(
                 type: .pointerResult,
                 requestId: 1,
                 payload: Messages.pointerResult(
                     status: .delivered,
-                    deliveredDx: move.dx,
-                    deliveredDy: move.dy
+                    deliveredDx: 0,
+                    deliveredDy: 0
                 )
             )
         case .pointerButton, .pointerScroll:
