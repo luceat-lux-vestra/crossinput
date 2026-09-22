@@ -25,33 +25,53 @@ internal data class SurfaceFlingerSpritePosition(
 
 internal class BoundaryPlateauTracker(
     private val epsilon: Double = 0.25,
-    private val requiredSamples: Int = 5,
+    private val requiredSamples: Int = 8,
     private val minimumDurationNanos: Long = 80_000_000L,
+    private val minimumPlateauSeparation: Int = 3,
 ) {
     private var maxProgress: Double? = null
+    private var hasAdvanced = false
     private var plateauSamples = 0
     private var plateauStartedNanos = 0L
+    private var longestInteriorPlateauSamples = 1
 
     fun reset(progress: Double? = null) {
         maxProgress = progress
+        hasAdvanced = false
         plateauSamples = 0
         plateauStartedNanos = 0L
+        longestInteriorPlateauSamples = 1
     }
 
     fun observe(progress: Double, nowNanos: Long): Boolean {
         val currentMax = maxProgress
-        if (currentMax == null || progress > currentMax + epsilon) {
+        if (currentMax == null) {
             reset(progress)
             return false
         }
+
+        if (progress > currentMax + epsilon) {
+            if (hasAdvanced) {
+                longestInteriorPlateauSamples =
+                    maxOf(longestInteriorPlateauSamples, plateauSamples)
+            }
+            maxProgress = progress
+            hasAdvanced = true
+            plateauSamples = 1
+            plateauStartedNanos = nowNanos
+            return false
+        }
+
         if (progress < currentMax - epsilon) {
             reset(progress)
             return false
         }
 
-        if (plateauSamples == 0) plateauStartedNanos = nowNanos
+        if (!hasAdvanced) return false
+
         plateauSamples++
         return plateauSamples >= requiredSamples &&
+            plateauSamples >= longestInteriorPlateauSamples + minimumPlateauSeparation &&
             nowNanos - plateauStartedNanos >= minimumDurationNanos
     }
 }
