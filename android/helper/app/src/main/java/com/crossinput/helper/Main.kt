@@ -256,6 +256,13 @@ enum class KeyboardBackendMode(val token: String) {
     }
 }
 
+internal object BoundaryAuthorityAdmission {
+    fun allows(
+        compositorRequired: Boolean,
+        authority: PointerBoundaryAuthority,
+    ): Boolean = !compositorRequired || authority == PointerBoundaryAuthority.COMPOSITOR
+}
+
 /** Frame dispatch. All writes go through [WriterLock]. */
 class Controller(
     private val discovery: DisplayDiscovery,
@@ -399,16 +406,53 @@ class Controller(
             return
         }
 
+        val authority = pointer.boundaryAuthority()
+        val compositorRequired = pointer.requiresCompositorBoundaryAuthority()
+        log.info(
+            "Main",
+            "boundary watch start target=${request.displayId} " +
+                "authority=${authority.name.lowercase()} compositorRequired=$compositorRequired",
+        )
+
+        if (!BoundaryAuthorityAdmission.allows(compositorRequired, authority)) {
+            log.warn(
+                "Main",
+                "boundary watch rejected target=${request.displayId} " +
+                    "required=compositor authority=${authority.name.lowercase()}",
+            )
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(
+                        request.controlToken,
+                        BoundaryWatchController.ERROR_BACKEND_CHANGED,
+                    ),
+                )
+            }
+            return
+        }
+
         val result = boundaryWatch.start(
             token = request.controlToken,
             displayId = request.displayId,
             layerStack = display.layerStack,
             edge = request.edge,
-            authority = pointer.boundaryAuthority(),
+            authority = authority,
         )
         val error = result.errorCode
         writerLock.withLock {
             if (error == null) {
+                val mode = if (result.mode == BoundaryWatchController.MODE_COMPOSITOR) {
+                    "compositor"
+                } else {
+                    "delivered-coordinates"
+                }
+                log.info(
+                    "Main",
+                    "boundary watch ready target=${request.displayId} mode=$mode " +
+                        "layerStack=${result.layerStack}",
+                )
                 it.write(
                     Protocol.TYPE_BOUNDARY_WATCH_READY,
                     frame.requestId,
@@ -420,6 +464,10 @@ class Controller(
                     ),
                 )
             } else {
+                log.warn(
+                    "Main",
+                    "boundary watch preparation failed target=${request.displayId} code=$error",
+                )
                 it.write(
                     Protocol.TYPE_BOUNDARY_WATCH_ERROR,
                     frame.requestId,
