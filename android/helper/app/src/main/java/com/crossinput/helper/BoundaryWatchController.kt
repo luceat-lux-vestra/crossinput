@@ -198,6 +198,7 @@ class BoundaryWatchController internal constructor(
     private var watch: WatchState? = null
     private var workerRunning = false
     private var closed = false
+    private val displayGenerations = mutableMapOf<Int, Long>()
 
     fun start(
         token: Long,
@@ -210,9 +211,13 @@ class BoundaryWatchController internal constructor(
             return StartResult(MODE_DELIVERED_COORDINATES, layerStack, ERROR_TARGET_MISMATCH)
         }
 
-        synchronized(lock) {
+        val displayGeneration = synchronized(lock) {
+            if (closed) {
+                return StartResult(MODE_COMPOSITOR, layerStack, ERROR_ORACLE_UNAVAILABLE)
+            }
             watch = null
             workerRunning = false
+            displayGenerations[displayId] ?: 0L
         }
 
         return when (authority) {
@@ -250,6 +255,9 @@ class BoundaryWatchController internal constructor(
                     if (closed) {
                         return StartResult(MODE_COMPOSITOR, layerStack, ERROR_ORACLE_UNAVAILABLE)
                     }
+                    if ((displayGenerations[displayId] ?: 0L) != displayGeneration) {
+                        return StartResult(MODE_COMPOSITOR, layerStack, ERROR_TARGET_MISMATCH)
+                    }
                     watch = state
                 }
                 StartResult(MODE_COMPOSITOR, layerStack)
@@ -264,7 +272,28 @@ class BoundaryWatchController internal constructor(
     }
 
     fun invalidateForTargetChange() {
-        synchronized(lock) { watch = null }
+        val invalidated = synchronized(lock) {
+            val state = watch ?: return@synchronized null
+            bumpDisplayGenerationLocked(state.displayId)
+            watch = null
+            workerRunning = false
+            state.token
+        }
+        invalidated?.let { emitError(it, ERROR_TARGET_MISMATCH) }
+    }
+
+    fun invalidateForDisplayChange(displayId: Int) {
+        val invalidated = synchronized(lock) {
+            bumpDisplayGenerationLocked(displayId)
+            val state = watch
+            if (state == null || state.displayId != displayId) {
+                return@synchronized null
+            }
+            watch = null
+            workerRunning = false
+            state.token
+        }
+        invalidated?.let { emitError(it, ERROR_TARGET_MISMATCH) }
     }
 
     fun onPointerMove(dx: Int, dy: Int, authority: PointerBoundaryAuthority) {
@@ -413,6 +442,10 @@ class BoundaryWatchController internal constructor(
             it.flush()
         }
         log.warn(TAG, "boundary watch failed code=$code")
+    }
+
+    private fun bumpDisplayGenerationLocked(displayId: Int) {
+        displayGenerations[displayId] = (displayGenerations[displayId] ?: 0L) + 1L
     }
 
     private fun progress(edge: Int, position: SurfaceFlingerSpritePosition): Double = when (edge) {
