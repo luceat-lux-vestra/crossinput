@@ -63,7 +63,12 @@ internal class BoundaryPlateauTracker(
         }
 
         if (progress < currentMax - epsilon) {
-            reset(progress)
+            if (hasAdvanced) {
+                longestInteriorPlateauSamples =
+                    maxOf(longestInteriorPlateauSamples, plateauSamples)
+            }
+            plateauSamples = 0
+            plateauStartedNanos = 0L
             return false
         }
 
