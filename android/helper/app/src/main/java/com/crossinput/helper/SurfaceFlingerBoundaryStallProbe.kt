@@ -92,7 +92,7 @@ object SurfaceFlingerBoundaryStallProbe {
     private const val DEVICE_SETTLE_MS = 500L
 
     private const val POSITION_EPSILON = 0.25
-    private const val MIN_MOVEMENT_PX = 100.0
+    private const val MIN_MOVEMENT_PX = 5.0
     private const val MIN_FINAL_PLATEAU_SAMPLES = 8
     private const val MIN_PLATEAU_SEPARATION = 3
     private const val MIN_RECOVERY_PX = 50.0

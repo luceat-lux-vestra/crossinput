@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APK="$ROOT/android/helper/app/build/outputs/apk/debug/app-debug.apk"
 REMOTE_APK="/data/local/tmp/crossinput-sf-stall-probe.apk"
-RIGHT_STEPS="${1:-600}"
+MAX_RIGHT_SAMPLES="${1:-600}"
 SETTLE_MS="${2:-20}"
 
 if [ -n "${DEVICE:-}" ]; then
@@ -40,6 +40,6 @@ echo "device: $DEVICE"
 echo "Do not move the Mac/DeX pointer until the probe finishes."
 say "Do not move the pointer. The boundary probe will move it automatically." 2>/dev/null || true
 
-adb -s "$DEVICE" shell     "app_process -cp '$REMOTE_APK' / com.crossinput.helper.SurfaceFlingerBoundaryStallProbe '$RIGHT_STEPS' '$SETTLE_MS'"
+adb -s "$DEVICE" shell     "app_process -cp '$REMOTE_APK' / com.crossinput.helper.SurfaceFlingerBoundaryStallProbe '$MAX_RIGHT_SAMPLES' '$SETTLE_MS'"
 
 say "Boundary probe finished." 2>/dev/null || true
