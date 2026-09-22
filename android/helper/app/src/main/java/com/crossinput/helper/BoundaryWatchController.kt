@@ -296,6 +296,19 @@ class BoundaryWatchController internal constructor(
         invalidated?.let { emitError(it, ERROR_TARGET_MISMATCH) }
     }
 
+    fun onPointerAuthorityObserved(authority: PointerBoundaryAuthority) {
+        val invalidated = synchronized(lock) {
+            val state = watch ?: return@synchronized null
+            if (authority == PointerBoundaryAuthority.COMPOSITOR) {
+                return@synchronized null
+            }
+            watch = null
+            workerRunning = false
+            state.token
+        }
+        invalidated?.let { emitError(it, ERROR_BACKEND_CHANGED) }
+    }
+
     fun onPointerMove(dx: Int, dy: Int, authority: PointerBoundaryAuthority) {
         var runtimeError: Pair<Long, Int>? = null
         var shouldSchedule = false
