@@ -167,7 +167,7 @@ internal class SurfaceFlingerSpriteOracle : BoundarySpriteOracle {
  * SurfaceFlinger only while fresh return-direction pointer intent exists.
  * Semantic pointer delivery never waits for the sampler.
  */
-class BoundaryWatchController(
+class BoundaryWatchController internal constructor(
     private val writer: WriterLock,
     private val log: Logger,
     private val oracleFactory: () -> BoundarySpriteOracle = { SurfaceFlingerSpriteOracle() },
