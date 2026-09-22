@@ -53,7 +53,12 @@ The compositor watcher:
 - resets on inward movement;
 - emits at most one boundary event per Control token; and
 - fails closed on target/backend change, parser ambiguity, Binder/dump failure,
-  or stale lifecycle state.
+  or stale lifecycle state;
+- invalidates both active and in-flight preparation state on selected-display
+  add/change/remove generation changes; and
+- revalidates backend authority after every semantic pointer class
+  (move/button/scroll), so UHID -> InputManager failover cannot leave stale
+  compositor authority alive.
 
 Runtime watcher loss while remote control is active causes immediate local
 return. Local return never waits for remote STOP/cleanup.
@@ -102,7 +107,9 @@ Required implementation proof:
 - stale Session/Target/Control-token events cannot return a replacement Control;
 - preparation failure never installs suppression;
 - pointer delivery remains non-blocking while the watcher samples;
-- UHID -> InputManager failover invalidates compositor authority;
+- UHID -> InputManager failover from movement, button, or scroll invalidates
+  compositor authority immediately;
+- selected-display add/change/remove invalidates active/preflighting watch state;
 - inward movement resets a plateau candidate;
 - runtime oracle failure returns local;
 - exact final PR HEAD reproduces full DeX edge access and returns only at the
