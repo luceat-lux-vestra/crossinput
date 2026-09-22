@@ -50,7 +50,10 @@ The compositor watcher:
 - never blocks semantic pointer delivery;
 - counts a plateau sample only when new return-direction input arrived since the
   previous sample;
-- resets on inward movement;
+- advances an internal return-intent generation on direction reversal so an
+  in-flight sample from the superseded intent window cannot confirm;
+- requires macOS to accept a compositor confirmation only while current
+  return-direction intent is still active;
 - emits at most one boundary event per Control token; and
 - fails closed on target/backend change, parser ambiguity, Binder/dump failure,
   or stale lifecycle state;
@@ -110,7 +113,8 @@ Required implementation proof:
 - UHID -> InputManager failover from movement, button, or scroll invalidates
   compositor authority immediately;
 - selected-display add/change/remove invalidates active/preflighting watch state;
-- inward movement resets a plateau candidate;
+- direction reversal invalidates an in-flight sample and a late confirmation
+  is ignored until fresh return intent exists;
 - runtime oracle failure returns local;
 - exact final PR HEAD reproduces full DeX edge access and returns only at the
   visible boundary with acceptable perceived latency.
