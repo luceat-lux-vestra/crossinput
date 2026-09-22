@@ -331,6 +331,10 @@ with either:
 For compositor mode the helper observes the selected target layer asynchronously.
 It emits `BOUNDARY_REACHED` with requestId 0 only after sustained
 return-direction input is followed by a distinguishable compositor clamp.
+Direction reversal invalidates the current internal sampling generation, so an
+in-flight sample from the superseded return-intent window cannot confirm.
+macOS additionally accepts a confirmation only while current return-direction
+intent remains active.
 `BOUNDARY_WATCH_ERROR` with requestId 0 reports runtime loss of that safety
 capability. Error codes are `1=TARGET_MISMATCH, 2=ORACLE_UNAVAILABLE,
 3=BACKEND_CHANGED, 4=OBSERVATION_FAILED`.
