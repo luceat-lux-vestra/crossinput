@@ -65,8 +65,11 @@ object Main {
         val inputManagerPointer = InputManagerPointerInjector(log, context)
         val uhidPointer = UhidPointerInjector(log, hid)
         val pointer = PointerDispatcher(log, uhidPointer, inputManagerPointer, pointerMode)
-        val discovery = DisplayDiscovery(context, writerLock, log, pointer::refreshMetrics)
         val boundaryWatch = BoundaryWatchController(writerLock, log)
+        val discovery = DisplayDiscovery(context, writerLock, log) { displayId ->
+            pointer.refreshMetrics(displayId)
+            boundaryWatch.invalidateForDisplayChange(displayId)
+        }
         val keyboard = KeyboardBackend(log, context, hid, mode)
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { mainLooper.quitSafely() },
