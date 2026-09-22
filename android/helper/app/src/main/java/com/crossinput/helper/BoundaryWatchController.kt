@@ -74,6 +74,7 @@ internal class BoundaryPlateauTracker(
 
         if (!hasAdvanced) return false
 
+        if (plateauSamples == 0) plateauStartedNanos = nowNanos
         plateauSamples++
         return plateauSamples >= requiredSamples &&
             plateauSamples >= longestInteriorPlateauSamples + minimumPlateauSeparation &&
