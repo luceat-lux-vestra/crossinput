@@ -35,6 +35,32 @@ final class BoundaryHandoffControllerTests: XCTestCase {
         XCTAssertFalse(fixture.controller.capture.isSuppressed)
     }
 
+    func testDuplicateBoundaryConfirmationIsSingleShot() async {
+        let fixture = makeFixture()
+        await enterRemote(fixture)
+        let token = fixture.watch.latestToken
+
+        fixture.controller.handleBoundarySignal(.reached(
+            controlToken: token,
+            targetID: 2,
+            edge: .left
+        ))
+        fixture.machine.flushCallbacks()
+        await settle()
+        XCTAssertEqual(fixture.machine.state, .localActive)
+
+        fixture.controller.handleBoundarySignal(.reached(
+            controlToken: token,
+            targetID: 2,
+            edge: .left
+        ))
+        fixture.machine.flushCallbacks()
+        await settle()
+
+        XCTAssertEqual(fixture.machine.state, .localActive)
+        XCTAssertEqual(fixture.watch.stopCount, 1)
+    }
+
     func testStaleBoundaryTokenIsIgnored() async {
         let fixture = makeFixture()
         await enterRemote(fixture)
