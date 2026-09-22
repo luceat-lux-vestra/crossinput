@@ -93,9 +93,10 @@ class PointerDispatcher(
     @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
+        val systemRouteCandidate =
+            mode == PointerBackendMode.AUTO && isSystemRouteCandidate(display)
         compositorBoundaryRequired =
-            mode == PointerBackendMode.UHID ||
-                (mode == PointerBackendMode.AUTO && isSystemRouteCandidate(display))
+            mode == PointerBackendMode.UHID || systemRouteCandidate
         if (mode == PointerBackendMode.UHID) {
             // Forced UHID deliberately trades away explicit target routing.
             // Warn loudly and drive the system-routed device anyway instead of
@@ -117,10 +118,7 @@ class PointerDispatcher(
         // InputReader pipeline (the visible pointer sprite follows the UHID
         // device), so prefer UHID there. FLAG_DESKTOP is a heuristic, not a
         // guarantee; every other target keeps explicit InputManager targeting.
-        if (mode == PointerBackendMode.AUTO &&
-            isSystemRouteCandidate(display) &&
-            uhid.selectSystemRoute()
-        ) {
+        if (systemRouteCandidate && uhid.selectSystemRoute()) {
             active = uhid
             log.info(
                 TAG,
