@@ -38,10 +38,8 @@ class BoundaryPlateauTrackerTest {
         val tracker = BoundaryPlateauTracker()
         tracker.reset(100.0)
 
-        val sevenSampleTimes = listOf(0L, 20_000_000L, 40_000_000L, 60_000_000L, 80_000_000L, 100_000_000L, 120_000_000L)
-        sevenSampleTimes.forEachIndexed { index, now ->
-            val progress = if (index == 0) 110.0 else 110.0
-            assertFalse(tracker.observe(progress, now))
+        repeat(7) { index ->
+            assertFalse(tracker.observe(110.0, index * 20_000_000L))
         }
 
         assertTrue(tracker.observe(110.0, 140_000_000L))
