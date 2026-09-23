@@ -1,7 +1,7 @@
 name: Failure classification
 
 on:
-  workflow_run: # trusted reporter only; never checkout/execute PR code or artifacts
+  workflow_run: # zizmor: ignore[dangerous-triggers] trusted reporter only; never checkout/execute PR code or artifacts
     workflows:
       - Dependency Review
       - CodeQL
@@ -9,7 +9,8 @@ on:
       - Failure triage
     types: [completed]
 
-permissions: {}
+permissions:
+  contents: read # Explicit read-only mapping required by CrossInput's bounded workflow parser.
 
 concurrency:
   group: failure-classification-${{ github.event.workflow_run.head_sha }}
@@ -18,8 +19,8 @@ concurrency:
 jobs:
   classify:
     permissions:
-      actions: read
-      pull-requests: write
+      actions: read # Read workflow metadata and bounded logs for exact-HEAD reconstruction.
+      pull-requests: write # Upsert the single sticky classification report on the PR conversation.
     if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target'
     runs-on: ubuntu-latest
     timeout-minutes: 5
