@@ -28,9 +28,9 @@
     },
     {
       "context": "failure-triage",
-      "workflow": "failure-triage.yml",
+      "workflow": "failure-declaration.yml",
       "job": "failure-triage",
-      "trigger": "pull_request_target"
+      "trigger": "pull_request"
     },
     {
       "context": "Dependency Review",
@@ -89,6 +89,9 @@
     ],
     "hardening-audit.yml": [
       "issues"
+    ],
+    "failure-classification.yml": [
+      "pull-requests"
     ]
   },
   "staged_status_checks": [],

@@ -1,0 +1,36 @@
+name: Failure classification
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] trusted reporter only; never checkout/execute PR code or artifacts
+    workflows:
+      - Dependency Review
+      - CodeQL
+      - CI
+      - Failure triage
+    types: [completed]
+
+permissions:
+  contents: read # Explicit read-only mapping required by CrossInput's bounded workflow parser.
+
+concurrency:
+  group: failure-classification-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    permissions:
+      actions: read # Read workflow metadata and bounded logs for exact-HEAD reconstruction.
+      pull-requests: write # Upsert the single sticky classification report on the PR conversation.
+    if: github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Rebuild exact-HEAD failure classification report
+        uses: luceat-lux-vestra/.github/actions/failure-classifier@1845ae0daeac8b899f92040d089a31b1c88f257a
+        with:
+          github-token: ${{ github.token }}
+          tracked-workflows: |
+            Dependency Review
+            CodeQL
+            CI
+            Failure triage
