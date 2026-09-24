@@ -404,7 +404,9 @@ final class SuppressionLifecycleTests: XCTestCase {
             )
         )
         XCTAssertTrue(
-            capture.isExternalPointerOwnerActive(generation: generation)
+            capture.isExternalPointerOwnerActive(
+                generation: remoteGeneration
+            )
         )
 
         let remoteKeyDown = CGEvent(
@@ -653,6 +655,92 @@ final class SuppressionLifecycleTests: XCTestCase {
         capture.release(
             reason: .captureStopped,
             generation: replacement
+        )
+    }
+
+    func testStaleExternalKeyboardCallbackCannotSeedReplacementPhysicalState() {
+        let enteredAdmission = DispatchSemaphore(value: 0)
+        let continueAdmission = DispatchSemaphore(value: 0)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            beforeSuppressedKeyboardAdmission: {
+                enteredAdmission.signal()
+                _ = continueAdmission.wait(timeout: .now() + 2)
+            }
+        )
+        let activity = ExternalOwnerActivityObservation()
+        capture.onExternalPointerOwnerActivity = {
+            generation, kind in
+            activity.append(generation, kind)
+            capture.release(
+                reason: .externalControl,
+                generation: generation
+            )
+        }
+
+        let first = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        XCTAssertTrue(
+            capture.activateExternalPointerOwner(generation: first)
+        )
+
+        let staleKeyDown = TestEventBox(
+            CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: 0,
+                keyDown: true
+            )!
+        )
+        let staleFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = capture.handleForTesting(
+                type: .keyDown,
+                event: staleKeyDown.event
+            )
+            staleFinished.signal()
+        }
+
+        XCTAssertEqual(
+            enteredAdmission.wait(timeout: .now() + 1),
+            .success
+        )
+        capture.release(reason: .normalReturn, generation: first)
+
+        let replacement = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        XCTAssertTrue(
+            capture.activateExternalPointerOwner(
+                generation: replacement
+            )
+        )
+
+        continueAdmission.signal()
+        XCTAssertEqual(
+            staleFinished.wait(timeout: .now() + 1),
+            .success
+        )
+        XCTAssertTrue(activity.values.isEmpty)
+
+        // The stale key-down must not seed the replacement generation's
+        // physical-key provenance. Its key-up therefore belongs to macOS and
+        // must fail the replacement epoch local.
+        continueAdmission.signal()
+        let keyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: false
+        )!
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .keyUp, event: keyUp)
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(activity.values.count, 1)
+        XCTAssertEqual(activity.values.first?.0, replacement)
+        XCTAssertEqual(
+            activity.values.first?.1,
+            .incompatibleLocalInput
         )
     }
 
