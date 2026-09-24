@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -21,10 +22,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Swift Test
+      - name: Swift Build
         run: |
           cd apps/macos
           swift build
+
+      - name: Swift Test
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        run: |
+          cd apps/macos
           swift test
 
   android-helper:
@@ -50,11 +56,18 @@ jobs:
         # Fails closed: missing scanner or undetected planted violation breaks
         # the job (the previous inline `rg` call false-greened without ripgrep).
         run: scripts/check-log-guard.sh
-      - name: Gradle Test
+      - name: Gradle Build
         run: |
           cd android/helper
           chmod +x gradlew
-          ./gradlew test assembleDebug --console=plain
+          ./gradlew assembleDebug --console=plain
+
+      - name: Gradle Test
+        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        run: |
+          cd android/helper
+          chmod +x gradlew
+          ./gradlew test --console=plain
       - name: Verify Java 25 / Android 17 toolchain
         run: scripts/check-android-toolchain.sh
 
