@@ -312,6 +312,34 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         }
     }
 
+    func testCoordinatedBoundaryReturnStopsAtReturningUntilCompleted() {
+        let machine = makeRemoteActive(edge: .left)
+
+        // First event is exempt from return.
+        XCTAssertFalse(
+            machine.beginBoundaryReturnIfNeeded(
+                requestedDx: 1,
+                requestedDy: 0,
+                deliveredDx: 1,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        XCTAssertTrue(
+            machine.beginBoundaryReturnIfNeeded(
+                requestedDx: 120,
+                requestedDy: 0,
+                deliveredDx: 120,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertEqual(machine.state, .returning)
+
+        machine.completeReturn(reason: .boundaryCrossed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
     func testNoAutomaticBoundaryReturnWithoutAuthority() {
         let machine = makeRemoteActive(edge: .left)
         machine.setAutomaticReturnAuthority(.none)

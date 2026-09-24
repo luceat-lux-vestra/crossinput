@@ -276,15 +276,49 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// virtual position, state, or transition callbacks.
     public func pointerMoved(requestedDx: CGFloat, requestedDy: CGFloat,
                              deliveredDx: CGFloat, deliveredDy: CGFloat) {
+        if beginBoundaryReturnIfNeeded(
+            requestedDx: requestedDx,
+            requestedDy: requestedDy,
+            deliveredDx: deliveredDx,
+            deliveredDy: deliveredDy
+        ) {
+            completeReturn(reason: .boundaryCrossed)
+        }
+    }
+
+    /// Accounts one remote movement and, when the legacy movement authority
+    /// crosses its threshold, transitions only to `.returning`.
+    ///
+    /// The lifecycle owner uses this coordinated form so native host-pointer
+    /// ownership can be restored synchronously before `.localActive` is
+    /// published. The compatibility `pointerMoved` wrapper above completes
+    /// immediately for state-machine-only callers.
+    @discardableResult
+    public func beginBoundaryReturnIfNeeded(
+        requestedDx: CGFloat,
+        requestedDy: CGFloat,
+        deliveredDx: CGFloat,
+        deliveredDy: CGFloat
+    ) -> Bool {
         run {
-            guard stateStorage == .remoteActive else { return }
-            guard automaticReturnAuthority == .relativeMovement else { return }
+            guard stateStorage == .remoteActive else { return false }
+            guard automaticReturnAuthority == .relativeMovement else { return false }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
-            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else { return }
+            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else {
+                return false
+            }
             let edge = entryEdgeStorage
-            let requestedDelta = Self.androidDirectedDelta(entryEdge: edge, dx: requestedDx, dy: requestedDy)
-            let deliveredDelta = Self.androidDirectedDelta(entryEdge: edge, dx: deliveredDx, dy: deliveredDy)
+            let requestedDelta = Self.androidDirectedDelta(
+                entryEdge: edge,
+                dx: requestedDx,
+                dy: requestedDy
+            )
+            let deliveredDelta = Self.androidDirectedDelta(
+                entryEdge: edge,
+                dx: deliveredDx,
+                dy: deliveredDy
+            )
             // Issue #45: return-direction intent is credited in full even when
             // the helper's display-bound clamp absorbed all of it; inward
             // movement only ever advances by what was accepted.
@@ -306,14 +340,23 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
                     "edge pointerMoved entry=\(edge.rawValue) state=\(stateStorage.rawValue) "
                         + "movement=received first=\(first) "
                         + "boundaryClamped=\(requestedDelta < 0 && deliveredDelta != requestedDelta)"
-                    )
+                )
             }
             // The first event after entering never returns (issue #37); leftover
             // warp/synthetic deltas must not bounce the user out of the remote target.
-            guard !first else { return }
-            if position <= -returnHysteresis {
-                returnToMacOS(reason: .boundaryCrossed)
-            }
+            guard !first, position <= -returnHysteresis else { return false }
+
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            transition(to: .returning, reason: .boundaryCrossed)
+            return true
+        }
+    }
+
+    public func completeReturn(reason: TransitionReason) {
+        run {
+            guard stateStorage == .returning else { return }
+            transition(to: .localActive, reason: reason)
         }
     }
 
@@ -346,21 +389,22 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// mutations originate from different threads: transitions are stamped on
     /// the state queue, so their callback order on the FIFO callback queue
     /// matches the sequence numbers.
-    private func run(_ body: () -> Void) {
+    private func run<T>(_ body: () -> T) -> T {
         queue.sync {
-            body()
+            let result = body()
             let transitions = pendingTransitions
             pendingTransitions = []
 
-            guard !transitions.isEmpty else { return }
-
-            // Enqueue while the state queue is still held.
-            // This guarantees callback enqueue order matches sequence order.
-            callbackQueue.async { [self] in
-                for transition in transitions {
-                    onStateChange?(transition)
+            if !transitions.isEmpty {
+                // Enqueue while the state queue is still held.
+                // This guarantees callback enqueue order matches sequence order.
+                callbackQueue.async { [self] in
+                    for transition in transitions {
+                        onStateChange?(transition)
+                    }
                 }
             }
+            return result
         }
     }
 

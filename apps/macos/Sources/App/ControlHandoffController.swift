@@ -736,25 +736,23 @@ final class ControlHandoffController: @unchecked Sendable {
             // the fail-safe watchdog from expiring during long sessions.
             capture.pokeWatchdog()
             logUsableSessionOnce()
-            // The handoff position is credited through the machine's intent
-            // rule (issue #45): return-direction movement counts even when
-            // the helper's display-bound clamp reported zero accepted
-            // movement; inward movement only counts what was accepted.
-            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
-                                       requestedDy: CGFloat(requestedDy),
-                                       deliveredDx: CGFloat(deliveredDx),
-                                       deliveredDy: CGFloat(deliveredDy))
-            if switchMachine.state != .remoteActive {
-                // Boundary return is decided synchronously by the machine.
-                // Do not wait for its async transition callback to restore
-                // native host pointer and keyboard ownership.
+            // A normal boundary decision may move the machine to `.returning`
+            // but must not publish `.localActive` until native host ownership
+            // has actually been restored.
+            let returnStarted = switchMachine.beginBoundaryReturnIfNeeded(
+                requestedDx: CGFloat(requestedDx),
+                requestedDy: CGFloat(requestedDy),
+                deliveredDx: CGFloat(deliveredDx),
+                deliveredDy: CGFloat(deliveredDy)
+            )
+            if returnStarted {
                 releaseHostOwnershipAndCapture(reason: .normalReturn)
+                sender.cancelPendingPointerEvents()
+                switchMachine.completeReturn(reason: .boundaryCrossed)
             }
-        case let .partiallyDeliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
-            switchMachine.pointerMoved(requestedDx: CGFloat(requestedDx),
-                                       requestedDy: CGFloat(requestedDy),
-                                       deliveredDx: CGFloat(deliveredDx),
-                                       deliveredDy: CGFloat(deliveredDy))
+        case .partiallyDeliveredMovement:
+            // Partial delivery is a remote-availability failure, not a valid
+            // normal-boundary observation. Fail local before publishing state.
             releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
             sender.cancelPendingPointerEvents()
             switchMachine.forceReturn(reason: .remoteUnavailable)
