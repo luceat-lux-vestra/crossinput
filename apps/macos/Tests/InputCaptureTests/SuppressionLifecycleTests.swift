@@ -171,7 +171,7 @@ final class SuppressionLifecycleTests: XCTestCase {
         )!
         chord.flags = [.maskCommand, .maskShift]
 
-        XCTAssertNil(
+        XCTAssertNotNil(
             capture.handleForTesting(type: .keyDown, event: chord)
         )
         XCTAssertEqual(observation.resetCount, 1)

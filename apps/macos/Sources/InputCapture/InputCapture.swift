@@ -1031,7 +1031,14 @@ public final class InputCapture: @unchecked Sendable {
            event.flags.intersection(Self.emergencyModifierMask) == Self.emergencyModifiers {
             Diagnostics.log("emergency shortcut detected")
             requestEmergencyReturn(expectedGeneration: suppressionGeneration)
-            return nil
+            // While remote-owned the emergency chord is control-plane input
+            // and must not also reach the remote/local application. If the
+            // capture already appears local, still force lifecycle cleanup but
+            // preserve the existing local-input contract by passing it through.
+            if suppressionGeneration != nil {
+                return nil
+            }
+            return Unmanaged.passUnretained(event)
         }
 
         guard let suppressionGeneration else {
