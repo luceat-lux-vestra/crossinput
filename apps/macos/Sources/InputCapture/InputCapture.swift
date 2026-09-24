@@ -770,7 +770,18 @@ public final class InputCapture: @unchecked Sendable {
             )
             switch type {
             case .keyDown:
-                remotePhysicalKeysDown.insert(virtualKey)
+                let isRepeat =
+                    event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                if isRepeat {
+                    // A repeat without a DOWN admitted in this exact remote
+                    // generation proves the physical key was already held
+                    // locally before ownership crossed.
+                    guard remotePhysicalKeysDown.contains(virtualKey) else {
+                        return .localConflict
+                    }
+                } else {
+                    remotePhysicalKeysDown.insert(virtualKey)
+                }
                 return .accepted
             case .keyUp:
                 guard remotePhysicalKeysDown.remove(virtualKey) != nil else {

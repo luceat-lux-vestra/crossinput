@@ -353,6 +353,45 @@ final class SuppressionLifecycleTests: XCTestCase {
         )
     }
 
+    func testUnmatchedRemoteAutoRepeatFailsLocalAndPassesThrough() {
+        let capture = makeCapture()
+        let activityObservation = ExternalOwnerActivityObservation()
+        capture.onExternalPointerOwnerActivity = {
+            generation, activity in
+            activityObservation.append(generation, activity)
+            capture.release(
+                reason: .externalControl,
+                generation: generation
+            )
+        }
+
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        XCTAssertTrue(
+            capture.activateExternalPointerOwner(generation: generation)
+        )
+
+        let repeatDown = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        repeatDown.setIntegerValueField(
+            .keyboardEventAutorepeat,
+            value: 1
+        )
+
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .keyDown, event: repeatDown)
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(
+            activityObservation.values.map(\.1),
+            [.incompatibleLocalInput]
+        )
+    }
+
     func testExternalPointerOwnerKeepsKeyboardLocalUntilLeaseReady() {
         let capture = makeCapture()
         let keyObservation = KeyCleanupObservation()
@@ -417,6 +456,18 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertNil(
             capture.handleForTesting(type: .keyDown, event: remoteKeyDown)
         )
+        let remoteRepeat = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        remoteRepeat.setIntegerValueField(
+            .keyboardEventAutorepeat,
+            value: 1
+        )
+        XCTAssertNil(
+            capture.handleForTesting(type: .keyDown, event: remoteRepeat)
+        )
         let remoteKeyUp = CGEvent(
             keyboardEventSource: nil,
             virtualKey: 0,
@@ -425,10 +476,17 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertNil(
             capture.handleForTesting(type: .keyUp, event: remoteKeyUp)
         )
-        XCTAssertEqual(keyObservation.ordinary.map(\.key), [.a, .a])
+        XCTAssertEqual(
+            keyObservation.ordinary.map(\.key),
+            [.a, .a, .a]
+        )
         XCTAssertEqual(
             keyObservation.ordinary.map(\.transition),
-            [.down, .up]
+            [.down, .down, .up]
+        )
+        XCTAssertEqual(
+            keyObservation.ordinary.map(\.repeatCount),
+            [0, 1, 0]
         )
 
         capture.release(
