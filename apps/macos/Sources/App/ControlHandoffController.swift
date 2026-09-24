@@ -313,6 +313,12 @@ final class ControlHandoffController: @unchecked Sendable {
                 activity: activity
             )
         }
+        capture.onEmergencyReturnRequested = { [weak self] in
+            // This must bypass capture/state assumptions. The emergency chord
+            // is the last-resort local-control primitive and therefore asks
+            // the lifecycle owner to drop any current/pending host ownership.
+            self?.emergencyReturn()
+        }
         capture.onSuppressionReleased = { [weak self] reason, generation in
             guard let self else { return }
             // Close admissions synchronously for this exact capture epoch.

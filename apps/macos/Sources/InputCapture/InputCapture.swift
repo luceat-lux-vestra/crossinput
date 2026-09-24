@@ -178,6 +178,10 @@ public final class InputCapture: @unchecked Sendable {
     /// The second parameter is the suppression generation that was active when suppress() was called.
     /// Stale callbacks (older generation) must be discarded by the caller.
     public var onSuppressionReleased: (@Sendable (SuppressionReleaseReason, UInt64) -> Void)?
+    /// Independent fail-local control plane for the physical emergency chord.
+    /// The lifecycle owner must release any host-pointer lease even when
+    /// suppression/state bookkeeping already (incorrectly) appears local.
+    public var onEmergencyReturnRequested: (@Sendable () -> Void)?
 
     private let tapQueue = DispatchQueue(label: "crossinput.capturertap", qos: .userInteractive)
     private var tap: CFMachPort?
@@ -1021,16 +1025,17 @@ public final class InputCapture: @unchecked Sendable {
         externalPointerOwner: Bool,
         remoteAdmissionReady: Bool
     ) -> Unmanaged<CGEvent>? {
-        guard let suppressionGeneration else {
-            return Unmanaged.passUnretained(event)
-        }
         let virtualKey = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         if type == .keyDown,
            virtualKey == Self.emergencyKeyCode,
            event.flags.intersection(Self.emergencyModifierMask) == Self.emergencyModifiers {
             Diagnostics.log("emergency shortcut detected")
-            release(reason: .emergencyHotkey, expectedGeneration: suppressionGeneration)
+            requestEmergencyReturn(expectedGeneration: suppressionGeneration)
             return nil
+        }
+
+        guard let suppressionGeneration else {
+            return Unmanaged.passUnretained(event)
         }
 
         // During CoreHID acquisition keyboard ownership is still local. Pass
@@ -1474,6 +1479,20 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Emergency shortcut (⇧⌘X) — always works, independent of the Android link
 
+    private func requestEmergencyReturn(expectedGeneration: UInt64? = nil) {
+        if let onEmergencyReturnRequested {
+            onEmergencyReturnRequested()
+        } else if let expectedGeneration {
+            // Standalone/test fallback when no lifecycle owner is installed.
+            release(
+                reason: .emergencyHotkey,
+                expectedGeneration: expectedGeneration
+            )
+        } else {
+            release(reason: .emergencyHotkey)
+        }
+    }
+
     private func installEmergencyHotKey(generation: UInt64) {
         let alreadyInstalled = stateLock.withLock {
             emergencyHotKey != nil || emergencyHotKeyHandler != nil
@@ -1492,7 +1511,7 @@ public final class InputCapture: @unchecked Sendable {
                 let capture = Unmanaged<InputCapture>
                     .fromOpaque(userData)
                     .takeUnretainedValue()
-                capture.release(reason: .emergencyHotkey)
+                capture.requestEmergencyReturn()
                 return noErr
             },
             1,

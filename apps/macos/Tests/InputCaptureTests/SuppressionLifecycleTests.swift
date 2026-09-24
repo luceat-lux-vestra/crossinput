@@ -157,6 +157,55 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertEqual(observation.releases.map(\.0), [.normalReturn, .remoteUnavailable])
     }
 
+    func testEmergencyShortcutRequestsFailLocalWhenAlreadyUnsuppressed() {
+        let observation = PointerStateObservation()
+        let capture = makeCapture()
+        capture.onEmergencyReturnRequested = {
+            observation.resetCount += 1
+        }
+
+        let chord = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 7, // kVK_ANSI_X
+            keyDown: true
+        )!
+        chord.flags = [.maskCommand, .maskShift]
+
+        XCTAssertNil(
+            capture.handleForTesting(type: .keyDown, event: chord)
+        )
+        XCTAssertEqual(observation.resetCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
+    }
+
+    func testEmergencyShortcutFallbackReleasesCurrentGeneration() {
+        let observation = ReleaseObservation()
+        let capture = makeCapture {
+            observation.releases.append(($0, $1))
+        }
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        XCTAssertTrue(
+            capture.activateExternalPointerOwner(generation: generation)
+        )
+
+        let chord = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 7, // kVK_ANSI_X
+            keyDown: true
+        )!
+        chord.flags = [.maskCommand, .maskShift]
+
+        XCTAssertNil(
+            capture.handleForTesting(type: .keyDown, event: chord)
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(observation.releases.count, 1)
+        XCTAssertEqual(observation.releases.first?.0, .emergencyHotkey)
+        XCTAssertEqual(observation.releases.first?.1, generation)
+    }
+
     func testExternalControlResetsPointerStateWithoutPointerRestore() {
         let observation = PointerStateObservation()
         let capture = makeCapture(restore: { observation.restoreCount += 1 })
