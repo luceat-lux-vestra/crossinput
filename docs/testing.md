@@ -107,6 +107,58 @@ This table describes the established evidence environment; it does not make a
 particular model number an architecture requirement. A new device-dependent
 claim records the exact hardware/software environment used for that claim.
 
+
+## Runtime diagnostics capture
+
+Physical/runtime failures must be investigated from evidence before remediation.
+Use `scripts/capture-diagnostics.sh` to create one bounded evidence window that
+correlates the exact Git candidate with Ampersand diagnostics and Android
+input/display state.
+
+The production app writes metadata-only diagnostics to
+`~/Library/Logs/Ampersand/diag.log`. `SessionController` forwards the Android
+helper's stderr into the same file with a `helper:` prefix, so an Ampersand-owned
+RemoteSession run does **not** require `deploy-helper.sh start` or a separate
+helper stderr file.
+
+Start capture before launching/reproducing the candidate:
+
+```sh
+# Optional when more than one Android device is attached:
+export ANDROID_SERIAL=<target>
+
+bash scripts/capture-diagnostics.sh start
+```
+
+Launch the exact candidate through its normal application-owned session path,
+reproduce the failure once, then stop capture:
+
+```sh
+bash scripts/capture-diagnostics.sh stop
+```
+
+The script writes outside the repository by default under
+`$TMPDIR/crossinput-diagnostics/<timestamp>-<sha>/` and records:
+
+- `metadata.txt` — exact Git HEAD/status, host version, Android model/build
+  metadata (ADB serial is redacted);
+- `ampersand-diag.log` — only the Ampersand log lines written after capture
+  started, including helper stderr forwarded by `SessionController`;
+- `android-logcat.txt` — a filtered input/display/runtime logcat stream;
+- `dumpsys-input-*.txt` and `dumpsys-display-*.txt` — start/final Android
+  state snapshots;
+- `helper-processes-*.txt` — helper/app_process lifecycle snapshots;
+- `summary.txt` — concise failure-oriented excerpts.
+
+Use `bash scripts/capture-diagnostics.sh snapshot` while a capture is active to
+take an additional state snapshot, and `status` to verify collection is still
+running.
+
+The collector intentionally does not log keystrokes, clipboard contents, CXI
+payload bytes, or HID report payloads. Do not paste an unreviewed full system log
+into a public issue; attach only the relevant metadata/excerpts needed for the
+claim.
+
 ## DeX input routing verification protocol
 
 1. Pre-check: `adb shell dumpsys display` — DeX active (Desktop display ON, phone display DOZE)
