@@ -145,9 +145,10 @@ start_capture() {
     collect_snapshot "$out" "$device" "start"
 
     # Helper stderr is already forwarded into Ampersand Diagnostics by
-    # SessionController. Android logcat is filtered to input/display/runtime
-    # metadata so this tool does not intentionally persist unrelated payloads.
-    nohup "$ADB" -s "$device" logcat -v threadtime -T 1 2>&1         | grep -Ea 'crossinput|AndroidRuntime|InputReader|InputDispatcher|InputManager|DisplayManager|WindowManager|UHID|HIDDevice|InputDevice|app_process'         > "$out/android-logcat.txt" 2>&1 &
+    # SessionController. Keep logcat tag-filtered at the producer so the
+    # artifact never contains an unbounded full-system log. With no shell pipeline,
+    # $! is the adb process itself and stop can retire it reliably.
+    nohup "$ADB" -s "$device" logcat -v threadtime -T 1 AndroidRuntime:V ActivityManager:I InputReader:V InputDispatcher:V InputManager:V InputManager-JNI:V DisplayManagerService:V WindowManager:V '*:S' > "$out/android-logcat.txt" 2>&1 </dev/null &
     printf '%s\n' "$!" > "$ACTIVE/logcat-pid"
 
     echo "diagnostics capture started"
