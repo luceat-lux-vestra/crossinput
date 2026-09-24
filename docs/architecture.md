@@ -325,12 +325,14 @@ Handoff becomes pure policy: facts in, acquire/remain/return decisions out.
 ControlCoordinator serializes it. HandoffPolicy owns no task, queue, lock,
 transport, event tap, diagnostics, or callback sequencing.
 
-Validated #45/#37 behavior remains unless separately superseded:
+Validated #45/#37 behavior remains only where the selected pointer-routing path has authority to interpret relative movement as boundary progress:
 
 - requested-intent return credit when Android clamps at the boundary;
 - accepted inward movement credit;
 - first post-entry movement guard; and
 - hysteresis against edge wobble.
+
+System-routed UHID desktop targets do **not** have that authority: Android InputReader may accelerate/clamp relative reports and the semantic delivery result is not a screen-coordinate observation. Their remote-boundary authority is therefore `none`; current DeX return is explicit/fail-safe, and #145 owns any future portable authoritative automatic-return signal.
 
 An `acquire` decision remains subject to host readiness, clean Session/Target
 context, `prepared -> active` linearization, and predecessor remote-close

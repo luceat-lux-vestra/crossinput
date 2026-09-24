@@ -409,7 +409,7 @@ ADR-0016/ADR-0012 obligations.
 
 | Area | Required checks | Evidence status |
 |---|---|---|
-| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, return to macOS | helper routing recorded; target-screen visibility and fresh app path pending |
+| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, explicit Return to Mac (⇧⌘X) / fail-local recovery | helper routing recorded; target-screen visibility and fresh app path pending |
 | Phone target | phone display selection and pointer routing | pending; requires screen confirmation |
 | Keyboard | key down/up, modifiers, no repeat/stuck key, Korean 2-set, Mac shortcut suppression | pending fresh regression |
 | Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |
