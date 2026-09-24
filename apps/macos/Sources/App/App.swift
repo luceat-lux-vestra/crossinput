@@ -112,6 +112,9 @@ final class AppModel: ObservableObject {
             captureStop: captureStop,
             hostPointerBackend: HostPointerOwnershipBackends.makeDefault()
         )
+        // Fail closed until a confirmed target tells us whether the legacy
+        // relative-movement normal-return policy is even admissible.
+        handoffController.setAutomaticReturnAuthority(.none)
         targetController = TargetSelectionController(session: reference)
 
         // Production telemetry sink (review round 3): a single lock-protected
@@ -132,9 +135,24 @@ final class AppModel: ObservableObject {
             self?.handleSessionUnavailable(reason)
         }
         targetController.onChange = { [weak self] targets, selected, state in
-            self?.targets = targets
-            self?.selectedTarget = selected
-            self?.targetState = state
+            guard let self else { return }
+            self.targets = targets
+            self.selectedTarget = selected
+            self.targetState = state
+
+            // Desktop/external targets are served by system-routed UHID in the
+            // current AUTO policy. UHID deltas pass through Android InputReader
+            // acceleration/clamping and are not screen-space boundary authority.
+            // Keep #151 explicit-return-only there; #145 owns any future
+            // portable authoritative automatic-return contract.
+            let authority: AutomaticReturnAuthority
+            if let selected,
+               selected.kind == .phone || selected.kind == .virtual {
+                authority = .relativeMovement
+            } else {
+                authority = .none
+            }
+            self.handoffController.setAutomaticReturnAuthority(authority)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state

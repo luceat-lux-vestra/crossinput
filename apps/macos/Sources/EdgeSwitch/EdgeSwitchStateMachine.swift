@@ -45,6 +45,15 @@ public enum TransitionReason: String, Sendable {
     case deactivated
 }
 
+public enum AutomaticReturnAuthority: Sendable, Equatable {
+    /// Transitional legacy policy for targets whose delivery model is still
+    /// intentionally using relative movement accounting for normal return.
+    case relativeMovement
+    /// No screen-boundary claim can be derived from relative movement.
+    /// Normal return must come from an explicit/authoritative control signal.
+    case none
+}
+
 /// A concrete state transition with a monotonically increasing sequence.
 /// Consumers apply transitions in sequence order and discard stale ones
 /// (`sequence` lower than the last applied value) so an old remote callback can
@@ -129,6 +138,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// 0 = entry boundary, positive = inside the remote target, negative = beyond the
     /// boundary toward macOS. Return fires only when position <= -returnHysteresis.
     private var virtualAxisPosition: CGFloat = 0
+    private var automaticReturnAuthority: AutomaticReturnAuthority = .relativeMovement
 
     /// False until the first movement event after entering is accumulated.
     /// The first event never triggers a return (issue #37).
@@ -167,6 +177,17 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// callbacks when a control epoch is intentionally ended.
     public var latestSequence: UInt64 {
         queue.sync { sequenceCounter }
+    }
+
+    public func setAutomaticReturnAuthority(_ authority: AutomaticReturnAuthority) {
+        run {
+            guard automaticReturnAuthority != authority else { return }
+            automaticReturnAuthority = authority
+            // Movement accumulated under one authority must never become a
+            // boundary decision after the authority changes.
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+        }
     }
 
     // MARK: - Transition handler
@@ -257,6 +278,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
                              deliveredDx: CGFloat, deliveredDy: CGFloat) {
         run {
             guard stateStorage == .remoteActive else { return }
+            guard automaticReturnAuthority == .relativeMovement else { return }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
             guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else { return }

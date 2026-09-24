@@ -913,6 +913,51 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testPhysicalEmergencyChordPathReleasesPublishedLease() async {
+        let backend = FakeHostPointerBackend()
+        let context = makeController(backend: backend)
+
+        await enterRemote(context.machine)
+        let started = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(started)
+
+        let generation = try! XCTUnwrap(
+            context.controller.controlAdmissionStateForTesting().captureGeneration
+        )
+        let lease = FakeHostPointerLease(generation: 205)
+        backend.succeed(with: lease)
+
+        let ready = await waitUntil {
+            context.controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            ) && context.capture.isExternalPointerOwnerActive(
+                generation: generation
+            )
+        }
+        XCTAssertTrue(ready)
+
+        let chord = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 7, // kVK_ANSI_X
+            keyDown: true
+        )!
+        chord.flags = [.maskCommand, .maskShift]
+
+        // This exercises the actual InputCapture keyboard handler rather than
+        // calling controller.emergencyReturn() directly.
+        XCTAssertNil(
+            context.capture.handleForTesting(type: .keyDown, event: chord)
+        )
+        XCTAssertEqual(lease.releaseCount, 1)
+        XCTAssertFalse(context.capture.isSuppressed)
+
+        let returnedLocal = await waitUntil {
+            context.machine.state == .localActive
+        }
+        XCTAssertTrue(returnedLocal)
+    }
+
+    @MainActor
     func testBackendFailureReleasesCaptureAndReturnsLocal() async {
         let backend = FakeHostPointerBackend()
         let context = makeController(backend: backend)

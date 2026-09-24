@@ -549,6 +549,11 @@ final class ControlHandoffController: @unchecked Sendable {
         )
     }
 
+    @MainActor
+    func setAutomaticReturnAuthority(_ authority: AutomaticReturnAuthority) {
+        switchMachine.setAutomaticReturnAuthority(authority)
+    }
+
     func emergencyReturn() {
         releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
         sender.cancelPendingPointerEvents()
