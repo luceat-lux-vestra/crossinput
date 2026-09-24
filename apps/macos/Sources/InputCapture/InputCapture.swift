@@ -138,6 +138,12 @@ public final class InputCapture: @unchecked Sendable {
         case externalOwner
     }
 
+    private enum RemoteKeyboardTransitionAdmission {
+        case accepted
+        case localConflict
+        case staleGeneration
+    }
+
     public var mode: Mode {
         stateLock.withLock { isSuppressing ? .suppressed : .listening }
     }
@@ -206,10 +212,24 @@ public final class InputCapture: @unchecked Sendable {
     private let sourceIdentityCache = ProcessIdentityCache()
     private let sourceDiagnostics: ExternalControlSourceDiagnostics
     private let pointerRestoreOverride: (() -> Void)?
-    /// Physical host input must be neutral before ownership can cross to a
-    /// different machine. Injected only by tests; production reads the HID
-    /// system state table directly.
-    private let hostInputNeutralProvider: @Sendable () -> Bool
+    /// Local input transitions that macOS has actually received but that have
+    /// not completed locally. Guarded by stateLock.
+    ///
+    /// This intentionally derives admission authority from observed
+    /// pass-through transitions, never from CGEventSource's global key-state
+    /// snapshot.
+    private var localKeysDown: Set<UInt16> = []
+    private var localButtonsDown: Set<UInt32> = []
+    private var localHeldModifierFlags: CGEventFlags = []
+    private var localTransitionTrackingTrusted = true
+    private var localTransitionTrackingEpoch: UInt64 = 0
+
+    /// Physical ordinary-key transitions accepted after an exact
+    /// external-owner generation becomes ready. An UP without a matching
+    /// remote-origin DOWN is treated as local provenance and fails local.
+    private var remotePhysicalKeysDown: Set<UInt16> = []
+    private var remotePhysicalInputGeneration: UInt64?
+
     /// Test-only barrier used to deterministically exercise a lifecycle
     /// boundary after an event has been admitted as suppressed but before it
     /// is handed to the capture callback.
@@ -271,8 +291,7 @@ public final class InputCapture: @unchecked Sendable {
         beforeSuppressedEventEmission: (@Sendable () -> Void)? = nil,
         beforeSuppressedKeyboardAdmission: (@Sendable () -> Void)? = nil,
         afterSuppressionDeactivatedBeforeCallbacks:
-            (@Sendable () -> Void)? = nil,
-        hostInputNeutralProvider: (@Sendable () -> Bool)? = nil
+            (@Sendable () -> Void)? = nil
     ) {
         self.externalControlClassifier = externalControlClassifier
         self.sourceIdentityResolver = sourceIdentityResolver ?? Self.resolveProcessIdentity
@@ -280,8 +299,6 @@ public final class InputCapture: @unchecked Sendable {
             enabled: ProcessInfo.processInfo.environment["CROSSINPUT_DIAG_EVENT_SOURCE"] == "1"
         )
         self.pointerRestoreOverride = pointerRestoreOverride
-        self.hostInputNeutralProvider =
-            hostInputNeutralProvider ?? Self.isPhysicalHostInputNeutral
         self.suppressionTimeout = suppressionTimeoutOverride ?? Self.suppressionTimeout
         self.beforeSuppressedEventEmission = beforeSuppressedEventEmission
         self.beforeSuppressedKeyboardAdmission =
@@ -352,6 +369,7 @@ public final class InputCapture: @unchecked Sendable {
             }
             tap = newTap
             runLoopSource = source
+            resetLocalTransitionTrackingForFreshTapLocked()
             return tapLifecycleGeneration
         }
         guard let generation else {
@@ -428,6 +446,7 @@ public final class InputCapture: @unchecked Sendable {
             runLoopSource = nil
             watchdog?.cancel()
             watchdog = nil
+            invalidateLocalTransitionTrackingLocked()
 
             let activeRunLoop = runLoop
             runLoop = nil
@@ -475,6 +494,8 @@ public final class InputCapture: @unchecked Sendable {
                 return false
             }
             externalPointerOwnerReadyGeneration = generation
+            remotePhysicalInputGeneration = generation
+            remotePhysicalKeysDown.removeAll()
             return true
         }
     }
@@ -492,6 +513,7 @@ public final class InputCapture: @unchecked Sendable {
                 return false
             }
             externalPointerOwnerReadyGeneration = nil
+            clearRemotePhysicalInputLocked()
             return true
         }
     }
@@ -510,12 +532,27 @@ public final class InputCapture: @unchecked Sendable {
             guard !isSuppressing else { return nil }
 
             if case .externalOwner = pointerStrategy {
-                // Do not split an input transition across machines. A key,
-                // modifier, or mouse button that went down on macOS must also
-                // come up on macOS before remote ownership can begin.
-                guard hostInputNeutralProvider() else {
+                // Do not split an observed local transition across machines.
+                // Admission authority is the transition state CrossInput saw
+                // macOS receive, not a global CGEventSource snapshot.
+                guard localTransitionTrackingTrusted else {
                     Diagnostics.log(
-                        "external-owner suppression blocked reason=host-input-active"
+                        "external-owner suppression blocked "
+                            + "reason=host-input-tracking-untrusted "
+                            + "epoch=\(localTransitionTrackingEpoch)"
+                    )
+                    return nil
+                }
+                guard localKeysDown.isEmpty,
+                      localButtonsDown.isEmpty,
+                      localHeldModifierFlags.isEmpty else {
+                    Diagnostics.log(
+                        "external-owner suppression blocked "
+                            + "reason=host-input-active "
+                            + "keys=\(localKeysDown.count) "
+                            + "buttons=\(localButtonsDown.count) "
+                            + "modifiersActive="
+                            + "\(!localHeldModifierFlags.isEmpty)"
                     )
                     return nil
                 }
@@ -567,6 +604,7 @@ public final class InputCapture: @unchecked Sendable {
             isSuppressing = false
             pointerSuppressionStrategy = .eventTapWarp
             externalPointerOwnerReadyGeneration = nil
+            clearRemotePhysicalInputLocked()
             watchdog?.cancel()
             watchdog = nil
             return (was, gen, strategy)
@@ -616,32 +654,142 @@ public final class InputCapture: @unchecked Sendable {
         }
     }
 
-    /// Reads only boolean hardware state; no key codes or button identities
-    /// are logged or persisted. The HID-system table excludes synthetic app
-    /// sources and represents the physical input state that must remain owned
-    /// by macOS until every down transition has its local up transition.
-    private static func isPhysicalHostInputNeutral() -> Bool {
-        for rawKeyCode in UInt16(0)...UInt16(127) {
-            if CGEventSource.keyState(
-                .hidSystemState,
-                key: CGKeyCode(rawKeyCode)
-            ) {
-                return false
+    private static let ownershipHeldModifierMask: CGEventFlags = [
+        .maskShift,
+        .maskControl,
+        .maskAlternate,
+        .maskCommand,
+        .maskSecondaryFn,
+    ]
+
+    private func resetLocalTransitionTrackingForFreshTapLocked() {
+        localTransitionTrackingEpoch &+= 1
+        if localTransitionTrackingEpoch == 0 {
+            localTransitionTrackingEpoch = 1
+        }
+        localTransitionTrackingTrusted = true
+        localKeysDown.removeAll()
+        localButtonsDown.removeAll()
+        localHeldModifierFlags = []
+    }
+
+    private func invalidateLocalTransitionTrackingLocked() {
+        localTransitionTrackingEpoch &+= 1
+        if localTransitionTrackingEpoch == 0 {
+            localTransitionTrackingEpoch = 1
+        }
+        localTransitionTrackingTrusted = false
+        localKeysDown.removeAll()
+        localButtonsDown.removeAll()
+        localHeldModifierFlags = []
+    }
+
+    private func clearRemotePhysicalInputLocked() {
+        remotePhysicalInputGeneration = nil
+        remotePhysicalKeysDown.removeAll()
+    }
+
+    /// Records only events that are actually passed through to macOS. The
+    /// modifier flags are sampled from every local event, so an already-held
+    /// modifier is visible on the edge pointer event even when its original
+    /// flagsChanged transition predates the tap.
+    private func observeLocalPassThrough(
+        type: CGEventType,
+        event: CGEvent
+    ) {
+        let resynchronized: (Bool, UInt64) = stateLock.withLock {
+            let wasUntrusted = !localTransitionTrackingTrusted
+            if wasUntrusted {
+                localTransitionTrackingEpoch &+= 1
+                if localTransitionTrackingEpoch == 0 {
+                    localTransitionTrackingEpoch = 1
+                }
+                localTransitionTrackingTrusted = true
             }
+
+            localHeldModifierFlags =
+                event.flags.intersection(Self.ownershipHeldModifierMask)
+
+            switch type {
+            case .keyDown:
+                let key = UInt16(
+                    event.getIntegerValueField(.keyboardEventKeycode)
+                )
+                localKeysDown.insert(key)
+            case .keyUp:
+                let key = UInt16(
+                    event.getIntegerValueField(.keyboardEventKeycode)
+                )
+                localKeysDown.remove(key)
+            case .leftMouseDown, .leftMouseDragged:
+                localButtonsDown.insert(0)
+            case .rightMouseDown, .rightMouseDragged:
+                localButtonsDown.insert(1)
+            case .otherMouseDown, .otherMouseDragged:
+                localButtonsDown.insert(
+                    Self.physicalButtonIndex(for: event)
+                )
+            case .leftMouseUp:
+                localButtonsDown.remove(0)
+            case .rightMouseUp:
+                localButtonsDown.remove(1)
+            case .otherMouseUp:
+                localButtonsDown.remove(
+                    Self.physicalButtonIndex(for: event)
+                )
+            default:
+                break
+            }
+            return (wasUntrusted, localTransitionTrackingEpoch)
         }
 
-        for rawButton in UInt32(0)...UInt32(31) {
-            guard let button = CGMouseButton(rawValue: rawButton) else {
-                continue
+        if resynchronized.0 {
+            Diagnostics.log(
+                "host-input transition tracking resynchronized "
+                    + "epoch=\(resynchronized.1)"
+            )
+        }
+    }
+
+    private func admitRemoteKeyboardTransition(
+        type: CGEventType,
+        event: CGEvent,
+        generation: UInt64
+    ) -> RemoteKeyboardTransitionAdmission {
+        stateLock.withLock {
+            guard isSuppressing,
+                  pointerSuppressionStrategy == .externalOwner,
+                  suppressionGeneration == generation,
+                  externalPointerOwnerReadyGeneration == generation,
+                  remotePhysicalInputGeneration == generation else {
+                return .staleGeneration
             }
-            if CGEventSource.buttonState(
-                .hidSystemState,
-                button: button
-            ) {
-                return false
+
+            let virtualKey = UInt16(
+                event.getIntegerValueField(.keyboardEventKeycode)
+            )
+            switch type {
+            case .keyDown:
+                remotePhysicalKeysDown.insert(virtualKey)
+                return .accepted
+            case .keyUp:
+                guard remotePhysicalKeysDown.remove(virtualKey) != nil else {
+                    return .localConflict
+                }
+                return .accepted
+            default:
+                return .accepted
             }
         }
-        return true
+    }
+
+    private static func physicalButtonIndex(for event: CGEvent) -> UInt32 {
+        UInt32(
+            max(
+                0,
+                event.getIntegerValueField(.mouseEventButtonNumber)
+            )
+        )
     }
 
     // MARK: - Event handling (capture thread)
@@ -668,6 +816,9 @@ public final class InputCapture: @unchecked Sendable {
         let suppressedGeneration = suppressionSnapshot?.generation
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            stateLock.withLock {
+                invalidateLocalTransitionTrackingLocked()
+            }
             // A disabled modifying tap cannot prove keyboard suppression.
             // If a remote epoch is active, fail local synchronously before
             // attempting to re-enable the tap. This also triggers the Control
@@ -686,6 +837,12 @@ public final class InputCapture: @unchecked Sendable {
             }
             return Unmanaged.passUnretained(event)
         default:
+            // Record local transition state before edge detection can
+            // synchronously request a new external-owner epoch.
+            if suppressionSnapshot == nil {
+                observeLocalPassThrough(type: type, event: event)
+            }
+
             // Source resolution is unnecessary on the hot path while local
             // control is active, unless the opt-in characterization probe is on.
             if suppressedGeneration != nil || sourceDiagnostics.isEnabled {
@@ -697,6 +854,9 @@ public final class InputCapture: @unchecked Sendable {
                 ) {
                     // Returning the original event is essential: the first remote
                     // move/click/key event must reach macOS, not just later events.
+                    if suppressionSnapshot != nil {
+                        observeLocalPassThrough(type: type, event: event)
+                    }
                     return Unmanaged.passUnretained(event)
                 }
             }
@@ -768,6 +928,7 @@ public final class InputCapture: @unchecked Sendable {
              .otherMouseDown, .otherMouseUp:
             if let snapshot = suppressionSnapshot {
                 if snapshot.pointerStrategy == .externalOwner {
+                    observeLocalPassThrough(type: type, event: event)
                     onExternalPointerOwnerActivity?(
                         snapshot.generation,
                         .incompatibleLocalInput
@@ -812,7 +973,10 @@ public final class InputCapture: @unchecked Sendable {
                 event: event,
                 type: type,
                 suppressionGeneration: suppressedGeneration,
-                remoteAdmissionReady: suppressionSnapshot?.externalOwnerReady ?? true
+                externalPointerOwner:
+                    suppressionSnapshot?.pointerStrategy == .externalOwner,
+                remoteAdmissionReady:
+                    suppressionSnapshot?.externalOwnerReady ?? true
             )
         default:
             return Unmanaged.passUnretained(event)
@@ -843,6 +1007,7 @@ public final class InputCapture: @unchecked Sendable {
         event: CGEvent,
         type: CGEventType,
         suppressionGeneration: UInt64?,
+        externalPointerOwner: Bool,
         remoteAdmissionReady: Bool
     ) -> Unmanaged<CGEvent>? {
         guard let suppressionGeneration else {
@@ -861,6 +1026,7 @@ public final class InputCapture: @unchecked Sendable {
         // the triggering event through and cancel acquisition so a transition
         // cannot split across local and remote owners.
         guard remoteAdmissionReady else {
+            observeLocalPassThrough(type: type, event: event)
             onExternalPointerOwnerActivity?(
                 suppressionGeneration,
                 .incompatibleLocalInput
@@ -871,6 +1037,34 @@ public final class InputCapture: @unchecked Sendable {
         let modifiers = KeyCodeMapper.semanticModifiers(ofFlags: event.flags)
         let key = KeyCodeMapper.semanticKey(ofVirtualKey: virtualKey)
         beforeSuppressedKeyboardAdmission?()
+
+        if externalPointerOwner {
+            switch admitRemoteKeyboardTransition(
+                type: type,
+                event: event,
+                generation: suppressionGeneration
+            ) {
+            case .accepted:
+                break
+            case .localConflict:
+                Diagnostics.log(
+                    "external-owner keyboard provenance mismatch "
+                        + "action=local-return"
+                )
+                observeLocalPassThrough(type: type, event: event)
+                onExternalPointerOwnerActivity?(
+                    suppressionGeneration,
+                    .incompatibleLocalInput
+                )
+                return Unmanaged.passUnretained(event)
+            case .staleGeneration:
+                return dispositionAfterStaleKeyboardAdmission(
+                    event,
+                    type: type
+                )
+            }
+        }
+
         switch type {
         case .flagsChanged:
             // Modifier-only transitions remain represented in modifier state;
@@ -885,7 +1079,7 @@ public final class InputCapture: @unchecked Sendable {
                     transition: .down,
                     generation: suppressionGeneration
                 ) else {
-                    return dispositionAfterStaleKeyboardAdmission(event)
+                    return dispositionAfterStaleKeyboardAdmission(event, type: type)
                 }
                 beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(
@@ -902,7 +1096,7 @@ public final class InputCapture: @unchecked Sendable {
                     transition: .up,
                     generation: suppressionGeneration
                 ) else {
-                    return dispositionAfterStaleKeyboardAdmission(event)
+                    return dispositionAfterStaleKeyboardAdmission(event, type: type)
                 }
                 beforeSuppressedEventEmission?()
                 emitKeyEvent(CapturedKeyEvent(
@@ -925,7 +1119,8 @@ public final class InputCapture: @unchecked Sendable {
     /// A replacement fully-remote epoch consumes the stale callback instead
     /// of leaking input to macOS or relabelling it as the new generation.
     private func dispositionAfterStaleKeyboardAdmission(
-        _ event: CGEvent
+        _ event: CGEvent,
+        type: CGEventType
     ) -> Unmanaged<CGEvent>? {
         let current: (
             generation: UInt64,
@@ -943,11 +1138,13 @@ public final class InputCapture: @unchecked Sendable {
         }
 
         guard let current else {
+            observeLocalPassThrough(type: type, event: event)
             return Unmanaged.passUnretained(event)
         }
 
         if current.strategy == .externalOwner,
            !current.externalOwnerReady {
+            observeLocalPassThrough(type: type, event: event)
             onExternalPointerOwnerActivity?(
                 current.generation,
                 .incompatibleLocalInput

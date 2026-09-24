@@ -215,15 +215,142 @@ final class SuppressionLifecycleTests: XCTestCase {
         capture.release(reason: .normalReturn)
     }
 
-    func testExternalPointerOwnerRefusesHandoffWhileHostInputIsHeld() {
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
-            hostInputNeutralProvider: { false }
-        )
+    func testExternalPointerOwnerRefusesHandoffWhileObservedLocalKeyIsHeld() {
+        let capture = makeCapture()
+        let keyDown = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        let keyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: false
+        )!
 
+        XCTAssertNotNil(capture.handleForTesting(type: .keyDown, event: keyDown))
         XCTAssertNil(capture.suppressWithExternalPointerOwner())
         XCTAssertFalse(capture.isSuppressed)
-        XCTAssertEqual(capture.mode, .listening)
+
+        XCTAssertNotNil(capture.handleForTesting(type: .keyUp, event: keyUp))
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        capture.release(reason: .captureStopped, generation: generation)
+    }
+
+    func testExternalPointerOwnerRefusesHandoffForHeldModifierAtEdge() {
+        let capture = makeCapture()
+        let move = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        move.flags = [.maskShift]
+
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .mouseMoved, event: move)
+        )
+        XCTAssertNil(capture.suppressWithExternalPointerOwner())
+
+        move.flags = []
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .mouseMoved, event: move)
+        )
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        capture.release(reason: .captureStopped, generation: generation)
+    }
+
+    func testExternalPointerOwnerRefusesHandoffForPreexistingDraggedButton() {
+        let capture = makeCapture()
+        let drag = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDragged,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        let buttonUp = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseUp,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .leftMouseDragged, event: drag)
+        )
+        XCTAssertNil(capture.suppressWithExternalPointerOwner())
+
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .leftMouseUp, event: buttonUp)
+        )
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        capture.release(reason: .captureStopped, generation: generation)
+    }
+
+    func testTapLifecycleTrustLossBlocksUntilFreshLocalEvent() {
+        let capture = makeCapture()
+        let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+
+        XCTAssertNotNil(
+            capture.handleForTesting(
+                type: .tapDisabledByTimeout,
+                event: event
+            )
+        )
+        XCTAssertNil(capture.suppressWithExternalPointerOwner())
+
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .mouseMoved, event: event)
+        )
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        capture.release(reason: .captureStopped, generation: generation)
+    }
+
+    func testUnmatchedRemoteKeyUpFailsLocalAndPassesThrough() {
+        let capture = makeCapture()
+        let activityObservation = ExternalOwnerActivityObservation()
+        capture.onExternalPointerOwnerActivity = {
+            generation, activity in
+            activityObservation.append(generation, activity)
+            capture.release(
+                reason: .externalControl,
+                generation: generation
+            )
+        }
+
+        let generation = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
+        XCTAssertTrue(
+            capture.activateExternalPointerOwner(generation: generation)
+        )
+
+        let keyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: false
+        )!
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .keyUp, event: keyUp)
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(
+            activityObservation.values.map(\.1),
+            [.incompatibleLocalInput]
+        )
     }
 
     func testExternalPointerOwnerKeepsKeyboardLocalUntilLeaseReady() {
@@ -247,6 +374,11 @@ final class SuppressionLifecycleTests: XCTestCase {
             virtualKey: 1,
             keyDown: true
         )!
+        let localKeyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 1,
+            keyDown: false
+        )!
         XCTAssertNotNil(
             capture.handleForTesting(type: .keyDown, event: localKeyDown)
         )
@@ -256,8 +388,20 @@ final class SuppressionLifecycleTests: XCTestCase {
             [.incompatibleLocalInput]
         )
 
+        capture.release(
+            reason: .externalControl,
+            generation: generation
+        )
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .keyUp, event: localKeyUp)
+        )
+        let remoteGeneration = try! XCTUnwrap(
+            capture.suppressWithExternalPointerOwner()
+        )
         XCTAssertTrue(
-            capture.activateExternalPointerOwner(generation: generation)
+            capture.activateExternalPointerOwner(
+                generation: remoteGeneration
+            )
         )
         XCTAssertTrue(
             capture.isExternalPointerOwnerActive(generation: generation)
@@ -271,10 +415,24 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertNil(
             capture.handleForTesting(type: .keyDown, event: remoteKeyDown)
         )
-        XCTAssertEqual(keyObservation.ordinary.map(\.key), [.a])
-        XCTAssertEqual(keyObservation.ordinary.map(\.transition), [.down])
+        let remoteKeyUp = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: false
+        )!
+        XCTAssertNil(
+            capture.handleForTesting(type: .keyUp, event: remoteKeyUp)
+        )
+        XCTAssertEqual(keyObservation.ordinary.map(\.key), [.a, .a])
+        XCTAssertEqual(
+            keyObservation.ordinary.map(\.transition),
+            [.down, .up]
+        )
 
-        capture.release(reason: .captureStopped)
+        capture.release(
+            reason: .captureStopped,
+            generation: remoteGeneration
+        )
     }
 
     func testExternalPointerOwnerDeactivationReturnsKeyboardLocalBeforeRelease() {
@@ -446,8 +604,7 @@ final class SuppressionLifecycleTests: XCTestCase {
             beforeSuppressedEventEmission: {
                 enteredEmission.signal()
                 _ = continueEmission.wait(timeout: .now() + 2)
-            },
-            hostInputNeutralProvider: { true }
+            }
         )
         let activity = ExternalOwnerActivityObservation()
         capture.onExternalPointerOwnerActivity = {

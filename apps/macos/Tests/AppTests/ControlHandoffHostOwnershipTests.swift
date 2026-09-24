@@ -286,9 +286,14 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     @MainActor
     func testHeldHostInputBlocksAcquisitionAndReturnsLocal() async {
         let backend = FakeHostPointerBackend()
-        let capture = InputCapture(
-            pointerRestoreOverride: {},
-            hostInputNeutralProvider: { false }
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let localKeyDown = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        XCTAssertNotNil(
+            capture.handleForTesting(type: .keyDown, event: localKeyDown)
         )
         let machine = EdgeSwitchStateMachine()
         let sender = InputSender(session: SessionReference())
