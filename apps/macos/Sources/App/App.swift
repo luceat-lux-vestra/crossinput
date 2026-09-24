@@ -140,15 +140,16 @@ final class AppModel: ObservableObject {
             self.selectedTarget = selected
             self.targetState = state
 
-            // Desktop/external targets are served by system-routed UHID in the
-            // current AUTO policy. UHID deltas pass through Android InputReader
-            // acceleration/clamping and are not screen-space boundary authority.
-            // Keep #151 explicit-return-only there; #145 owns any future
-            // portable authoritative automatic-return contract.
+            // Only targets for which the helper AUTO policy prefers the
+            // system-routed UHID pointer lose relative-movement boundary
+            // authority. HDMI/external targets served by explicit InputManager
+            // routing retain the existing behavior. #145 owns any future
+            // portable authoritative automatic-return contract for UHID.
             let authority: AutomaticReturnAuthority
-            if let selected,
-               selected.kind == .phone || selected.kind == .virtual {
-                authority = .relativeMovement
+            if let selected {
+                authority = selected.prefersSystemRoutedPointer
+                    ? .none
+                    : .relativeMovement
             } else {
                 authority = .none
             }
