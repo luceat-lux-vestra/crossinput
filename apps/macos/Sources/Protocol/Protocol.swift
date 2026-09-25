@@ -20,9 +20,11 @@ public struct HelperCapabilities: OptionSet, Sendable, Equatable {
 
     public static let semanticPointerResult = Self(rawValue: 1 << 0)
     public static let explicitPointerRouting = Self(rawValue: 1 << 1)
+    public static let boundaryWatch = Self(rawValue: 1 << 2)
     public static let currentPointerPath: Self = [
         .semanticPointerResult,
         .explicitPointerRouting,
+        .boundaryWatch,
     ]
 }
 
@@ -40,6 +42,8 @@ public enum MessageType: UInt16, Sendable {
     case pointerButton = 0x000A
     case pointerScroll = 0x000B
     case keyEvent = 0x000C
+    case boundaryWatchStart = 0x000D
+    case boundaryWatchStop = 0x000E
     // Android -> Mac
     case helloAck = 0x8001
     case displayList = 0x8002
@@ -50,6 +54,9 @@ public enum MessageType: UInt16, Sendable {
     case logEvent = 0x8007
     case fatalError = 0x8008
     case pointerResult = 0x8009
+    case boundaryWatchReady = 0x800A
+    case boundaryReached = 0x800B
+    case boundaryWatchError = 0x800C
 
     public var isRequest: Bool { rawValue < 0x8000 }
 }
@@ -77,6 +84,10 @@ enum LE {
     static func u32(_ value: UInt32) -> Data {
         var v = value.littleEndian
         return Data(bytes: &v, count: 4)
+    }
+    static func u64(_ value: UInt64) -> Data {
+        var v = value.littleEndian
+        return Data(bytes: &v, count: 8)
     }
     static func i32(_ value: Int32) -> Data {
         var v = value.littleEndian
@@ -198,6 +209,14 @@ public enum Messages {
     public static func keyEvent(keyCode: UInt16, metaState: UInt32, action: UInt8, repeatCount: UInt8 = 0) -> Data {
         LE.u16(keyCode) + LE.u32(metaState) + LE.u8(action) + LE.u8(repeatCount)
     }
+
+    public static func boundaryWatchStart(controlToken: UInt64, displayId: UInt32, edge: BoundaryEdge) -> Data {
+        LE.u64(controlToken) + LE.u32(displayId) + LE.u8(edge.rawValue)
+    }
+
+    public static func boundaryWatchStop(controlToken: UInt64) -> Data {
+        LE.u64(controlToken)
+    }
 }
 
 // MARK: - Payload decoders (Android -> Mac)
@@ -254,6 +273,43 @@ public enum PointerDeliveryStatus: UInt8, Sendable, Equatable {
     case partiallyDelivered = 2
 }
 
+public enum BoundaryEdge: UInt8, Sendable, Equatable, CaseIterable {
+    case left = 0
+    case right = 1
+    case top = 2
+    case bottom = 3
+}
+
+public enum BoundaryWatchMode: UInt8, Sendable, Equatable {
+    case deliveredCoordinates = 0
+    case compositor = 1
+}
+
+public enum BoundaryWatchErrorCode: UInt8, Sendable, Equatable {
+    case targetMismatch = 1
+    case oracleUnavailable = 2
+    case backendChanged = 3
+    case observationFailed = 4
+}
+
+public struct BoundaryWatchReady: Sendable, Equatable {
+    public let controlToken: UInt64
+    public let displayId: UInt32
+    public let mode: BoundaryWatchMode
+    public let layerStack: Int32
+}
+
+public struct BoundaryReached: Sendable, Equatable {
+    public let controlToken: UInt64
+    public let displayId: UInt32
+    public let edge: BoundaryEdge
+}
+
+public struct BoundaryWatchError: Sendable, Equatable {
+    public let controlToken: UInt64
+    public let code: BoundaryWatchErrorCode
+}
+
 struct Decoder {
     var data: Data
     var offset = 0
@@ -278,6 +334,12 @@ struct Decoder {
         guard offset + 4 <= data.count else { throw DecodeError.truncated("u32") }
         let v = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         offset += 4
+        return v
+    }
+    mutating func u64() throws -> UInt64 {
+        guard offset + 8 <= data.count else { throw DecodeError.truncated("u64") }
+        let v = data.subdata(in: offset..<(offset + 8)).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+        offset += 8
         return v
     }
     mutating func i32() throws -> Int32 {
@@ -354,6 +416,43 @@ public extension Messages {
             throw DecodeError.invalidPointerDelivery
         }
         return (status, try d.i32(), try d.i32())
+    }
+
+    static func decodeBoundaryWatchReady(_ payload: Data) throws -> BoundaryWatchReady {
+        var d = Decoder(payload)
+        let token = try d.u64()
+        let displayId = try d.u32()
+        let rawMode = try d.u8()
+        guard let mode = BoundaryWatchMode(rawValue: rawMode) else {
+            throw DecodeError.invalidPointerDelivery
+        }
+        return BoundaryWatchReady(
+            controlToken: token,
+            displayId: displayId,
+            mode: mode,
+            layerStack: try d.i32()
+        )
+    }
+
+    static func decodeBoundaryReached(_ payload: Data) throws -> BoundaryReached {
+        var d = Decoder(payload)
+        let token = try d.u64()
+        let displayId = try d.u32()
+        let rawEdge = try d.u8()
+        guard let edge = BoundaryEdge(rawValue: rawEdge) else {
+            throw DecodeError.invalidPointerDelivery
+        }
+        return BoundaryReached(controlToken: token, displayId: displayId, edge: edge)
+    }
+
+    static func decodeBoundaryWatchError(_ payload: Data) throws -> BoundaryWatchError {
+        var d = Decoder(payload)
+        let token = try d.u64()
+        let rawCode = try d.u8()
+        guard let code = BoundaryWatchErrorCode(rawValue: rawCode) else {
+            throw DecodeError.invalidPointerDelivery
+        }
+        return BoundaryWatchError(controlToken: token, code: code)
     }
 
     static func decodeDisplayList(_ payload: Data) throws -> [DisplayInfo] {

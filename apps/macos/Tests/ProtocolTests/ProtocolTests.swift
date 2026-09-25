@@ -74,6 +74,28 @@ struct ProtocolTests {
         #expect(encode(frame) == fixture("pointer-scroll.bin"))
     }
 
+    @Test func boundaryWatchStartFrameMatchesFixture() {
+        let frame = CxiFrame(
+            type: .boundaryWatchStart,
+            requestId: 10,
+            payload: Messages.boundaryWatchStart(
+                controlToken: 42,
+                displayId: 2,
+                edge: .right
+            )
+        )
+        #expect(encode(frame) == fixture("boundary-watch-start.bin"))
+    }
+
+    @Test func boundaryWatchStopFrameMatchesFixture() {
+        let frame = CxiFrame(
+            type: .boundaryWatchStop,
+            requestId: 0,
+            payload: Messages.boundaryWatchStop(controlToken: 42)
+        )
+        #expect(encode(frame) == fixture("boundary-watch-stop.bin"))
+    }
+
     @Test func pingFrameMatchesFixture() {
         let frame = CxiFrame(type: .ping, requestId: 6)
         #expect(encode(frame) == fixture("ping.bin"))
@@ -135,6 +157,29 @@ struct ProtocolTests {
     @Test func pongDecodesFromFixture() throws {
         let payload = payloadOf(fixture("pong.bin"))
         #expect(payload.isEmpty)
+    }
+
+    @Test func boundaryWatchResponsesDecodeFromFixtures() throws {
+        let ready = try Messages.decodeBoundaryWatchReady(
+            payloadOf(fixture("boundary-watch-ready.bin"))
+        )
+        #expect(ready.controlToken == 42)
+        #expect(ready.displayId == 2)
+        #expect(ready.mode == .compositor)
+        #expect(ready.layerStack == 2)
+
+        let reached = try Messages.decodeBoundaryReached(
+            payloadOf(fixture("boundary-reached.bin"))
+        )
+        #expect(reached.controlToken == 42)
+        #expect(reached.displayId == 2)
+        #expect(reached.edge == .right)
+
+        let failure = try Messages.decodeBoundaryWatchError(
+            payloadOf(fixture("boundary-watch-error.bin"))
+        )
+        #expect(failure.controlToken == 42)
+        #expect(failure.code == .backendChanged)
     }
 
     @Test func pointerResultDecodesAcceptedMovementFromFixture() throws {

@@ -1,0 +1,7 @@
+{
+  "type": "BOUNDARY_REACHED",
+  "requestId": 0,
+  "controlToken": "42",
+  "displayId": 2,
+  "edge": "RIGHT"
+}

@@ -36,6 +36,7 @@ public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
 public enum TransitionReason: String, Sendable {
     case activation
     case edgeEntered
+    case edgeExited
     case boundaryCrossed
     case emergencyReturn
     case watchdogTimeout
@@ -133,6 +134,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// False until the first movement event after entering is accumulated.
     /// The first event never triggers a return (issue #37).
     private var hasReceivedFirstMove = false
+    private var preparationRequiredStorage = false
 
     // MARK: - Public configuration (fixed at init, safe to read any time)
 
@@ -169,6 +171,10 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         queue.sync { sequenceCounter }
     }
 
+    public var requiresRemotePreparation: Bool {
+        queue.sync { preparationRequiredStorage }
+    }
+
     // MARK: - Transition handler
     //
     // Registration is intended to happen before concurrent use begins
@@ -193,27 +199,70 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
+            preparationRequiredStorage = false
             deactivation = transition(to: .disabled, reason: .deactivated)
         }
         return deactivation
     }
 
     /// Pointer reached a screen edge while macOS is active.
-    public func pointerAtEdge(_ edge: ScreenEdge) {
+    ///
+    /// Production issue #145 acquisition uses `requiresPreparation=true`:
+    /// the machine stops in `.edgeArmed` while the Android boundary authority
+    /// is prepared. Host suppression must not begin until `remotePrepared()`.
+    /// The default preserves the legacy direct transition for isolated policy
+    /// tests and explicit-coordinate paths that require no remote preparation.
+    public func pointerAtEdge(_ edge: ScreenEdge, requiresPreparation: Bool = false) {
         run {
             switch stateStorage {
             case .localActive:
+                entryEdgeStorage = edge
+                virtualAxisPosition = 0
+                hasReceivedFirstMove = false
+                preparationRequiredStorage = requiresPreparation
                 transition(to: .edgeArmed, reason: .edgeEntered)
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
-                transition(to: .remoteActive, reason: .edgeEntered)
+                if !requiresPreparation {
+                    transition(to: .remoteActive, reason: .edgeEntered)
+                }
             case .edgeArmed:
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
+                // Do not retarget an in-flight preparation to another host edge.
+                // A later acquisition may arm again after this one is cancelled.
+                break
             default: break
             }
+        }
+    }
+
+    /// Completes a previously prepared edge acquisition.
+    /// Returns false when the arm was cancelled or superseded before the
+    /// asynchronous remote preparation completed.
+    @discardableResult
+    public func remotePrepared() -> Bool {
+        var activated = false
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            activated = transition(to: .remoteActive, reason: .edgeEntered) != nil
+        }
+        return activated
+    }
+
+    /// Cancels a prepared acquisition when the local pointer moves away from
+    /// the configured edge before remote readiness is established.
+    public func cancelEdgePreparation() {
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            preparationRequiredStorage = false
+            transition(to: .localActive, reason: .edgeExited)
+        }
+    }
+
+    /// Authoritative normal return event from the remote boundary owner.
+    public func boundaryReached() {
+        run {
+            guard stateStorage == .remoteActive else { return }
+            returnToMacOS(reason: .boundaryCrossed)
         }
     }
 
@@ -353,6 +402,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private func returnToMacOS(reason: TransitionReason) {
         virtualAxisPosition = 0
         hasReceivedFirstMove = false
+        preparationRequiredStorage = false
         transition(to: .returning, reason: reason)
         transition(to: .localActive, reason: reason)
     }

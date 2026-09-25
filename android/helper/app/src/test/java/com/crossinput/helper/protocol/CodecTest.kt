@@ -181,6 +181,37 @@ class CodecTest {
     }
 
     @Test
+    fun boundaryWatchPayloadsRoundTrip() {
+        val startBytes = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
+            .putLong(42)
+            .putInt(2)
+            .put(1)
+            .array()
+        val start = Messages.boundaryWatchStart(startBytes)
+        assertEquals(42L, start.controlToken)
+        assertEquals(2, start.displayId)
+        assertEquals(1, start.edge)
+
+        val ready = Messages.boundaryWatchReady(42, 2, 1, 2)
+        val readyBuffer = ByteBuffer.wrap(ready).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(42L, readyBuffer.long)
+        assertEquals(2, readyBuffer.int)
+        assertEquals(1, readyBuffer.get().toInt())
+        assertEquals(2, readyBuffer.int)
+
+        val reached = Messages.boundaryReached(42, 2, 1)
+        val reachedBuffer = ByteBuffer.wrap(reached).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(42L, reachedBuffer.long)
+        assertEquals(2, reachedBuffer.int)
+        assertEquals(1, reachedBuffer.get().toInt())
+
+        val failure = Messages.boundaryWatchError(42, 3)
+        val failureBuffer = ByteBuffer.wrap(failure).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(42L, failureBuffer.long)
+        assertEquals(3, failureBuffer.get().toInt())
+    }
+
+    @Test
     fun createHidDescriptorParses() {
         val descriptor = byteArrayOf(0x05, 0x01, 0x09, 0x02, 0xA1.toByte())
         val payload = ByteBuffer.allocate(4 + descriptor.size).order(ByteOrder.LITTLE_ENDIAN)

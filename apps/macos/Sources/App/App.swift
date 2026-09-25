@@ -87,6 +87,7 @@ final class AppModel: ObservableObject {
     let sessionController: SessionController
     let handoffController: ControlHandoffController
     let inputCapabilityController: InputCapabilityController
+    private let boundaryWatchClient: BoundaryWatchClient
     private let targetController: TargetSelectionController
 
     var capture: InputCapture { handoffController.capture }
@@ -100,6 +101,8 @@ final class AppModel: ObservableObject {
         let reference = SessionReference()
         sessionController = SessionController(reference: reference)
         let sender = InputSender(session: reference)
+        let boundaryWatchClient = BoundaryWatchClient(session: reference)
+        self.boundaryWatchClient = boundaryWatchClient
         // Forward InputSender semantic failures through the unified sink
         // (lock-protected; safe from the delivery queue).
         sender.onDeliveryObservation = { [weak sessionController] observation in
@@ -107,6 +110,7 @@ final class AppModel: ObservableObject {
         }
         handoffController = ControlHandoffController(
             sender: sender,
+            boundaryWatch: boundaryWatchClient,
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
             captureStop: captureStop
@@ -131,9 +135,11 @@ final class AppModel: ObservableObject {
             self?.handleSessionUnavailable(reason)
         }
         targetController.onChange = { [weak self] targets, selected, state in
-            self?.targets = targets
-            self?.selectedTarget = selected
-            self?.targetState = state
+            guard let self else { return }
+            self.targets = targets
+            self.selectedTarget = selected
+            self.targetState = state
+            self.handoffController.updateRemoteTarget(selected?.id.rawValue)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
@@ -411,6 +417,10 @@ final class AppModel: ObservableObject {
     }
 
     private func handleUnsolicited(_ frame: CxiFrame) {
+        if let signal = boundaryWatchClient.decodeSignal(frame) {
+            handoffController.handleBoundarySignal(signal)
+            return
+        }
         switch frame.type {
         case .logEvent:
             if let log = try? Messages.decodeLogEvent(frame.payload) {
