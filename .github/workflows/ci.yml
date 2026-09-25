@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.
+  actions: read # Needed to inspect the canonical exact-SHA ci.yml workflow run.
   contents: read
 
 concurrency:
@@ -21,37 +21,70 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Reuse exact-SHA Fast evidence
+        id: fast-evidence
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-          EXPECTED_CHECK: macOS App Build + Test
+          EXPECTED_JOB: macOS App Build + Test
+          SAME_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
-          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
-          current_run="/actions/runs/${GITHUB_RUN_ID}/"
-          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
-            [.check_runs[]
-             | select(.name == $name and .app.slug == "github-actions")
-             | select(((.details_url // "") | contains($current_run)) | not)]
-            | if length == 0 then empty else max_by(.id) end
-          ' <<<"$checks")"
-          if [ -z "$latest" ]; then
-            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
-            exit 1
+          if [ "$SAME_REPOSITORY" != "true" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fork PR cannot reuse base-repository workflow evidence; Final will execute the local Fast checks."
+            exit 0
           fi
-          status="$(jq -r '.status' <<<"$latest")"
-          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
-          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
-            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
-            exit 1
+          base_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$BASE_SHA" --jq '.sha')"
+          head_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$EXPECTED_SHA" --jq '.sha')"
+          if [ "$base_workflow_sha" != "$head_workflow_sha" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fast producer workflow changed on this PR; Final will execute the local Fast checks instead of trusting self-modified evidence."
+            exit 0
           fi
-          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
+
+          for _ in $(seq 1 60); do
+            runs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$EXPECTED_SHA&per_page=100")"
+            latest="$(jq -c --arg sha "$EXPECTED_SHA" --arg current "$GITHUB_RUN_ID" '
+              [.workflow_runs[]
+               | select(.head_sha == $sha and .event == "pull_request")
+               | select((.id | tostring) != $current)]
+              | if length == 0 then empty else max_by(.id) end
+            ' <<<"$runs")"
+            if [ -z "$latest" ]; then sleep 5; continue; fi
+            status="$(jq -r '.status' <<<"$latest")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+            if [ "$status" != "completed" ]; then sleep 5; continue; fi
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Canonical ci.yml workflow for exact HEAD $EXPECTED_SHA concluded '$conclusion'; refusing stale or failed evidence."
+              exit 1
+            fi
+            run_id="$(jq -r '.id' <<<"$latest")"
+            jobs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100")"
+            matching_jobs="$(jq --arg name "$EXPECTED_JOB" '[.jobs[] | select(.name == $name)] | length' <<<"$jobs")"
+            if [ "$matching_jobs" != "1" ]; then
+              echo "::error::Canonical run $run_id must contain exactly one '$EXPECTED_JOB' job; found $matching_jobs."
+              exit 1
+            fi
+            job_status="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | .status' <<<"$jobs")"
+            job_conclusion="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | (.conclusion // "")' <<<"$jobs")"
+            if [ "$job_status" != "completed" ] || [ "$job_conclusion" != "success" ]; then
+              echo "::error::Canonical '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA is status=$job_status conclusion=$job_conclusion."
+              exit 1
+            fi
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing canonical successful '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA."
+            exit 0
+          done
+          echo "::error::Timed out waiting for canonical exact-SHA '$EXPECTED_JOB' evidence at $EXPECTED_SHA."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Swift Build
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: |
           cd apps/macos
           swift build
@@ -68,32 +101,65 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Reuse exact-SHA Fast evidence
+        id: fast-evidence
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-          EXPECTED_CHECK: Android Helper Build + Test
+          EXPECTED_JOB: Android Helper Build + Test
+          SAME_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
-          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
-          current_run="/actions/runs/${GITHUB_RUN_ID}/"
-          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
-            [.check_runs[]
-             | select(.name == $name and .app.slug == "github-actions")
-             | select(((.details_url // "") | contains($current_run)) | not)]
-            | if length == 0 then empty else max_by(.id) end
-          ' <<<"$checks")"
-          if [ -z "$latest" ]; then
-            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
-            exit 1
+          if [ "$SAME_REPOSITORY" != "true" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fork PR cannot reuse base-repository workflow evidence; Final will execute the local Fast checks."
+            exit 0
           fi
-          status="$(jq -r '.status' <<<"$latest")"
-          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
-          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
-            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
-            exit 1
+          base_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$BASE_SHA" --jq '.sha')"
+          head_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$EXPECTED_SHA" --jq '.sha')"
+          if [ "$base_workflow_sha" != "$head_workflow_sha" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fast producer workflow changed on this PR; Final will execute the local Fast checks instead of trusting self-modified evidence."
+            exit 0
           fi
-          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
+
+          for _ in $(seq 1 60); do
+            runs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$EXPECTED_SHA&per_page=100")"
+            latest="$(jq -c --arg sha "$EXPECTED_SHA" --arg current "$GITHUB_RUN_ID" '
+              [.workflow_runs[]
+               | select(.head_sha == $sha and .event == "pull_request")
+               | select((.id | tostring) != $current)]
+              | if length == 0 then empty else max_by(.id) end
+            ' <<<"$runs")"
+            if [ -z "$latest" ]; then sleep 5; continue; fi
+            status="$(jq -r '.status' <<<"$latest")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+            if [ "$status" != "completed" ]; then sleep 5; continue; fi
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Canonical ci.yml workflow for exact HEAD $EXPECTED_SHA concluded '$conclusion'; refusing stale or failed evidence."
+              exit 1
+            fi
+            run_id="$(jq -r '.id' <<<"$latest")"
+            jobs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100")"
+            matching_jobs="$(jq --arg name "$EXPECTED_JOB" '[.jobs[] | select(.name == $name)] | length' <<<"$jobs")"
+            if [ "$matching_jobs" != "1" ]; then
+              echo "::error::Canonical run $run_id must contain exactly one '$EXPECTED_JOB' job; found $matching_jobs."
+              exit 1
+            fi
+            job_status="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | .status' <<<"$jobs")"
+            job_conclusion="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | (.conclusion // "")' <<<"$jobs")"
+            if [ "$job_status" != "completed" ] || [ "$job_conclusion" != "success" ]; then
+              echo "::error::Canonical '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA is status=$job_status conclusion=$job_conclusion."
+              exit 1
+            fi
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing canonical successful '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA."
+            exit 0
+          done
+          echo "::error::Timed out waiting for canonical exact-SHA '$EXPECTED_JOB' evidence at $EXPECTED_SHA."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -107,15 +173,15 @@ jobs:
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
       - name: Validate Gradle wrapper
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       - name: "Static guard: no input payload in logs"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # Fails closed: missing scanner or undetected planted violation breaks
         # the job (the previous inline `rg` call false-greened without ripgrep).
         run: scripts/check-log-guard.sh
       - name: Gradle Build
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: |
           cd android/helper
           chmod +x gradlew
@@ -128,7 +194,7 @@ jobs:
           chmod +x gradlew
           ./gradlew test --console=plain
       - name: Verify Java 25 / Android 17 toolchain
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: scripts/check-android-toolchain.sh
 
   markdown:
@@ -137,42 +203,75 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Reuse exact-SHA Fast evidence
+        id: fast-evidence
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-          EXPECTED_CHECK: Documentation Validation
+          EXPECTED_JOB: Documentation Validation
+          SAME_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
-          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
-          current_run="/actions/runs/${GITHUB_RUN_ID}/"
-          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
-            [.check_runs[]
-             | select(.name == $name and .app.slug == "github-actions")
-             | select(((.details_url // "") | contains($current_run)) | not)]
-            | if length == 0 then empty else max_by(.id) end
-          ' <<<"$checks")"
-          if [ -z "$latest" ]; then
-            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
-            exit 1
+          if [ "$SAME_REPOSITORY" != "true" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fork PR cannot reuse base-repository workflow evidence; Final will execute the local Fast checks."
+            exit 0
           fi
-          status="$(jq -r '.status' <<<"$latest")"
-          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
-          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
-            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
-            exit 1
+          base_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$BASE_SHA" --jq '.sha')"
+          head_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$EXPECTED_SHA" --jq '.sha')"
+          if [ "$base_workflow_sha" != "$head_workflow_sha" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fast producer workflow changed on this PR; Final will execute the local Fast checks instead of trusting self-modified evidence."
+            exit 0
           fi
-          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
+
+          for _ in $(seq 1 60); do
+            runs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$EXPECTED_SHA&per_page=100")"
+            latest="$(jq -c --arg sha "$EXPECTED_SHA" --arg current "$GITHUB_RUN_ID" '
+              [.workflow_runs[]
+               | select(.head_sha == $sha and .event == "pull_request")
+               | select((.id | tostring) != $current)]
+              | if length == 0 then empty else max_by(.id) end
+            ' <<<"$runs")"
+            if [ -z "$latest" ]; then sleep 5; continue; fi
+            status="$(jq -r '.status' <<<"$latest")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+            if [ "$status" != "completed" ]; then sleep 5; continue; fi
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Canonical ci.yml workflow for exact HEAD $EXPECTED_SHA concluded '$conclusion'; refusing stale or failed evidence."
+              exit 1
+            fi
+            run_id="$(jq -r '.id' <<<"$latest")"
+            jobs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100")"
+            matching_jobs="$(jq --arg name "$EXPECTED_JOB" '[.jobs[] | select(.name == $name)] | length' <<<"$jobs")"
+            if [ "$matching_jobs" != "1" ]; then
+              echo "::error::Canonical run $run_id must contain exactly one '$EXPECTED_JOB' job; found $matching_jobs."
+              exit 1
+            fi
+            job_status="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | .status' <<<"$jobs")"
+            job_conclusion="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | (.conclusion // "")' <<<"$jobs")"
+            if [ "$job_status" != "completed" ] || [ "$job_conclusion" != "success" ]; then
+              echo "::error::Canonical '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA is status=$job_status conclusion=$job_conclusion."
+              exit 1
+            fi
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing canonical successful '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA."
+            exit 0
+          done
+          echo "::error::Timed out waiting for canonical exact-SHA '$EXPECTED_JOB' evidence at $EXPECTED_SHA."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         with:
           node-version: "26.9.0"
       - name: Protocol Document Fixture Validation
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: |
           node protocol/scripts/check-fixtures.mjs
 
@@ -182,77 +281,110 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Reuse exact-SHA Fast evidence
+        id: fast-evidence
         if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
-          EXPECTED_CHECK: Evidence & Tooling Validation
+          EXPECTED_JOB: Evidence & Tooling Validation
+          SAME_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
-          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
-          current_run="/actions/runs/${GITHUB_RUN_ID}/"
-          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
-            [.check_runs[]
-             | select(.name == $name and .app.slug == "github-actions")
-             | select(((.details_url // "") | contains($current_run)) | not)]
-            | if length == 0 then empty else max_by(.id) end
-          ' <<<"$checks")"
-          if [ -z "$latest" ]; then
-            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
-            exit 1
+          if [ "$SAME_REPOSITORY" != "true" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fork PR cannot reuse base-repository workflow evidence; Final will execute the local Fast checks."
+            exit 0
           fi
-          status="$(jq -r '.status' <<<"$latest")"
-          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
-          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
-            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
-            exit 1
+          base_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$BASE_SHA" --jq '.sha')"
+          head_workflow_sha="$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/ci.yml?ref=$EXPECTED_SHA" --jq '.sha')"
+          if [ "$base_workflow_sha" != "$head_workflow_sha" ]; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            echo "Fast producer workflow changed on this PR; Final will execute the local Fast checks instead of trusting self-modified evidence."
+            exit 0
           fi
-          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
+
+          for _ in $(seq 1 60); do
+            runs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$EXPECTED_SHA&per_page=100")"
+            latest="$(jq -c --arg sha "$EXPECTED_SHA" --arg current "$GITHUB_RUN_ID" '
+              [.workflow_runs[]
+               | select(.head_sha == $sha and .event == "pull_request")
+               | select((.id | tostring) != $current)]
+              | if length == 0 then empty else max_by(.id) end
+            ' <<<"$runs")"
+            if [ -z "$latest" ]; then sleep 5; continue; fi
+            status="$(jq -r '.status' <<<"$latest")"
+            conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+            if [ "$status" != "completed" ]; then sleep 5; continue; fi
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::Canonical ci.yml workflow for exact HEAD $EXPECTED_SHA concluded '$conclusion'; refusing stale or failed evidence."
+              exit 1
+            fi
+            run_id="$(jq -r '.id' <<<"$latest")"
+            jobs="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?filter=latest&per_page=100")"
+            matching_jobs="$(jq --arg name "$EXPECTED_JOB" '[.jobs[] | select(.name == $name)] | length' <<<"$jobs")"
+            if [ "$matching_jobs" != "1" ]; then
+              echo "::error::Canonical run $run_id must contain exactly one '$EXPECTED_JOB' job; found $matching_jobs."
+              exit 1
+            fi
+            job_status="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | .status' <<<"$jobs")"
+            job_conclusion="$(jq -r --arg name "$EXPECTED_JOB" '.jobs[] | select(.name == $name) | (.conclusion // "")' <<<"$jobs")"
+            if [ "$job_status" != "completed" ] || [ "$job_conclusion" != "success" ]; then
+              echo "::error::Canonical '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA is status=$job_status conclusion=$job_conclusion."
+              exit 1
+            fi
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing canonical successful '$EXPECTED_JOB' evidence for exact HEAD $EXPECTED_SHA."
+            exit 0
+          done
+          echo "::error::Timed out waiting for canonical exact-SHA '$EXPECTED_JOB' evidence at $EXPECTED_SHA."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         with:
           persist-credentials: false
       - name: "Repository hardening policy (workflows vs .github/hardening-policy.json)"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # Static, offline half of the drift audit: required-context producers,
         # action pinning, least privilege, and trust boundaries. Kept in an
         # always-present required job so a new workflow-security context cannot
         # itself become an optional, silently-skipped check.
         run: python3 scripts/check-workflow-policy.py
       - name: "Repository hardening policy fixtures"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: python3 scripts/test-workflow-policy.py
       - name: "Issue metadata semantics"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: node --test scripts/issue-metadata.test.cjs
       - name: "GitHub Actions static security"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: bash scripts/check-actions-security.sh
       # The on-device drivers are not exercised by any other job; an unbalanced
       # brace here only surfaces at verification time on a real device.
       - name: "bash -n"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: |
           find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: "Semantic input boundary guard"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: python3 scripts/check-input-boundaries.py
       - name: "Issue62 aggregation fixture"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # Runs the embedded python aggregator from verify-device-issue62.sh
         # against synthetic raw evidence so a NameError/regression in the
         # summary pipeline fails CI instead of surfacing only on a device.
         run: python3 scripts/test-issue62-aggregator.py
       - name: "Issue62 rc-path fixture"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # The driver must survive a missing result JSON (cxi-stress exit 3
         # writes no JSON) and take the PRECONDITION path instead.
         run: bash scripts/test-issue62-rc-path.sh
       - name: "Evidence sanitizer regression"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: bash scripts/test-verify-device-evidence-sanitizer.sh
       - name: "ADR-0012 stability analyzer fixtures"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # The Level-3 gate computation must not regress: every gate state
         # (PASS / INCOMPLETE / HOLD / FAIL), cycle-credit rules, identity
         # validation, and fail-closed behavior are pinned here.
