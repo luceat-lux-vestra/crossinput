@@ -161,8 +161,8 @@ def main():
     # Workflow-wide write permission instead of a job-scoped one.
     case("top-level write permission",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "permissions:\n  contents: read\n",
-                           "permissions:\n  contents: write\n"),
+                           "permissions:\n  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.\n  contents: read\n",
+                           "permissions:\n  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.\n  contents: write\n"),
          "PERM_TOP_LEVEL_WRITE")
 
     case("undeclared job write permission",
@@ -199,8 +199,12 @@ def main():
     # Attacker-controlled text interpolated into shell.
     case("shell injection from PR title",
          lambda root: edit(workflow(root, "ci.yml"),
-                           '      - name: "bash -n"\n        run: |\n',
-                           '      - name: "bash -n"\n        run: |\n'
+                           '      - name: "bash -n"\n'
+                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}\n"
+                           '        run: |\n',
+                           '      - name: "bash -n"\n'
+                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}\n"
+                           '        run: |\n'
                            '          echo "${{ github.event.pull_request.title }}"\n'),
          "TRUST_SHELL_INJECTION")
 
