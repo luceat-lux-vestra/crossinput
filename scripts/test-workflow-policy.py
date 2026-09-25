@@ -200,10 +200,10 @@ def main():
     case("shell injection from PR title",
          lambda root: edit(workflow(root, "ci.yml"),
                            '      - name: "bash -n"\n'
-                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}\n"
+                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}\n"
                            '        run: |\n',
                            '      - name: "bash -n"\n'
-                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}\n"
+                           "        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}\n"
                            '        run: |\n'
                            '          echo "${{ github.event.pull_request.title }}"\n'),
          "TRUST_SHELL_INJECTION")
