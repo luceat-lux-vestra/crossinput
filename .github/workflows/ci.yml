@@ -7,6 +7,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
+  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.
   contents: read
 
 concurrency:
@@ -19,10 +20,38 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
+      - name: Reuse exact-SHA Fast evidence
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_CHECK: macOS App Build + Test
+        run: |
+          set -euo pipefail
+          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
+          current_run="/actions/runs/${GITHUB_RUN_ID}/"
+          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
+            [.check_runs[]
+             | select(.name == $name and .app.slug == "github-actions")
+             | select(((.details_url // "") | contains($current_run)) | not)]
+            | if length == 0 then empty else max_by(.id) end
+          ' <<<"$checks")"
+          if [ -z "$latest" ]; then
+            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
+            exit 1
+          fi
+          status="$(jq -r '.status' <<<"$latest")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
+            exit 1
+          fi
+          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Swift Build
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: |
           cd apps/macos
           swift build
@@ -38,6 +67,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Reuse exact-SHA Fast evidence
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_CHECK: Android Helper Build + Test
+        run: |
+          set -euo pipefail
+          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
+          current_run="/actions/runs/${GITHUB_RUN_ID}/"
+          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
+            [.check_runs[]
+             | select(.name == $name and .app.slug == "github-actions")
+             | select(((.details_url // "") | contains($current_run)) | not)]
+            | if length == 0 then empty else max_by(.id) end
+          ' <<<"$checks")"
+          if [ -z "$latest" ]; then
+            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
+            exit 1
+          fi
+          status="$(jq -r '.status' <<<"$latest")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
+            exit 1
+          fi
+          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -51,12 +107,15 @@ jobs:
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
       - name: Validate Gradle wrapper
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       - name: "Static guard: no input payload in logs"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         # Fails closed: missing scanner or undetected planted violation breaks
         # the job (the previous inline `rg` call false-greened without ripgrep).
         run: scripts/check-log-guard.sh
       - name: Gradle Build
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: |
           cd android/helper
           chmod +x gradlew
@@ -69,6 +128,7 @@ jobs:
           chmod +x gradlew
           ./gradlew test --console=plain
       - name: Verify Java 25 / Android 17 toolchain
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: scripts/check-android-toolchain.sh
 
   markdown:
@@ -76,13 +136,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Reuse exact-SHA Fast evidence
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_CHECK: Documentation Validation
+        run: |
+          set -euo pipefail
+          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
+          current_run="/actions/runs/${GITHUB_RUN_ID}/"
+          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
+            [.check_runs[]
+             | select(.name == $name and .app.slug == "github-actions")
+             | select(((.details_url // "") | contains($current_run)) | not)]
+            | if length == 0 then empty else max_by(.id) end
+          ' <<<"$checks")"
+          if [ -z "$latest" ]; then
+            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
+            exit 1
+          fi
+          status="$(jq -r '.status' <<<"$latest")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
+            exit 1
+          fi
+          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         with:
           node-version: "26.9.0"
       - name: Protocol Document Fixture Validation
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: |
           node protocol/scripts/check-fixtures.mjs
 
@@ -91,40 +181,78 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Reuse exact-SHA Fast evidence
+        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_CHECK: Evidence & Tooling Validation
+        run: |
+          set -euo pipefail
+          checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$EXPECTED_SHA/check-runs?filter=all&per_page=100")"
+          current_run="/actions/runs/${GITHUB_RUN_ID}/"
+          latest="$(jq -c --arg name "$EXPECTED_CHECK" --arg current_run "$current_run" '
+            [.check_runs[]
+             | select(.name == $name and .app.slug == "github-actions")
+             | select(((.details_url // "") | contains($current_run)) | not)]
+            | if length == 0 then empty else max_by(.id) end
+          ' <<<"$checks")"
+          if [ -z "$latest" ]; then
+            echo "::error::No prior '$EXPECTED_CHECK' check exists for exact HEAD $EXPECTED_SHA."
+            exit 1
+          fi
+          status="$(jq -r '.status' <<<"$latest")"
+          conclusion="$(jq -r '.conclusion // ""' <<<"$latest")"
+          if [ "$status" != "completed" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Latest prior '$EXPECTED_CHECK' evidence for exact HEAD $EXPECTED_SHA is status=$status conclusion=$conclusion; refusing stale-success reuse."
+            exit 1
+          fi
+          echo "Reused latest successful Fast evidence for $EXPECTED_CHECK at $EXPECTED_SHA."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         with:
           persist-credentials: false
       - name: "Repository hardening policy (workflows vs .github/hardening-policy.json)"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         # Static, offline half of the drift audit: required-context producers,
         # action pinning, least privilege, and trust boundaries. Kept in an
         # always-present required job so a new workflow-security context cannot
         # itself become an optional, silently-skipped check.
         run: python3 scripts/check-workflow-policy.py
       - name: "Repository hardening policy fixtures"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: python3 scripts/test-workflow-policy.py
       - name: "Issue metadata semantics"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: node --test scripts/issue-metadata.test.cjs
       - name: "GitHub Actions static security"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: bash scripts/check-actions-security.sh
       # The on-device drivers are not exercised by any other job; an unbalanced
       # brace here only surfaces at verification time on a real device.
       - name: "bash -n"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: |
           find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: "Semantic input boundary guard"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: python3 scripts/check-input-boundaries.py
       - name: "Issue62 aggregation fixture"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         # Runs the embedded python aggregator from verify-device-issue62.sh
         # against synthetic raw evidence so a NameError/regression in the
         # summary pipeline fails CI instead of surfacing only on a device.
         run: python3 scripts/test-issue62-aggregator.py
       - name: "Issue62 rc-path fixture"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         # The driver must survive a missing result JSON (cxi-stress exit 3
         # writes no JSON) and take the PRECONDITION path instead.
         run: bash scripts/test-issue62-rc-path.sh
       - name: "Evidence sanitizer regression"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         run: bash scripts/test-verify-device-evidence-sanitizer.sh
       - name: "ADR-0012 stability analyzer fixtures"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' }}
         # The Level-3 gate computation must not regress: every gate state
         # (PASS / INCOMPLETE / HOLD / FAIL), cycle-credit rules, identity
         # validation, and fail-closed behavior are pinned here.
