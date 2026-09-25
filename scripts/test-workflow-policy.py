@@ -161,8 +161,8 @@ def main():
     # Workflow-wide write permission instead of a job-scoped one.
     case("top-level write permission",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "permissions:\n  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.\n  contents: read\n",
-                           "permissions:\n  checks: read # Needed to inspect prior exact-SHA check results for Fast evidence reuse.\n  contents: write\n"),
+                           "permissions:\n  actions: read # Needed to inspect the canonical exact-SHA ci.yml workflow run.\n  contents: read\n",
+                           "permissions:\n  actions: read # Needed to inspect the canonical exact-SHA ci.yml workflow run.\n  contents: write\n"),
          "PERM_TOP_LEVEL_WRITE")
 
     case("undeclared job write permission",
