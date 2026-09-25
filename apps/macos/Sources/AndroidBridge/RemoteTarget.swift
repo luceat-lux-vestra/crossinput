@@ -36,6 +36,11 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
     public let densityDpi: UInt32
     public let rotation: UInt8
     public let uniqueId: String
+    /// Mirrors the helper AUTO policy's conservative desktop-sink decision.
+    /// When true, semantic relative movement may be delivered through a
+    /// system-routed UHID device and therefore is not screen-coordinate
+    /// authority for automatic remote-edge return.
+    public let prefersSystemRoutedPointer: Bool
 
     public init(id: RemoteTargetID,
                 name: String,
@@ -45,7 +50,8 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
                 height: UInt32,
                 densityDpi: UInt32,
                 rotation: UInt8,
-                uniqueId: String) {
+                uniqueId: String,
+                prefersSystemRoutedPointer: Bool = false) {
         self.id = id
         self.name = name
         self.kind = kind
@@ -55,6 +61,7 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
         self.densityDpi = densityDpi
         self.rotation = rotation
         self.uniqueId = uniqueId
+        self.prefersSystemRoutedPointer = prefersSystemRoutedPointer
     }
 }
 
@@ -65,11 +72,27 @@ public struct RemoteTarget: Identifiable, Sendable, Equatable {
 public enum RemoteTargetCatalog {
     private static let v1DesktopType: UInt8 = 7
     private static let v1HdmiType: UInt8 = 2
+    private static let v1VirtualType: UInt8 = 5
     private static let v1DesktopFlag: UInt32 = 0x40
+    private static let samsungDesktopName = "Desktop"
+    private static let samsungDesktopUniqueIdSegment =
+        "virtual:android,1000,Desktop,"
 
     public static func normalize(_ display: DisplayInfo) -> RemoteTarget {
         let isDesktop = display.isDesktop || display.type == v1DesktopType ||
             (display.flags & v1DesktopFlag) != 0
+        // Keep this intentionally aligned with Android SystemRoutePolicy:
+        // AOSP FLAG_DESKTOP (represented directly or by discovery's type=7)
+        // or the verified Samsung DeX virtual-desktop shape. HDMI is external
+        // but is not a system-routed UHID candidate in AUTO mode.
+        let prefersSystemRoutedPointer =
+            (display.flags & v1DesktopFlag) != 0 ||
+            display.type == v1DesktopType ||
+            (
+                display.type == v1VirtualType &&
+                display.name == samsungDesktopName &&
+                display.uniqueId.contains(samsungDesktopUniqueIdSegment)
+            )
         let kind: RemoteTargetKind
         if isDesktop || display.type == v1HdmiType {
             kind = .external
@@ -94,6 +117,7 @@ public enum RemoteTargetCatalog {
             densityDpi: display.densityDpi,
             rotation: display.rotation,
             uniqueId: display.uniqueId,
+            prefersSystemRoutedPointer: prefersSystemRoutedPointer,
         )
     }
 

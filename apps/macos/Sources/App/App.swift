@@ -109,8 +109,12 @@ final class AppModel: ObservableObject {
             sender: sender,
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
-            captureStop: captureStop
+            captureStop: captureStop,
+            hostPointerBackend: HostPointerOwnershipBackends.makeDefault()
         )
+        // Fail closed until a confirmed target tells us whether the legacy
+        // relative-movement normal-return policy is even admissible.
+        handoffController.setAutomaticReturnAuthority(.none)
         targetController = TargetSelectionController(session: reference)
 
         // Production telemetry sink (review round 3): a single lock-protected
@@ -131,9 +135,25 @@ final class AppModel: ObservableObject {
             self?.handleSessionUnavailable(reason)
         }
         targetController.onChange = { [weak self] targets, selected, state in
-            self?.targets = targets
-            self?.selectedTarget = selected
-            self?.targetState = state
+            guard let self else { return }
+            self.targets = targets
+            self.selectedTarget = selected
+            self.targetState = state
+
+            // Only targets for which the helper AUTO policy prefers the
+            // system-routed UHID pointer lose relative-movement boundary
+            // authority. HDMI/external targets served by explicit InputManager
+            // routing retain the existing behavior. #145 owns any future
+            // portable authoritative automatic-return contract for UHID.
+            let authority: AutomaticReturnAuthority
+            if let selected {
+                authority = selected.prefersSystemRoutedPointer
+                    ? .none
+                    : .relativeMovement
+            } else {
+                authority = .none
+            }
+            self.handoffController.setAutomaticReturnAuthority(authority)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state

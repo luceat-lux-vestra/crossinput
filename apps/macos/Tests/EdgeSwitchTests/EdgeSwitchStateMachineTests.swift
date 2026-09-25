@@ -312,6 +312,75 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         }
     }
 
+    func testCoordinatedBoundaryReturnStopsAtReturningUntilCompleted() {
+        let machine = makeRemoteActive(edge: .left)
+
+        // First event is exempt from return.
+        XCTAssertFalse(
+            machine.beginBoundaryReturnIfNeeded(
+                requestedDx: 1,
+                requestedDy: 0,
+                deliveredDx: 1,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        XCTAssertTrue(
+            machine.beginBoundaryReturnIfNeeded(
+                requestedDx: 120,
+                requestedDy: 0,
+                deliveredDx: 120,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertEqual(machine.state, .returning)
+
+        machine.completeReturn(reason: .boundaryCrossed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testNoAutomaticBoundaryReturnWithoutAuthority() {
+        let machine = makeRemoteActive(edge: .left)
+        machine.setAutomaticReturnAuthority(.none)
+
+        // These deltas would cross the legacy virtual boundary immediately
+        // after the first-movement exemption if relative movement still had
+        // authority.
+        machine.pointerMoved(requestedDx: 120, requestedDy: 0,
+                             deliveredDx: 120, deliveredDy: 0)
+        machine.pointerMoved(requestedDx: 120, requestedDy: 0,
+                             deliveredDx: 120, deliveredDy: 0)
+
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        // Explicit/fail-safe return remains available.
+        machine.forceReturn(reason: .emergencyReturn)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testAuthorityChangeClearsLegacyMovementAccumulation() {
+        let machine = makeRemoteActive(edge: .left)
+
+        // First event is exempt. The second leaves the legacy axis close to
+        // the return threshold without crossing it.
+        machine.pointerMoved(requestedDx: 1, requestedDy: 0,
+                             deliveredDx: 1, deliveredDy: 0)
+        machine.pointerMoved(requestedDx: 50, requestedDy: 0,
+                             deliveredDx: 50, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        machine.setAutomaticReturnAuthority(.none)
+        machine.setAutomaticReturnAuthority(.relativeMovement)
+
+        // A stale -50 baseline must not combine with this fresh movement.
+        machine.pointerMoved(requestedDx: 20, requestedDy: 0,
+                             deliveredDx: 20, deliveredDy: 0)
+        machine.pointerMoved(requestedDx: 20, requestedDy: 0,
+                             deliveredDx: 20, deliveredDy: 0)
+        XCTAssertEqual(machine.state, .remoteActive)
+    }
+
     func testCallbackSequencesRemainMonotonicAcrossConcurrentCommands() {
         let machine = EdgeSwitchStateMachine()
         let collector = TransitionCollector()

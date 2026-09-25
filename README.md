@@ -4,7 +4,7 @@
 
 Ampersand captures pointer and keyboard input on macOS and hands control to a selected Android display when the pointer crosses a configured screen edge. Its primary use case is Samsung DeX: use a Galaxy device as a desktop target while keeping keyboard and pointer control on the Mac.
 
-Pointer and keyboard input are intentionally one-way: **macOS → Android**. Push the pointer back to return to macOS. No root or phone-side app installation is required in the current runtime model; the helper is launched through ADB/app_process after wireless-debugging setup.
+Pointer and keyboard input are intentionally one-way: **macOS → Android**. Return behavior depends on pointer routing: targets with authoritative boundary accounting may use pointer pull-back, while current system-routed desktop UHID targets such as Samsung DeX use **Return to Mac (⇧⌘X)** or another fail-safe/local-return trigger. Relative UHID deltas are not treated as screen-coordinate authority for DeX automatic return; that contract remains tracked separately in #145. No root or phone-side app installation is required in the current runtime model; the helper is launched through ADB/app_process after wireless-debugging setup.
 
 The user-facing product and macOS application are **Ampersand**. This repository keeps `crossinput` as its repository and technical namespace, while the wire protocol uses the **CXI** prefix.
 
@@ -21,7 +21,7 @@ The user-facing product and macOS application are **Ampersand**. This repository
 
 ## Features
 
-- **Edge switching** — cross a configured macOS screen edge to hand control to Android, then push back to return.
+- **Edge switching** — cross a configured macOS screen edge to hand control to Android. Return policy is backend-aware: authoritative routed targets may support boundary pull-back; current system-routed DeX UHID uses explicit/fail-safe Return to Mac instead of inferring a remote edge from relative deltas.
 - **Pointer support** — movement, left/right/middle click, drag, vertical scroll, and horizontal scroll.
 - **Keyboard support** — macOS → Android key delivery with modifier/shortcut handling and the implemented Korean input path.
 - **DeX-first routing** — desktop targets such as DeX prefer system-routed UHID so the visible Android cursor follows the normal Android input path.
@@ -55,7 +55,7 @@ Making the released app bootstrap the matching helper itself remains part of rel
 
 | Component | Requirement |
 |---|---|
-| macOS | 14+; Apple Silicon preferred |
+| macOS | 15+ for current development/CoreHID host ownership; Apple Silicon preferred. Historical v0.1.1 was built for macOS 14+. |
 | Android | Android 10+; Samsung Galaxy/DeX is the primary supported use case |
 | Device setup | Developer options + Wireless debugging |
 | adb | 37+ with mDNS wireless-debugging support |

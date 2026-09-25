@@ -6,7 +6,21 @@ import CoreGraphics
 import AndroidBridge
 import Protocol
 import EdgeSwitch
+import InputCapability
 @testable import InputCapture
+
+private final class GrantedInputCapabilitySystem:
+    InputCapabilitySystem, @unchecked Sendable {
+    func accessibilityTrusted() -> Bool { true }
+    func requestAccessibility() {}
+    func listenEventAccessGranted() -> Bool { true }
+    func requestListenEventAccess() {}
+}
+
+private final class CleanupBarrier: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let resume = DispatchSemaphore(value: 0)
+}
 
 private final class TestEventBox: @unchecked Sendable {
     let event: CGEvent
@@ -99,6 +113,248 @@ final class InputSenderTests: XCTestCase {
                                                .pointerMoveRel, .pointerScroll])
     }
 
+    func testFailedRemoteCleanupBlocksSameSessionReentryUntilReplacement() async {
+        final class CleanupFailingSession:
+            FakeSession, @unchecked Sendable {
+            override func send(_ frame: CxiFrame) throws {
+                if frame.type == .pointerButton,
+                   frame.requestId == 0 {
+                    throw ConnectionError.protocolError(
+                        "injected cleanup failure"
+                    )
+                }
+                try super.send(frame)
+            }
+        }
+
+        let session = CleanupFailingSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(
+            downDone.wait(timeout: .now() + 1),
+            .success
+        )
+        XCTAssertTrue(sender.isHandoffReady)
+
+        sender.releaseRemotelyHeldButtons()
+        sender.waitForDrain()
+
+        XCTAssertTrue(
+            session.isConnected,
+            "injected semantic cleanup failure keeps transport apparently live"
+        )
+        XCTAssertFalse(
+            sender.isHandoffReady,
+            "failed persistent-state cleanup must fence same-session reentry"
+        )
+
+        let replacement = FakeSession()
+        reference.set(replacement)
+
+        XCTAssertTrue(
+            sender.isHandoffReady,
+            "a new session generation starts without the old stuck state"
+        )
+    }
+
+    func testRemoteCleanupFenceBlocksReentryUntilOldPointerWorkSettles() async {
+        let fixture = makeFixture()
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: fixture.sender,
+            capture: capture,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertTrue(fixture.sender.isHandoffReady)
+
+        // Hold old pointer work inside transport. Cleanup must remain pending
+        // behind it, and an edge event during that interval must stay local.
+        fixture.sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        )
+        awaitInFlight(fixture.session)
+
+        fixture.sender.releaseRemotelyHeldButtons()
+        XCTAssertFalse(fixture.sender.isHandoffReady)
+
+        capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+
+        XCTAssertTrue(fixture.sender.isHandoffReady)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(fixture.session.sentPointerButtonEvents.first?.1, false)
+
+        // After cleanup finishes a fresh edge event may arm the next epoch.
+        capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        controller.emergencyReturn()
+    }
+
+    func testDisconnectedSessionObjectCannotArmEdgeHandoff() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
+        )
+
+        XCTAssertEqual(controller.enable(), .enabled)
+        XCTAssertEqual(machine.state, .localActive)
+
+        // Model the narrow window before SessionController's MainActor
+        // disconnect callback clears SessionReference.
+        session.shutdownAndWait()
+        XCTAssertFalse(session.isConnected)
+        XCTAssertNotNil(reference.snapshot().connection)
+
+        capture.onScreenEdge?(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+    }
+
+    func testQueuedOrdinaryKeyCannotCrossCaptureReleaseBoundary() async {
+        let session = GatedKeySendSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let releaseBoundary = CleanupBarrier()
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            afterSuppressionDeactivatedBeforeCallbacks: {
+                releaseBoundary.entered.signal()
+                _ = releaseBoundary.resume.wait(timeout: .now() + 2)
+            }
+        )
+        let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
+        )
+
+        XCTAssertEqual(controller.enable(), .enabled)
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        let generation = try! XCTUnwrap(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+        XCTAssertTrue(capture.isSuppressed)
+
+        let keyA = CapturedKeyEvent(
+            key: .a,
+            modifiers: [],
+            transition: .down,
+            repeatCount: 0
+        )
+        capture.onKeyEventWithGeneration?(keyA, generation)
+        XCTAssertEqual(
+            session.firstSendEntered.wait(timeout: .now() + 1),
+            .success
+        )
+
+        let keyB = CapturedKeyEvent(
+            key: .b,
+            modifiers: [],
+            transition: .down,
+            repeatCount: 0
+        )
+        capture.onKeyEventWithGeneration?(keyB, generation)
+
+        // release() first closes InputCapture ownership, then this precise
+        // barrier stops it before onSuppressionReleased invalidates the
+        // controller epoch.
+        let releaseFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            capture.release(reason: .watchdogTimeout)
+            releaseFinished.signal()
+        }
+
+        XCTAssertEqual(
+            releaseBoundary.entered.wait(timeout: .now() + 1),
+            .success
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(
+            controller.controlAdmissionStateForTesting().captureGeneration,
+            generation,
+            "controller epoch must still be current at the test boundary"
+        )
+
+        // Let A finish. B then evaluates the production delivery guard while
+        // the old epoch is still current but capture ownership is already
+        // local; capture.isSuppressed must reject it before transport.
+        session.allowFirstSend.signal()
+        sender.waitForDrain()
+
+        XCTAssertEqual(
+            session.sendAttemptCount,
+            1,
+            "queued B must be cancelled at the capture-local boundary"
+        )
+
+        releaseBoundary.resume.signal()
+        XCTAssertEqual(
+            releaseFinished.wait(timeout: .now() + 1),
+            .success
+        )
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertNil(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+    }
+
     func testKeyboardDeliveryDoesNotWaitForStalledPointerRequest() {
         let session = FakeSession(delay: 200_000_000)
         let reference = SessionReference()
@@ -111,6 +367,279 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(session.sendStarted.wait(timeout: .now() + 1), .success)
         XCTAssertEqual(session.sendCount, 1)
         sender.waitForDrain()
+    }
+
+    func testKeyboardDeliveryReportsSuccess() {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let result = ResultBox<KeyDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueueKey(
+            CapturedKeyEvent(
+                key: .a,
+                modifiers: [],
+                transition: .down,
+                repeatCount: 0
+            )
+        ) {
+            result.set($0)
+            done.signal()
+        }
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .delivered)
+    }
+
+    func testKeyboardDeliveryReportsFailure() {
+        let session = FailingKeySendSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let result = ResultBox<KeyDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        sender.enqueueKey(
+            CapturedKeyEvent(
+                key: .a,
+                modifiers: [],
+                transition: .down,
+                repeatCount: 0
+            )
+        ) {
+            result.set($0)
+            done.signal()
+        }
+
+        XCTAssertEqual(done.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(result.get(), .failed)
+    }
+
+    func testQueuedKeyboardOnReplacedSessionReportsCancelled() {
+        let oldSession = FakeSession(sendDelay: 200_000_000)
+        let newSession = FakeSession()
+        let reference = SessionReference()
+        reference.set(oldSession)
+        let sender = InputSender(session: reference)
+        let key = CapturedKeyEvent(
+            key: .a,
+            modifiers: [],
+            transition: .up,
+            repeatCount: 0
+        )
+        let firstResult = ResultBox<KeyDeliveryResult>()
+        let secondResult = ResultBox<KeyDeliveryResult>()
+        let firstDone = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0)
+
+        sender.enqueueKey(key) {
+            firstResult.set($0)
+            firstDone.signal()
+        }
+        XCTAssertEqual(
+            oldSession.sendStarted.wait(timeout: .now() + 1),
+            .success
+        )
+
+        sender.enqueueKey(key) {
+            secondResult.set($0)
+            secondDone.signal()
+        }
+        reference.set(newSession)
+        sender.waitForDrain()
+
+        XCTAssertEqual(firstDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(secondDone.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(firstResult.get(), .cancelled)
+        XCTAssertEqual(secondResult.get(), .cancelled)
+        XCTAssertEqual(newSession.sendCount, 0)
+    }
+
+    func testKeyboardOnlyActivityKeepsWatchdogAlive() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(
+            pointerRestoreOverride: {},
+            suppressionTimeoutOverride: 0.4
+        )
+        let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
+        )
+
+        XCTAssertEqual(controller.enable(), .enabled)
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        for index in 0..<6 {
+            let down = index.isMultiple(of: 2)
+            let event = CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: 0,
+                keyDown: down
+            )!
+            XCTAssertNil(
+                capture.handleForTesting(
+                    type: down ? .keyDown : .keyUp,
+                    event: event
+                )
+            )
+            sender.waitForDrain()
+            await settleMainActor()
+            try? await Task.sleep(for: .milliseconds(120))
+            XCTAssertEqual(
+                machine.state,
+                .remoteActive,
+                "successful keyboard delivery must refresh watchdog"
+            )
+        }
+
+        // Positive control: without further remote activity the watchdog still
+        // returns local, proving the test did not merely disable the timer.
+        try? await Task.sleep(for: .milliseconds(550))
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
+    }
+
+    func testKeyboardFailureClosesAdmissionBeforeNextQueuedKey() async {
+        let session = FailingFirstGatedKeySendSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
+        )
+
+        XCTAssertEqual(controller.enable(), .enabled)
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        let generation = try! XCTUnwrap(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+
+        capture.onKeyEventWithGeneration?(
+            CapturedKeyEvent(
+                key: .a,
+                modifiers: [],
+                transition: .down,
+                repeatCount: 0
+            ),
+            generation
+        )
+        XCTAssertEqual(
+            session.firstSendEntered.wait(timeout: .now() + 1),
+            .success
+        )
+
+        // Queue B behind the in-flight A. A will then fail. The failure path
+        // must invalidate the epoch synchronously before B evaluates its
+        // delivery guard.
+        capture.onKeyEventWithGeneration?(
+            CapturedKeyEvent(
+                key: .b,
+                modifiers: [],
+                transition: .down,
+                repeatCount: 0
+            ),
+            generation
+        )
+        session.releaseFirstSend.signal()
+
+        // Deliberately drain while MainActor is occupied by this test. An
+        // implementation that defers failure handling to MainActor will send
+        // B before the fail-local task can run, making the test deterministic.
+        sender.waitForDrain()
+
+        XCTAssertEqual(
+            session.sendAttemptCount,
+            1,
+            "no key after the first failed write may reach transport"
+        )
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertNil(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    func testKeyboardSendFailureImmediatelyFailsLocal() async {
+        let session = FailingKeySendSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
+        )
+
+        XCTAssertEqual(controller.enable(), .enabled)
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(capture.isSuppressed)
+
+        let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 0,
+            keyDown: true
+        )!
+        XCTAssertNil(
+            capture.handleForTesting(
+                type: .keyDown,
+                event: event
+            )
+        )
+
+        sender.waitForDrain()
+        await settleMainActor()
+        machine.flushCallbacks()
+        await settleMainActor()
+
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(capture.isSuppressed)
     }
 
     func testQueuedPointerOnReplacedSessionIsNotSentToNewSession() {
@@ -142,24 +671,6 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(firstResult.get(), .cancelled)
         XCTAssertEqual(queuedResult.get(), .cancelled)
         XCTAssertEqual(newSession.requestCount, 0)
-    }
-
-    func testQueuedKeyboardOnReplacedSessionIsDropped() {
-        let oldSession = FakeSession(sendDelay: 200_000_000)
-        let newSession = FakeSession()
-        let reference = SessionReference()
-        reference.set(oldSession)
-        let sender = InputSender(session: reference)
-        let key = CapturedKeyEvent(key: .a, modifiers: [], transition: .up, repeatCount: 0)
-
-        sender.enqueueKey(key)
-        XCTAssertEqual(oldSession.sendStarted.wait(timeout: .now() + 1), .success)
-        sender.enqueueKey(key)
-        reference.set(newSession)
-        sender.waitForDrain()
-
-        XCTAssertEqual(oldSession.sendCount, 1)
-        XCTAssertEqual(newSession.sendCount, 0)
     }
 
     func testExternalControlResetReleasesAcceptedPointerButtons() {
@@ -772,6 +1283,82 @@ final class InputSenderTests: XCTestCase {
                        "cleanup sends button-UP, not the rejected original event re-admitted")
     }
 
+    func testEmergencyReturnSchedulesHeldButtonCleanupBeforeMainActorProjection() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: sender,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(controller.capture.isSuppressed)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success)
+
+        controller.emergencyReturn()
+
+        // Do not flush state callbacks or yield MainActor here. The remote
+        // cleanup must already have been scheduled synchronously by return.
+        sender.waitForDrain()
+
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.1, false)
+    }
+
+    func testCaptureOriginatedReturnSchedulesHeldButtonCleanupBeforeMainActorProjection() async {
+        let session = FakeSession()
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+        let machine = EdgeSwitchStateMachine()
+        let controller = ControlHandoffController(
+            sender: sender,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+        XCTAssertTrue(controller.capture.isSuppressed)
+
+        let downDone = DispatchSemaphore(value: 0)
+        sender.enqueuePointer(
+            PointerEvent(.button(button: 0, down: true))
+        ) { _ in
+            downDone.signal()
+        }
+        XCTAssertEqual(downDone.wait(timeout: .now() + 1), .success)
+
+        // Models watchdog / tap-disable / external capture fail-safe. The
+        // suppression callback closes admission synchronously, while its
+        // state-machine projection is intentionally left unable to run yet.
+        controller.capture.release(reason: .watchdogTimeout)
+        sender.waitForDrain()
+
+        XCTAssertFalse(controller.capture.isSuppressed)
+        XCTAssertEqual(session.sentPointerButtonEvents.count, 1)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.0, 0)
+        XCTAssertEqual(session.sentPointerButtonEvents.first?.1, false)
+    }
+
     /// Regression B: generation safety. Buttons accepted on session A must
     /// never be released into replacement session B; A's stale held-button
     /// record is dropped without injecting frames into B.
@@ -840,7 +1427,10 @@ final class InputSenderTests: XCTestCase {
         let cleanup = sender.releaseHeldButtonsForCurrentSession()
 
         XCTAssertEqual(cleanup,
-                       InputSender.HeldButtonCleanupResult(attempted: 3, succeeded: 2),
+                       InputSender.HeldButtonCleanupResult(
+                           sessionGeneration: reference.snapshot().generation,
+                           attempted: 3,
+                           succeeded: 2),
                        "accounting must report the failed send as attempted-but-not-succeeded")
         XCTAssertEqual(cleanup?.failed, 1)
 
@@ -1083,6 +1673,69 @@ final class InputSenderTests: XCTestCase {
         XCTAssertEqual(queuedResults.get(), .cancelled)
         XCTAssertEqual(fixture.session.requestCount, 1,
                        "cancellation must not generate any new remote request")
+    }
+
+    func testBoundaryCrossingDeliveryCancelsNextQueuedPointerBeforeTransport() async {
+        let fixture = makeFixture()
+        let machine = EdgeSwitchStateMachine(returnHysteresis: 60)
+        let controller = ControlHandoffController(
+            sender: fixture.sender,
+            switchMachine: machine
+        )
+
+        machine.activate()
+        machine.pointerAtEdge(.right)
+        machine.flushCallbacks()
+        await settleMainActor()
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        // Consume the first-movement exemption with a confirmed inward move.
+        controller.capture.onPointerEvent?(
+            PointerEvent(.move(dx: 10, dy: 0))
+        )
+        awaitInFlight(fixture.session)
+        fixture.session.releaseGate()
+        fixture.sender.waitForDrain()
+        XCTAssertEqual(fixture.session.requestCount, 1)
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        // Park a return-direction movement in transport and queue a stateful
+        // button transition behind it.
+        fixture.session.rearmGate()
+        controller.capture.onPointerEvent?(
+            PointerEvent(.move(dx: -100, dy: 0))
+        )
+        awaitInFlight(fixture.session)
+        controller.capture.onPointerEvent?(
+            PointerEvent(.button(button: 0, down: true))
+        )
+
+        fixture.session.releaseGate()
+
+        // InputSenderTests is MainActor-isolated. Keeping MainActor occupied
+        // during the drain proves the controller cannot rely on a deferred
+        // MainActor task to close admission before the next pointer batch.
+        let drainDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            fixture.sender.waitForDrain()
+            drainDone.signal()
+        }
+        XCTAssertEqual(
+            drainDone.wait(timeout: .now() + 2),
+            .success,
+            "pointer fail-safe must not deadlock while cancelling queued work"
+        )
+
+        XCTAssertEqual(
+            fixture.session.requestCount,
+            2,
+            "the queued button must be cancelled before reaching transport"
+        )
+        XCTAssertEqual(machine.state, .localActive)
+        XCTAssertFalse(controller.capture.isSuppressed)
+
+        machine.flushCallbacks()
+        await settleMainActor()
     }
 
     /// Sender-level half of the stale-in-flight invariant (issue #45/#63):
@@ -1592,6 +2245,63 @@ final class InputSenderTests: XCTestCase {
         }
         func shutdownAndWait() { isConnected = false }
 
+    }
+
+    private final class GatedKeySendSession:
+        FakeSession, @unchecked Sendable {
+        let firstSendEntered = DispatchSemaphore(value: 0)
+        let allowFirstSend = DispatchSemaphore(value: 0)
+        private let attemptLock = NSLock()
+        private var attempts = 0
+
+        var sendAttemptCount: Int {
+            attemptLock.withLock { attempts }
+        }
+
+        override func send(_ frame: CxiFrame) throws {
+            let attempt = attemptLock.withLock { () -> Int in
+                attempts += 1
+                return attempts
+            }
+            if attempt == 1 {
+                firstSendEntered.signal()
+                _ = allowFirstSend.wait(timeout: .now() + 2)
+            }
+            try super.send(frame)
+        }
+    }
+
+    private final class FailingFirstGatedKeySendSession:
+        FakeSession, @unchecked Sendable {
+        let firstSendEntered = DispatchSemaphore(value: 0)
+        let releaseFirstSend = DispatchSemaphore(value: 0)
+        private let attemptLock = NSLock()
+        private var attempts = 0
+
+        var sendAttemptCount: Int {
+            attemptLock.withLock { attempts }
+        }
+
+        override func send(_ frame: CxiFrame) throws {
+            let attempt = attemptLock.withLock { () -> Int in
+                attempts += 1
+                return attempts
+            }
+            if attempt == 1 {
+                firstSendEntered.signal()
+                _ = releaseFirstSend.wait(timeout: .now() + 2)
+                throw ConnectionError.streamClosed
+            }
+            try super.send(frame)
+        }
+    }
+
+    private final class FailingKeySendSession:
+        FakeSession, @unchecked Sendable {
+        override func send(_ frame: CxiFrame) throws {
+            _ = frame
+            throw ConnectionError.streamClosed
+        }
     }
 
     /// Connection whose every request throws — models genuine transport loss.

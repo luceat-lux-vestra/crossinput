@@ -45,7 +45,7 @@ Text synchronization must prevent echo loops and must not log clipboard contents
 
 ## Current behavior and safety
 
-The bridge returns control to macOS on normal boundary return, emergency release, capture shutdown, timeout, helper failure, and unexpected disconnect. Remote failure must never permanently trap the local pointer or keyboard.
+The bridge returns control to macOS on an authoritative normal boundary return when that routing path provides boundary authority, and also on explicit/emergency Return to Mac, Edge Switch disable, capture shutdown, timeout, helper failure, and unexpected disconnect. System-routed desktop UHID targets such as Samsung DeX do not infer a remote screen edge from relative HID deltas; the current DeX path therefore uses explicit/fail-safe return until #145 supplies a portable authoritative automatic-return contract. Remote failure must never permanently trap the local pointer or keyboard.
 
 When a session is ready, **Disable Edge Switch** stops remote-control
 acquisition and returns ownership to macOS without stopping the Android helper,
