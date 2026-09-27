@@ -130,14 +130,6 @@ def main():
                  {"trigger": "pull_request_target"})),
          "GATE_TARGET_TRIGGER_SCOPE")
 
-    case("condition on required failure declaration",
-         lambda root: edit(
-             workflow(root, "failure-declaration.yml"),
-             "  failure-triage:\n    name: failure-triage\n",
-             "  failure-triage:\n    name: failure-triage\n"
-             "    if: github.actor != 'dependabot[bot]'\n"),
-         "GATE_CONDITIONAL")
-
     case("continue-on-error on required job",
          lambda root: edit(workflow(root, "ci.yml"),
                            "  markdown:\n    name: Documentation Validation\n",

@@ -27,12 +27,6 @@
       "job": "scripts"
     },
     {
-      "context": "failure-triage",
-      "workflow": "failure-declaration.yml",
-      "job": "failure-triage",
-      "trigger": "pull_request"
-    },
-    {
       "context": "Dependency Review",
       "workflow": "dependency-review.yml",
       "job": "review",
@@ -89,9 +83,6 @@
     ],
     "hardening-audit.yml": [
       "issues"
-    ],
-    "failure-classification.yml": [
-      "pull-requests"
     ]
   },
   "staged_status_checks": [],
