@@ -104,8 +104,16 @@ def main():
 
     case("missing staged producer",
          lambda root: policy_edit(root, lambda policy: policy.setdefault("staged_status_checks", []).append(
-             {"context": "Ghost Staged Check", "workflow": "dependency-review.yml", "job": "missing-staged"})),
+             {"context": "Ghost Staged Check", "workflow": "ci.yml", "job": "missing-staged"})),
          "GATE_MISSING_JOB")
+
+    case("Merge Gate cannot omit a component",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "needs: [macos-app, android-helper, markdown, scripts, dependencyReview]",
+             "needs: [macos-app, android-helper, markdown, scripts]",
+             1),
+         "GATE_AGGREGATE")
 
     # Path filters are the classic silent fail-open: the check never starts, so
     # it never turns red, and a strict ruleset can still be satisfied.
