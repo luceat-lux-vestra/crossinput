@@ -3,7 +3,7 @@
 ## Before you start
 
 1. Read [AGENTS.md](AGENTS.md) — PRs violating the hard rules are rejected.
-2. Check the current Phase in [docs/roadmap.md](docs/roadmap.md).
+2. Check the current program, backlog, and evidence gates in [docs/roadmap.md](docs/roadmap.md).
 3. Read the relevant docs (docs/, protocol/) before starting work.
 
 ## Work rules

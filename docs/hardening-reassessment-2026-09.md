@@ -1,12 +1,14 @@
 # Hardening Reassessment — 2026-09-20
 
-Owning issue: #158
+Owning issue: #158 (completed)
+
+> **Historical reassessment record.** This file preserves the 2026-09-20 reassessment and subsequent closure notes. Current repository-hardening ownership continues under #110/#112/#113 and the active checked-in/live policy; historical rollout wording below is not a new backlog.
 
 This pass re-evaluates CrossInput's existing repository hardening against current external GitHub/OpenSSF guidance. It deliberately does not change or reinterpret physical-device evidence obligations owned by the runtime architecture work.
 
 > **2026-09-28 CI scope update.** Documentation-only pull requests now use a mechanically bounded fast path only for `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, and Markdown under `docs/**`. The internal macOS/Android component jobs remain present but skip product runtime work; documentation, evidence/tooling, and dependency validation remain active. Mixed, unreadable, or unlisted scope falls back to full validation. PR #207 provided the default-branch proof case for that path.
 >
-> **2026-09-28 required-gate aggregation.** The five validation jobs remain authoritative components, but the live merge contract is being collapsed to one fail-closed `Merge Gate` context. `Merge Gate` depends directly on macOS, Android, documentation, evidence/tooling, and Dependency Review and fails unless every component succeeds.
+> **2026-09-28 required-gate aggregation.** PR #209 completed the aggregation: the five validation jobs remain authoritative components, while the live `Protect main` ruleset now requires one fail-closed `Merge Gate` context. `Merge Gate` depends directly on macOS, Android, documentation, evidence/tooling, and Dependency Review and fails unless every component succeeds.
 
 ## Existing controls retained
 
