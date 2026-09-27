@@ -12,6 +12,15 @@
 - Protocol changes must update `protocol/protocol.md` + `protocol/fixtures/` golden fixtures together.
 - Copying upstream code requires updating `THIRD_PARTY_NOTICES.md`.
 
+## CI scope
+
+A documentation-only PR gets the bounded fast path only when every changed file
+is `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, or Markdown under `docs/**`.
+macOS/Android runtime work is skipped, while documentation, evidence/tooling,
+and dependency validation remain active. Mixed or unprovable scope runs the
+full validation set. Protocol, workflow, tooling, source, and build files are
+never treated as documentation-only.
+
 ## PR checklist
 
 - [ ] build + lint + related tests pass
