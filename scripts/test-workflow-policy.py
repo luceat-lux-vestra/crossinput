@@ -137,6 +137,23 @@ def main():
                            "    continue-on-error: true\n"),
          "GATE_FAIL_OPEN")
 
+    case("docs-only allowlist cannot include workflow files",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             'or . == "AGENTS.md"\n',
+             'or . == "AGENTS.md"\n'
+             '                or . == ".github/workflows/ci.yml"\n',
+             1),
+         "CI_SCOPE_POLICY")
+
+    case("docs-only runtime guard cannot disappear",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}",
+             "if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}",
+             1),
+         "CI_SCOPE_POLICY")
+
     # Mutable action reference.
     case("mutable action ref",
          lambda root: edit(workflow(root, "ci.yml"),
@@ -202,9 +219,9 @@ def main():
 
     case("checkout persists credentials",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-                           "        with:\n          persist-credentials: false\n",
-                           "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+                           "          persist-credentials: false\n",
+                           "",
+                           1),
          "TRUST_PERSISTED_CREDENTIALS")
 
     case("job without timeout",

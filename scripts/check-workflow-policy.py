@@ -172,6 +172,67 @@ def check_required_gates(workflows, policy, findings):
                              f"declared producer in .github/hardening-policy.json")
 
 
+def check_docs_only_fast_path(workflows, findings):
+    """Keep the bounded documentation fast path narrow and fail-closed."""
+    workflow = workflows.get("ci.yml")
+    if workflow is None:
+        findings.add("CI_SCOPE_POLICY", "ci.yml", "CI workflow is missing")
+        return
+
+    expected_exact = {"README.md", "CONTRIBUTING.md", "AGENTS.md"}
+    expected_regex = 'test("^docs/.*[.]md$")'
+
+    for job_id in ("macos-app", "android-helper"):
+        job = (workflow.get("jobs") or {}).get(job_id)
+        where = f"ci.yml:{job_id}"
+        if job is None:
+            findings.add("CI_SCOPE_POLICY", where, "docs-only product job is missing")
+            continue
+
+        steps = [step for step in steps_of(job) if isinstance(step, dict)]
+        scope_steps = [step for step in steps if step.get("name") == "Detect documentation-only scope"]
+        if len(scope_steps) != 1:
+            findings.add("CI_SCOPE_POLICY", where,
+                         "expected exactly one documentation-only scope detector")
+            continue
+
+        run = str(scope_steps[0].get("run") or "")
+        exact_paths = set(re.findall(r'\. == "([^"]+)"', run))
+        if exact_paths != expected_exact or expected_regex not in run:
+            findings.add(
+                "CI_SCOPE_POLICY",
+                where,
+                f"docs-only allowlist drifted: exact={sorted(exact_paths)!r}",
+            )
+        for fragment in (
+            "gh api --paginate --slurp",
+            "Could not establish the changed-file set; using full validation.",
+            "Changed-file set is empty or unreadable; using full validation.",
+            'echo "docs_only=false" >> "$GITHUB_OUTPUT"',
+        ):
+            if fragment not in run:
+                findings.add("CI_SCOPE_POLICY", where,
+                             f"scope detector lost fail-closed fragment {fragment!r}")
+
+        placeholders = [step for step in steps
+                        if step.get("name") == "Documentation-only fast path"]
+        if len(placeholders) != 1 or "steps.scope.outputs.docs_only == 'true'" not in str(
+                placeholders[0].get("if") if placeholders else ""):
+            findings.add("CI_SCOPE_POLICY", where,
+                         "documentation-only success placeholder is missing or conditional drifted")
+
+        for step in steps:
+            if step in scope_steps or step in placeholders:
+                continue
+            condition = str(step.get("if") or "")
+            if "steps.scope.outputs.docs_only != 'true'" not in condition:
+                findings.add(
+                    "CI_SCOPE_POLICY",
+                    where,
+                    f"step {step.get('name') or step.get('uses')!r} is not guarded by full-validation scope",
+                )
+
+
 def check_staged_gates(workflows, policy, findings):
     staged = policy.get("staged_status_checks") or []
     if not staged:
@@ -786,6 +847,7 @@ def main():
 
     check_required_gates(workflows, policy, findings)
     check_staged_gates(workflows, policy, findings)
+    check_docs_only_fast_path(workflows, findings)
     check_action_pins(workflows, findings)
     check_permissions(workflows, policy, findings)
     check_trust_boundaries(workflows, policy, findings)

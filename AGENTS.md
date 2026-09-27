@@ -87,6 +87,16 @@ reviewed revision, invalidate the affected evidence. Re-run the relevant
 targeted/device proof and required CI on the new exact final PR HEAD before
 merge.
 
+Documentation-only CI uses a deliberately narrow syntactic fast path only when
+every changed file is `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, or a Markdown
+file under `docs/**`. This is not semantic classification. In that case the
+required macOS and Android jobs remain present but skip product runtime
+build/test/toolchain work; Documentation Validation, Evidence & Tooling
+Validation, and Dependency Review still run. CodeQL is not scheduled for that
+docs-only change. Any mixed, empty, unreadable, or unlisted changed-file set
+falls back to full validation. Changes under `protocol/**`, `.github/**`,
+`scripts/**`, source trees, or build configuration are never docs-only.
+
 ## Documentation requirements
 
 - Decisions are recorded in `docs/adr/` in ADR format (context/decision/alternatives/consequences/validation/revisit conditions).

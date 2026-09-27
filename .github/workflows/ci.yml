@@ -18,9 +18,52 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     steps:
+      - name: Detect documentation-only scope
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$RUNNER_TEMP/pr-changed-files.json"
+
+          if ! gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$changed"; then
+            echo "::warning::Could not establish the changed-file set; using full validation."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! jq -e '[.[][]] | length > 0' "$changed" >/dev/null; then
+            echo "::warning::Changed-file set is empty or unreadable; using full validation."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if jq -e '
+            [ .[][] | .filename ] as $files
+            | all($files[];
+                . == "README.md"
+                or . == "CONTRIBUTING.md"
+                or . == "AGENTS.md"
+                or test("^docs/.*[.]md$")
+              )
+          ' "$changed" >/dev/null; then
+            docs_only=true
+          else
+            docs_only=false
+          fi
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only=$docs_only"
+
+      - name: Documentation-only fast path
+        if: ${{ steps.scope.outputs.docs_only == 'true' }}
+        run: echo "Documentation-only change; product runtime validation is not applicable."
+
       - name: Reuse exact-SHA Fast evidence
         id: fast-evidence
-        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -79,16 +122,17 @@ jobs:
           exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           persist-credentials: false
       - name: Swift Build
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         run: |
           cd apps/macos
           swift build
 
       - name: Swift Test
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         run: |
           cd apps/macos
           swift test
@@ -98,9 +142,52 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Detect documentation-only scope
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$RUNNER_TEMP/pr-changed-files.json"
+
+          if ! gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$changed"; then
+            echo "::warning::Could not establish the changed-file set; using full validation."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! jq -e '[.[][]] | length > 0' "$changed" >/dev/null; then
+            echo "::warning::Changed-file set is empty or unreadable; using full validation."
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if jq -e '
+            [ .[][] | .filename ] as $files
+            | all($files[];
+                . == "README.md"
+                or . == "CONTRIBUTING.md"
+                or . == "AGENTS.md"
+                or test("^docs/.*[.]md$")
+              )
+          ' "$changed" >/dev/null; then
+            docs_only=true
+          else
+            docs_only=false
+          fi
+
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only=$docs_only"
+
+      - name: Documentation-only fast path
+        if: ${{ steps.scope.outputs.docs_only == 'true' }}
+        run: echo "Documentation-only change; product runtime validation is not applicable."
+
       - name: Reuse exact-SHA Fast evidence
         id: fast-evidence
-        if: ${{ github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && github.event_name == 'pull_request' && github.event.action == 'ready_for_review' }}
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -159,40 +246,44 @@ jobs:
           exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           persist-credentials: false
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           distribution: temurin
           java-version: "25.0.4.1"
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
       - name: Install Android 17 SDK
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
         run: |
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
       - name: Validate Gradle wrapper
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       - name: "Static guard: no input payload in logs"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         # Fails closed: missing scanner or undetected planted violation breaks
         # the job (the previous inline `rg` call false-greened without ripgrep).
         run: scripts/check-log-guard.sh
       - name: Gradle Build
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         run: |
           cd android/helper
           chmod +x gradlew
           ./gradlew assembleDebug --console=plain
 
       - name: Gradle Test
-        if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         run: |
           cd android/helper
           chmod +x gradlew
           ./gradlew test --console=plain
       - name: Verify Java 25 / Android 17 toolchain
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         run: scripts/check-android-toolchain.sh
 
   markdown:
