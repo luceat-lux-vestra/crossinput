@@ -219,9 +219,9 @@ def main():
 
     case("checkout persists credentials",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"
-                           "        with:\n          persist-credentials: false\n",
-                           "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n"),
+                           "          persist-credentials: false\n",
+                           "",
+                           1),
          "TRUST_PERSISTED_CREDENTIALS")
 
     case("job without timeout",
