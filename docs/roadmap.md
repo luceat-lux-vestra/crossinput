@@ -1,8 +1,8 @@
 # CrossInput Roadmap
 
-> Updated: 2026-09-03. The current product baseline remains DeX-first and
-> Android-capable, but the **target implementation architecture is being
-> deliberately re-evaluated under Architecture Leap #101**. Historical classes,
+> Updated: 2026-09-28. The current product baseline remains DeX-first and
+> Android-capable, while the **target implementation architecture is being
+> deliberately rebuilt under Architecture Leap #101**. Historical classes,
 > modules, controllers, queues, and protocol adapters are evidence, not
 > preservation requirements.
 
@@ -54,9 +54,10 @@ execution order.
 Repository/delivery hardening is separately owned by Epic #110. Its controls do
 not define the runtime target architecture.
 
-The hardening baseline includes protected merge gates, workflow-security/drift
-checks, release provenance, and the independent ADR-0012 physical stability
-evidence contract.
+The hardening baseline includes the single live required `Merge Gate`, whose five
+internal validation components cover macOS, Android, documentation, evidence/tooling,
+and Dependency Review; workflow-security/drift checks; release provenance; and the
+independent ADR-0012 physical stability evidence contract.
 
 ### ADR-0012 Level-3 physical stability — #68
 
