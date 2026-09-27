@@ -15,15 +15,15 @@ Use GitHub's private vulnerability reporting feature for this repository (Securi
 
 The machine-checkable half of these controls lives in
 `.github/hardening-policy.json` and is enforced by
-`scripts/check-workflow-policy.py`, which runs in the `Evidence & Tooling
-Validation` required check (static) and weekly via `.github/workflows/hardening-audit.yml`
+`scripts/check-workflow-policy.py`, which runs in the internal `Evidence & Tooling
+Validation` component and weekly via `.github/workflows/hardening-audit.yml`
 (static plus a live readback of rulesets, CodeQL setup and Actions policy).
 
-- **Required checks on `main`:** `macOS App Build + Test`, `Android Helper Build + Test`,
+- **Required check on `main`:** `Merge Gate`. The active ruleset requires this single
+  aggregate context strictly, has no bypass actors, requires review-thread resolution, and
+  allows squash-only merges. `Merge Gate` is produced by `ci.yml` and fails unless all
+  five internal components succeed: `macOS App Build + Test`, `Android Helper Build + Test`,
   `Documentation Validation`, `Evidence & Tooling Validation`, and `Dependency Review`.
-  The first four are produced by `ci.yml`; Dependency Review is produced by its dedicated
-  workflow. The active ruleset is strict, has no bypass actors, requires review-thread
-  resolution, and allows squash-only merges.
 - **Code scanning authority:** the custom `.github/workflows/codeql.yml` workflow is the
   single authority. Actions, Python, and Swift are active. Java/Kotlin is a documented
   temporary capability exception tracked by issue #157 because the stable action-managed
