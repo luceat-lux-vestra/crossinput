@@ -89,6 +89,15 @@ def steps_of(job):
     return job.get("steps") or []
 
 
+def needs_of(job):
+    value = job.get("needs")
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return set(value)
+    return set()
+
+
 def check_required_gates(workflows, policy, findings):
     """Contexts <-> producing jobs, and no way for a producer to disappear."""
     seen = set()
@@ -114,6 +123,50 @@ def check_required_gates(workflows, policy, findings):
             findings.add("GATE_NAME_DRIFT", where,
                          f"job name {job.get('name')!r} no longer produces required context "
                          f"{context!r}; the ruleset check would never report")
+
+        components = entry.get("components") or []
+        if components:
+            expected_component_ids = {component["job"] for component in components}
+            actual_needs = needs_of(job)
+            if actual_needs != expected_component_ids:
+                findings.add(
+                    "GATE_AGGREGATE",
+                    where,
+                    f"aggregate needs {sorted(actual_needs)!r}, expected "
+                    f"{sorted(expected_component_ids)!r}",
+                )
+
+            for component in components:
+                component_id = component["job"]
+                expected_name = component["name"]
+                component_where = f"{filename}:{component_id}"
+                component_job = jobs.get(component_id)
+                if component_job is None:
+                    findings.add("GATE_MISSING_JOB", component_where,
+                                 "Merge Gate component job is missing")
+                    continue
+                if component_job.get("name") != expected_name:
+                    findings.add(
+                        "GATE_NAME_DRIFT",
+                        component_where,
+                        f"component name {component_job.get('name')!r}, expected {expected_name!r}",
+                    )
+                if component_job.get("if") is not None:
+                    findings.add(
+                        "GATE_CONDITIONAL",
+                        component_where,
+                        "Merge Gate component has a job-level if condition and can disappear",
+                    )
+                if component_job.get("continue-on-error"):
+                    findings.add("GATE_FAIL_OPEN", component_where,
+                                 "Merge Gate component sets continue-on-error")
+                for step in steps_of(component_job):
+                    if isinstance(step, dict) and step.get("continue-on-error"):
+                        findings.add(
+                            "GATE_FAIL_OPEN",
+                            component_where,
+                            f"step {step.get('name') or step.get('uses')!r} sets continue-on-error",
+                        )
 
         trigger = entry.get("trigger", "pull_request")
         if trigger == "pull_request_target":
@@ -147,7 +200,15 @@ def check_required_gates(workflows, policy, findings):
                              f"{policy['protected_branch']!r}")
 
         condition = job.get("if")
-        if condition is not None:
+        if components:
+            normalized_condition = str(condition or "").strip()
+            if normalized_condition not in {"${{ always() }}", "always()"}:
+                findings.add(
+                    "GATE_AGGREGATE",
+                    where,
+                    f"aggregate must use exact always(); got {normalized_condition!r}",
+                )
+        elif condition is not None:
             findings.add("GATE_CONDITIONAL", where,
                          f"required job has an `if:` condition and can be skipped "
                          f"(a skipped required check never turns red)")

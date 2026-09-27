@@ -17,9 +17,10 @@
 A documentation-only PR gets the bounded fast path only when every changed file
 is `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, or Markdown under `docs/**`.
 macOS/Android runtime work is skipped, while documentation, evidence/tooling,
-and dependency validation remain active. Mixed or unprovable scope runs the
-full validation set. Protocol, workflow, tooling, source, and build files are
-never treated as documentation-only.
+and dependency validation remain active. The required `Merge Gate` aggregates
+those five internal component jobs and succeeds only when all five succeed.
+Mixed or unprovable scope runs the full validation set. Protocol, workflow,
+tooling, source, and build files are never treated as documentation-only.
 
 ## PR checklist
 

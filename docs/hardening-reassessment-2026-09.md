@@ -4,7 +4,9 @@ Owning issue: #158
 
 This pass re-evaluates CrossInput's existing repository hardening against current external GitHub/OpenSSF guidance. It deliberately does not change or reinterpret physical-device evidence obligations owned by the runtime architecture work.
 
-> **2026-09-28 CI scope update.** Documentation-only pull requests now use a mechanically bounded fast path only for `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, and Markdown under `docs/**`. The required macOS/Android contexts remain present but skip product runtime work; documentation, evidence/tooling, and dependency validation remain active. Mixed, unreadable, or unlisted scope falls back to full validation. This note is also the default-branch proof case for that path.
+> **2026-09-28 CI scope update.** Documentation-only pull requests now use a mechanically bounded fast path only for `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, and Markdown under `docs/**`. The internal macOS/Android component jobs remain present but skip product runtime work; documentation, evidence/tooling, and dependency validation remain active. Mixed, unreadable, or unlisted scope falls back to full validation. PR #207 provided the default-branch proof case for that path.
+>
+> **2026-09-28 required-gate aggregation.** The five validation jobs remain authoritative components, but the live merge contract is being collapsed to one fail-closed `Merge Gate` context. `Merge Gate` depends directly on macOS, Android, documentation, evidence/tooling, and Dependency Review and fails unless every component succeeds.
 
 ## Existing controls retained
 
@@ -19,9 +21,9 @@ This pass re-evaluates CrossInput's existing repository hardening against curren
 
 Dependabot proposes dependency updates, but proposal automation is not PR-time admission control.
 
-PR #159 proved `Dependency Review` on the exact candidate after live Dependency Graph enablement. PR #186 promoted the checked-in required-context contract, and authoritative 2026-09-22 readback confirmed live ruleset `21739720` requires `Dependency Review` with GitHub Actions integration id `15368` and no bypass actors.
+PR #159 proved `Dependency Review` on the exact candidate after live Dependency Graph enablement. PR #186 promoted the checked-in required-context contract, and authoritative 2026-09-22 readback confirmed that it was independently required with GitHub Actions integration id `15368` and no bypass actors.
 
-Dependency Review is PR-diff-scoped and therefore has no merged-main execution proof; its post-promotion proof is checked-in/live policy reconciliation.
+After the 2026-09-28 gate aggregation, Dependency Review remains mandatory as an internal `Merge Gate` component rather than an independently required live context. Its PR-diff semantics and fail-on-moderate policy are unchanged.
 
 ## GAP — workflow semantic/security scanners
 
@@ -76,7 +78,7 @@ The owned drift issue now also has a complete lifecycle: a non-clean detector cr
 
 ## Exit criteria
 
-- exact final PR HEAD passes all existing required contexts;
+- exact final PR HEAD passes `Merge Gate`, with all five internal validation components successful;
 - actionlint and zizmor both pass the real workflows and fail the negative control;
 - Dependency Review behavior is observed and its live prerequisite is classified;
 - hardening audit remains able to detect repository-policy drift;

@@ -478,3 +478,48 @@ jobs:
         # (PASS / INCOMPLETE / HOLD / FAIL), cycle-credit rules, identity
         # validation, and fail-closed behavior are pinned here.
         run: python3 scripts/test-handoff-stability-analyzer.py
+
+  dependencyReview:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+
+  mergeGate:
+    name: Merge Gate
+    needs: [macos-app, android-helper, markdown, scripts, dependencyReview]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every merge-gate component to succeed
+        env:
+          MACOS_RESULT: ${{ needs['macos-app'].result }}
+          ANDROID_RESULT: ${{ needs['android-helper'].result }}
+          DOCS_RESULT: ${{ needs.markdown.result }}
+          TOOLING_RESULT: ${{ needs.scripts.result }}
+          DEPENDENCY_RESULT: ${{ needs.dependencyReview.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in \
+            "macOS App Build + Test=$MACOS_RESULT" \
+            "Android Helper Build + Test=$ANDROID_RESULT" \
+            "Documentation Validation=$DOCS_RESULT" \
+            "Evidence & Tooling Validation=$TOOLING_RESULT" \
+            "Dependency Review=$DEPENDENCY_RESULT"
+          do
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name concluded '$result'; Merge Gate remains closed."
+              failed=1
+            fi
+          done
+          exit "$failed"
+
