@@ -140,9 +140,9 @@ def main():
     case("docs-only allowlist cannot include workflow files",
          lambda root: edit(
              workflow(root, "ci.yml"),
-             'or . == "AGENTS.md"\\n',
-             'or . == "AGENTS.md"\\n'
-             '                or . == ".github/workflows/ci.yml"\\n',
+             'or . == "AGENTS.md"\n',
+             'or . == "AGENTS.md"\n'
+             '                or . == ".github/workflows/ci.yml"\n',
              1),
          "CI_SCOPE_POLICY")
 
