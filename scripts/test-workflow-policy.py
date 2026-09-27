@@ -137,6 +137,23 @@ def main():
                            "    continue-on-error: true\n"),
          "GATE_FAIL_OPEN")
 
+    case("docs-only allowlist cannot include workflow files",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             '                or . == "AGENTS.md"\\n',
+             '                or . == "AGENTS.md"\\n'
+             '                or . == ".github/workflows/ci.yml"\\n',
+             1),
+         "CI_SCOPE_POLICY")
+
+    case("docs-only runtime guard cannot disappear",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}",
+             "if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}",
+             1),
+         "CI_SCOPE_POLICY")
+
     # Mutable action reference.
     case("mutable action ref",
          lambda root: edit(workflow(root, "ci.yml"),
