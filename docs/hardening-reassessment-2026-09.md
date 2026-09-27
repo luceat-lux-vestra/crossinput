@@ -4,6 +4,8 @@ Owning issue: #158
 
 This pass re-evaluates CrossInput's existing repository hardening against current external GitHub/OpenSSF guidance. It deliberately does not change or reinterpret physical-device evidence obligations owned by the runtime architecture work.
 
+> **2026-09-28 CI scope update.** Documentation-only pull requests now use a mechanically bounded fast path only for `README.md`, `CONTRIBUTING.md`, `AGENTS.md`, and Markdown under `docs/**`. The required macOS/Android contexts remain present but skip product runtime work; documentation, evidence/tooling, and dependency validation remain active. Mixed, unreadable, or unlisted scope falls back to full validation. This note is also the default-branch proof case for that path.
+
 ## Existing controls retained
 
 - checked-in hardening policy plus live drift readback;
