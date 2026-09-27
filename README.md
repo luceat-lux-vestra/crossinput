@@ -123,6 +123,8 @@ Development environment:
 - [Product scope](docs/product.md)
 - [Architecture](docs/architecture.md)
 - [Testing and evidence policy](docs/testing.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Release provenance](docs/release-provenance.md)
 - [Roadmap](docs/roadmap.md)
 - [ADR-0007 — keyboard delivery](docs/adr/ADR-0007-keyboard-delivery.md)
 - [ADR-0008 — v0.1.0 packaging](docs/adr/ADR-0008-v0.1.0-release-packaging.md)
