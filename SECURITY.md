@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-v0.1.0 is the first public release; there are no LTS/stability guarantees yet.
+v0.1.0 is the first public release; v0.1.1 is the current published field-use release. There are no LTS/stability guarantees yet.
 All reports are welcome until a stable release exists.
 
 ## Reporting a vulnerability
@@ -48,4 +48,4 @@ remains a real-hardware activity tracked in issue #68.
 
 - Keystrokes / clipboard / input payloads are never logged (AGENTS.md hard rule 4).
 - No cloud relay, root, or Knox bypass. Device interaction remains local. Any internal Android API use must be isolated, documented, feature-detected, and fail safely (AGENTS.md hard rule 9).
-- Pointer-trapping code is not allowed on any path except test-only.
+- Host pointer confinement is allowed only under the accepted remote-control safety contract: exactly one valid `SuppressionLease`, idempotent local release, watchdog/emergency return, and fail-local behavior. Pointer trapping outside that bounded ownership is prohibited.

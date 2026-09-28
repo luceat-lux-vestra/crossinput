@@ -178,10 +178,10 @@ Status: ✅ verified on device (SM-G977N) · ⏳ not yet verified. Full results 
 | 4 | Composite mouse (wheel) | left/right click, drag, vertical/horizontal scroll | ⏳ (click and focus change verified; drag/scroll pending) |
 | 5 | Input persists after app switch | delivered to DeX screen even after focus changes | ✅ (click delivered after focus change, displayId verified) |
 
-## Phase 2: CXI helper verification (issue #6)
+## Historical Phase 2: CXI helper verification (issue #6)
 
 Drives the current Android helper over the binary CXI v1 protocol using
-`scripts/deploy-helper.sh`. Prereqs: DeX active (same setup as Phase 0),
+`scripts/deploy-helper.sh`. Prereqs: DeX active (same physical setup as the established DeX routing evidence above),
 APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 
 1. Pre-check display state: `adb shell dumpsys display` — the Desktop display must be present (do not assume any display id; AGENTS.md rule 3).
@@ -381,7 +381,7 @@ selection logic only and are not a substitute for the on-device run:
 - Logs carry metadata only — no key codes, meta state, or payloads (AGENTS.md rule 4)
 - Override parsing: both `--keyboard-backend=<value>` and `--keyboard-backend <value>`; unknown/missing values fail loudly
 
-### Verification items (Phase 2)
+### Verification items (historical Phase 2)
 
 Status per item — ✅ verified on device (SM-G977N, 2026-08) · ⏳ not yet verified. Full results in issue [#6](https://github.com/luceat-lux-vestra/crossinput/issues/6); keyboard work in issue [#21](https://github.com/luceat-lux-vestra/crossinput/issues/21); InputManager fallback verification is recorded in [issue #33](https://github.com/luceat-lux-vestra/crossinput/issues/33).
 
@@ -417,7 +417,7 @@ ADR-0016/ADR-0012 obligations.
 | Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | selection/stale-response tests pass; removal/reappearance deferred to issue #17 |
 | Edge stability | targeted physical handoff/return checks per change; >=100 physical cycles tracked at release level ([ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)) | real app 100-cycle event-tap/helper record ✅ (synthetic/regression evidence, zero physical-cycle credit); release-level accumulation pending |
 
-## Edge switching stability (Phase 5)
+## Edge switching stability (historical Phase 5; current authority: ADR-0012)
 
 - Historical state-machine and real macOS event-tap/helper 100-cycle regressions
   remain useful deterministic regression tests. They are synthetic/scripted

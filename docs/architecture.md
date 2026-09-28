@@ -1,10 +1,10 @@
 # CrossInput Architecture
 
-> Status: **Architecture Leap target model proposed by ADR-0016, 2026-09-13.**
+> Status: **Accepted Architecture Leap target model from ADR-0016 / completed design issue #102; implementation remains in progress under #101 and Tracks #114–#118.**
 >
 > [Architecture Leap #101](https://github.com/luceat-lux-vestra/crossinput/issues/101)
-> controls sequencing. [ADR-0016](adr/ADR-0016-leap-ownership-and-concurrency.md)
-> is the normative ownership/concurrency decision for #102. This document is the
+> controls implementation sequencing. [ADR-0016](adr/ADR-0016-leap-ownership-and-concurrency.md)
+> is the normative ownership/concurrency decision established by completed #102. This document is the
 > implementation-facing overview.
 
 CrossInput is a **DeX-first, Android-capable macOS input bridge**. Samsung DeX is
@@ -606,7 +606,7 @@ ADB/`app_process` remains the default production transport. Alternate transport
 Automated tests/CI prove deterministic repository/protocol properties. They do
 not replace physical evidence for macOS + Samsung behavior.
 
-#102 is docs-only and creates no new runtime claim, so it requires no new
+The completed #102 design change was docs-only and created no new runtime claim, so it required no new
 physical run. Runtime implementation slices require exact-final-HEAD targeted
 physical evidence.
 
