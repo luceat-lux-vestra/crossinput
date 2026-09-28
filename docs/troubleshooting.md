@@ -17,7 +17,7 @@ Issues found during development and verification, with causes and fixes. Work in
 |---|---|
 | DeX screen doesn't turn on | Check HDMI cable/adapter; Settings → Samsung DeX |
 | Cursor invisible on the DeX screen | Samsung fades the cursor after ~3.5s idle — normal DeX behavior; move the pointer to bring it back |
-| Input delivered to the phone screen instead of DeX | This is the known category B failure observed in upstream projects (deskflow-android etc.) — see `docs/research/upstream-inventory.md`. Our Phase 0 verification was category A (delivered to the DeX display); if it regresses, start with the routing check in `docs/roadmap.md` Phase 0 |
+| Input delivered to the phone screen instead of DeX | This is the known category B failure observed in upstream projects (deskflow-android etc.) — see `docs/research/upstream-inventory.md`. Historical Phase 0 evidence was category A (delivered to the DeX display); if it regresses, use the maintained **DeX input routing verification protocol** in `docs/testing.md`. |
 
 ## macOS native cursor presentation
 
