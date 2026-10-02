@@ -101,18 +101,11 @@
     "authority": "custom-workflow",
     "active_languages": [
       "actions",
+      "java-kotlin",
       "python",
       "swift"
     ],
-    "exceptions": [
-      {
-        "surface": "java-kotlin",
-        "disposition": "temporarily unavailable",
-        "evidence": "github/codeql-action v4.38.1 managed CodeQL CLI 2.27.0 rejects the maintained Kotlin 2.4.20 compiler path as too recent",
-        "forbidden_workaround": "Do not use an external/nightly tools override or downgrade Kotlin solely to obtain a green advisory scanner",
-        "reassessment_trigger": "Issue #157: restore only when the stable action-managed bundle accepts Kotlin 2.4.20 and exact-head extraction/analyze/upload succeeds"
-      }
-    ]
+    "exceptions": []
   },
   "release_provenance": {
     "workflow": "release.yml",
