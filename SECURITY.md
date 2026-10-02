@@ -25,9 +25,9 @@ Validation` component and weekly via `.github/workflows/hardening-audit.yml`
   five internal components succeed: `macOS App Build + Test`, `Android Helper Build + Test`,
   `Documentation Validation`, `Evidence & Tooling Validation`, and `Dependency Review`.
 - **Code scanning authority:** the custom `.github/workflows/codeql.yml` workflow is the
-  single authority. Actions, Python, and Swift are active. Java/Kotlin is a documented
-  temporary capability exception tracked by issue #157 because the stable action-managed
-  CodeQL bundle does not yet accept the maintained Kotlin 2.4.20 compiler path. GitHub's
+  single authority. Actions, Java/Kotlin, Python, and Swift are active on the pinned
+  official action-managed bundle. CodeQL 2.27.1 restored support for the maintained
+  Kotlin 2.4.20 compiler path; no external `tools:` override is permitted. GitHub's
   CodeQL *default setup* is intentionally left `not-configured`; enabling it would create
   a competing authority, and the hardening policy rejects that drift.
 - **Actions policy:** repository settings require full-SHA action pins, the default
