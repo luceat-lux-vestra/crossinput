@@ -16,7 +16,7 @@ This pass re-evaluates CrossInput's existing repository hardening against curren
 - strict required-context producer validation;
 - full-SHA action pins and least-privilege workflow checks;
 - trusted issue/PR metadata automation;
-- custom CodeQL authority for Actions, Python, and Swift; Java/Kotlin is an explicit temporary capability exception tracked by #157;
+- custom CodeQL authority for Actions, Java/Kotlin, Python, and Swift on the pinned official action-managed bundle;
 - protected-main and immutable publication-tag intent.
 
 ## PASS — dependency admission
@@ -40,15 +40,15 @@ The repository-owned policy checker already catches pinning, permissions, requir
 
 The script runs inside the already-required `Evidence & Tooling Validation` context and the recurring hardening audit. No extra required context or ruleset churn is introduced.
 
-## PARTIAL — CodeQL; Java/Kotlin capability exception
+## PASS — CodeQL; Java/Kotlin stable coverage restored
 
 The custom CodeQL authority remains singular and uses only the pinned official `github/codeql-action` managed bundle.
 
-Actions, Python, and Swift analysis remain active. Exact run 35563677611 proved that the stable CodeQL CLI 2.27.0 bundled by `github/codeql-action` v4.38.1 rejects the maintained Kotlin 2.4.20 compiler path as too recent. The Java/Kotlin leg is therefore temporarily removed rather than made green with the previously used third-party nightly tools override.
+Exact run 35563677611 previously proved that CodeQL CLI 2.27.0 in `github/codeql-action` v4.38.1 rejected the maintained Kotlin 2.4.20 compiler path as too recent. GitHub subsequently shipped Kotlin 2.4.20 support in stable CodeQL 2.27.1, and `github/codeql-action` v4.38.2 moved its default managed bundle to 2.27.1.
 
-This is not a claim that Java/Kotlin source is security-scanned by CodeQL. Android Helper Build + Test remains the authoritative product gate for that surface. Issue #157 is the explicit reassessment trigger: restore Java/Kotlin only when the stable action-managed bundle accepts Kotlin 2.4.20 and exact-head extraction, analysis, and upload all succeed.
+The Java/Kotlin leg is therefore restored with the repository's maintained JDK 25 / Android 17 manual build path. Actions, Java/Kotlin, Python, and Swift are all covered by the same custom workflow. The repository policy continues to reject any external `tools:` override; Kotlin is not downgraded for scanning, and default setup remains disabled so there is still only one CodeQL authority.
 
-The repository policy rejects any future external `tools:` override. Kotlin will not be downgraded solely to satisfy an advisory scanner, and default setup will not be enabled alongside the custom workflow.
+Issue #157 owns exact-candidate proof and is closed only after extraction, the Android build, analysis, SARIF processing, and all required CI succeed on the final PR HEAD.
 
 ## Metadata
 

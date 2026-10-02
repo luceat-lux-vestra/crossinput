@@ -43,6 +43,9 @@ jobs:
           - language: actions
             build-mode: none
             os: ubuntu-latest
+          - language: java-kotlin
+            build-mode: manual
+            os: ubuntu-latest
           # The ADR-0012 stability analyzer and the repository hardening gate
           # are Python; both are security-relevant tooling.
           - language: python
@@ -59,16 +62,48 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
+      - name: Set up Java
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25.0.4.1'
+
+      - name: Set up Android SDK
+        if: matrix.language == 'java-kotlin'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android 17 SDK
+        if: matrix.language == 'java-kotlin'
+        run: |
+          command -v sdkmanager >/dev/null
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Validate Gradle wrapper
+        if: matrix.language == 'java-kotlin'
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Build Android helper for CodeQL
+        if: matrix.language == 'java-kotlin'
+        run: |
+          cd android/helper
+          chmod +x gradlew
+          ./gradlew test assembleDebug --console=plain
+
+      - name: Verify Java 25 / Android 17 toolchain
+        if: matrix.language == 'java-kotlin'
+        run: scripts/check-android-toolchain.sh
+
       - name: Autobuild Swift sources for CodeQL
         if: matrix.language == 'swift'
-        uses: github/codeql-action/autobuild@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /language:${{ matrix.language }}
