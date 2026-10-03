@@ -1,0 +1,8 @@
+{
+  "type": "BOUNDARY_WATCH_READY",
+  "requestId": 10,
+  "controlToken": "42",
+  "displayId": 2,
+  "mode": "COMPOSITOR",
+  "layerStack": 2
+}

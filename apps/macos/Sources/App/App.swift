@@ -87,6 +87,7 @@ final class AppModel: ObservableObject {
     let sessionController: SessionController
     let handoffController: ControlHandoffController
     let inputCapabilityController: InputCapabilityController
+    private let boundaryWatchClient: BoundaryWatchClient
     private let targetController: TargetSelectionController
 
     var capture: InputCapture { handoffController.capture }
@@ -100,6 +101,8 @@ final class AppModel: ObservableObject {
         let reference = SessionReference()
         sessionController = SessionController(reference: reference)
         let sender = InputSender(session: reference)
+        let boundaryWatchClient = BoundaryWatchClient(session: reference)
+        self.boundaryWatchClient = boundaryWatchClient
         // Forward InputSender semantic failures through the unified sink
         // (lock-protected; safe from the delivery queue).
         sender.onDeliveryObservation = { [weak sessionController] observation in
@@ -107,10 +110,20 @@ final class AppModel: ObservableObject {
         }
         handoffController = ControlHandoffController(
             sender: sender,
+            boundaryWatch: boundaryWatchClient,
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
-            captureStop: captureStop
+            captureStop: captureStop,
+            hostPointerBackend: HostPointerOwnershipBackends.makeDefault(),
+            useEventTapNoWarp: false
         )
+        // CoreHID remains the production host-ownership boundary because it is
+        // the only physically proven no-leak built-in-trackpad seizure path.
+        // The consume-only event-tap path is retained as an experiment: it
+        // preserves macOS semantics but has not proven local pointer isolation.
+        // Normal DeX return requires an independent authoritative boundary
+        // signal; emergency return remains fail-safe only.
+        handoffController.setAutomaticReturnAuthority(.none)
         targetController = TargetSelectionController(session: reference)
 
         // Production telemetry sink (review round 3): a single lock-protected
@@ -131,9 +144,28 @@ final class AppModel: ObservableObject {
             self?.handleSessionUnavailable(reason)
         }
         targetController.onChange = { [weak self] targets, selected, state in
-            self?.targets = targets
-            self?.selectedTarget = selected
-            self?.targetState = state
+            guard let self else { return }
+            self.targets = targets
+            self.selectedTarget = selected
+            self.targetState = state
+            self.handoffController.updateRemoteTarget(
+                selected?.id.rawValue
+            )
+
+            // Only targets for which the helper AUTO policy prefers the
+            // system-routed UHID pointer lose relative-movement boundary
+            // authority. HDMI/external targets served by explicit InputManager
+            // routing retain the existing behavior. #145 owns any future
+            // portable authoritative automatic-return contract for UHID.
+            let authority: AutomaticReturnAuthority
+            if let selected {
+                authority = selected.prefersSystemRoutedPointer
+                    ? .none
+                    : .relativeMovement
+            } else {
+                authority = .none
+            }
+            self.handoffController.setAutomaticReturnAuthority(authority)
         }
         handoffController.onStateChange = { [weak self] state in
             self?.controlState = state
@@ -411,6 +443,10 @@ final class AppModel: ObservableObject {
     }
 
     private func handleUnsolicited(_ frame: CxiFrame) {
+        if let signal = boundaryWatchClient.decodeSignal(frame) {
+            handoffController.handleBoundarySignal(signal)
+            return
+        }
         switch frame.type {
         case .logEvent:
             if let log = try? Messages.decodeLogEvent(frame.payload) {
@@ -538,7 +574,7 @@ private struct AppMenu: View {
 
             if model.controlState == .remote {
                 Divider()
-                Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
+                Button("Emergency Return to Mac (⇧⌘X)") { model.emergencyReturn() }
             }
 
             Divider()

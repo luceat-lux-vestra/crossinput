@@ -300,6 +300,10 @@ struct CxiStress {
         func record(_ result: PointerDeliveryResult) {
             lock.withLock {
                 switch result {
+                case .submittedMovement:
+                    // CxiStress currently uses acknowledged movement, but keep
+                    // the counter exhaustive if a streaming profile is added.
+                    deliveredMovement += 1
                 case .deliveredMovement, .partiallyDeliveredMovement:
                     if case .deliveredMovement = result { deliveredMovement += 1 }
                     else { partiallyDeliveredMovement += 1 }

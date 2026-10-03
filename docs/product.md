@@ -45,7 +45,9 @@ Text synchronization must prevent echo loops and must not log clipboard contents
 
 ## Current behavior and safety
 
-The bridge returns control to macOS on normal boundary return, emergency release, capture shutdown, timeout, helper failure, and unexpected disconnect. Remote failure must never permanently trap the local pointer or keyboard.
+The bridge returns control to macOS on an authoritative normal boundary return and also on emergency Return to Mac, Edge Switch disable, capture shutdown, timeout, helper failure, and unexpected disconnect. For system-routed desktop UHID targets such as Samsung DeX, relative HID deltas are return intent only; Android compositor observation owns the actual remote-boundary decision. The emergency shortcut is a last-resort fail-safe, not the ordinary return interaction. Remote failure must never permanently trap the local pointer or keyboard.
+
+While remote ownership is active, the Mac-side cursor left at the configured handoff edge is part of the ownership presentation: left/right handoffs use the native horizontal directional cursor and top/bottom handoffs use the native vertical directional cursor. This shape is published only after CoreHID ownership is actually ready and is withdrawn at the synchronous local-return gate.
 
 When a session is ready, **Disable Edge Switch** stops remote-control
 acquisition and returns ownership to macOS without stopping the Android helper,
@@ -89,7 +91,7 @@ CXI v2 is not intended to become a universal cross-platform input framework and 
 
 ## Known limitations
 
-- On affected macOS versions, repeated host-cursor repositioning used to keep the Mac pointer confined during DeX control can leave the native directional/resize cursor visually rendered as an ordinary arrow even though pointer movement and AppKit tracking continue. A standalone AppKit/Quartz reproducer confirms repeated edge-hold warping is sufficient to trigger this presentation failure. The exact AppKit/WindowServer root cause is not confirmed. CrossInput intentionally retains the current confinement architecture because tested public/private alternatives either broke host confinement, hid the native cursor, or did not remove the presentation failure. See `docs/troubleshooting.md` and issue #96 for the verified recovery/workaround surface.
+- Issue #96 is an open remote-ownership presentation blocker: while DeX owns the built-in trackpad, the Mac-side edge cursor must show the native directional cursor rather than remain the ordinary arrow. Historical Quartz-warp cursor corruption evidence is retained as a regression constraint, but the current production requirement is explicit remote-active presentation tied to the CoreHID ownership epoch.
 - The v1 wire record still exposes raw Android display metadata for compatibility; the leakage and containment plan are recorded in [CXI v2 design](../protocol/v2-design.md).
 - Display hot-plug and state changes still require the complete failure-case regression matrix tracked in issue #17.
 - The packaged Mac application does not yet auto-deploy a matching helper; `HELLO_ACK` capability negotiation rejects an incompatible helper before input begins. Deployment packaging remains follow-up work.

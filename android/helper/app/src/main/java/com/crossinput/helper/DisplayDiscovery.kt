@@ -41,6 +41,7 @@ class DisplayDiscovery(
     override fun onDisplayChanged(displayId: Int) = notifyChanged(displayId)
     override fun onDisplayRemoved(displayId: Int) {
         log.info("DisplayDiscovery", "display removed id=$displayId")
+        onDisplayEvent?.invoke(displayId)
     }
 
     fun displays(): List<DisplayInfo> = allDisplays().mapNotNull { buildInfo(it) }

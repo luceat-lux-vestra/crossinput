@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "Ampersand",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v15)
     ],
     products: [
         .library(name: "AmpersandCore", targets: ["Protocol", "AndroidBridge", "InputDomain", "InputCapture", "InputCapability", "EdgeSwitch"]),
@@ -30,7 +30,7 @@ let package = Package(
         .testTarget(name: "AndroidBridgeTests", dependencies: ["AndroidBridge", "Protocol"]),
         .testTarget(name: "InputDomainTests", dependencies: ["InputDomain"]),
         .testTarget(name: "DeliveryTests", dependencies: ["Delivery", "InputDomain"]),
-        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics", "InputCapability"]),
+        .testTarget(name: "AppTests", dependencies: ["App", "AndroidBridge", "Protocol", "EdgeSwitch", "Diagnostics", "InputCapability", "InputCapture", "Delivery"]),
         .testTarget(name: "InputCaptureTests", dependencies: ["InputCapture", "InputDomain"]),
         .testTarget(name: "InputCapabilityTests", dependencies: ["InputCapability"]),
         .testTarget(name: "EdgeSwitchTests", dependencies: ["EdgeSwitch"]),
