@@ -43,6 +43,7 @@ struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
     private(set) var contactPresentReports = 0
     private(set) var zeroContactReports = 0
     private(set) var contactTransitions = 0
+    private(set) var silenceContactEnds = 0
     private(set) var tapDecisions = 0
     private(set) var semanticButtonEvents = 0
 
@@ -61,6 +62,10 @@ struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
         }
     }
 
+    mutating func observeSilenceContactEnd() {
+        silenceContactEnds += 1
+    }
+
     mutating func observeTapDecision() {
         tapDecisions += 1
     }
@@ -75,6 +80,7 @@ struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
             + "contactPresentReports=\(contactPresentReports) "
             + "zeroContactReports=\(zeroContactReports) "
             + "contactTransitions=\(contactTransitions) "
+            + "silenceContactEnds=\(silenceContactEnds) "
             + "tapDecisions=\(tapDecisions) "
             + "semanticButtons=\(semanticButtonEvents)"
     }
@@ -82,19 +88,43 @@ struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
 
 @available(macOS 15.0, *)
 private final class CoreHIDPointerStreamState: @unchecked Sendable {
+    /// Physical evidence on the target MacBook shows the seized Report-ID-2
+    /// stream carries continuous contact-present reports but no terminal
+    /// zero-contact report. A short report-silence interval is therefore the
+    /// bounded public-surface end-of-contact oracle.
+    private static let tapSilenceDelay = DispatchTimeInterval.milliseconds(50)
+
     private let lock = NSLock()
+    private let tapSilenceQueue = DispatchQueue(
+        label: "crossinput.corehid.tap-silence",
+        qos: .userInteractive
+    )
+    private let onDeferredEvent: @Sendable (SemanticPointerEvent) -> Void
+
     private var active = true
     private var translator = AppleTrackpadSemanticTranslator()
     private var lastRawPrimary = false
     private var lastRawSecondary = false
     private var lastRawOther = false
     private var lastRawContactPresent = false
+    private var contactReportSequence: UInt64 = 0
+    private var lastContactReportNanos: UInt64?
+    private var tapSilenceWorkItem: DispatchWorkItem?
     private var tapSurfaceDiagnostics = CoreHIDTapSurfaceDiagnostics()
 
+    init(
+        onDeferredEvent: @escaping @Sendable (SemanticPointerEvent) -> Void
+    ) {
+        self.onDeferredEvent = onDeferredEvent
+    }
+
     func consume(_ data: Data) throws -> [SemanticPointerEvent] {
-        try lock.withLock {
-            guard active else { return [] }
+        let result = try lock.withLock {
+            guard active else {
+                return (events: [SemanticPointerEvent](), armSilence: false, token: UInt64(0))
+            }
             let report = try AppleTrackpadRawReportDecoder.decode(data)
+            let nowNanos = DispatchTime.now().uptimeNanoseconds
 
             // Metadata-only physical diagnostics. These transitions reveal
             // whether the seized CoreHID stream actually exposes button state
@@ -123,7 +153,10 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
                 Diagnostics.log("corehid raw input type=contact-transition")
             }
 
-            let events = try translator.translate(report)
+            let events = try translator.translate(
+                report,
+                nowNanos: nowNanos
+            )
             if contactTransition, !contactPresent,
                let resolution = translator.takeTapResolution() {
                 tapSurfaceDiagnostics.observeTapDecision()
@@ -132,35 +165,159 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
                 )
             }
             for event in events {
-                if case let .button(button, down) = event.kind {
-                    _ = button
-                    _ = down
-                    tapSurfaceDiagnostics.observeSemanticButton()
-                    Diagnostics.log("corehid semantic input type=button")
-                }
+                recordSemanticButtonIfNeeded(event)
             }
-            return events
+
+            contactReportSequence &+= 1
+            if contactReportSequence == 0 {
+                contactReportSequence = 1
+            }
+
+            if contactPresent {
+                lastContactReportNanos = nowNanos
+            } else {
+                lastContactReportNanos = nil
+            }
+
+            // Physical Button1 still has explicit transition semantics. The
+            // silence oracle is needed only for touch contact lifecycle.
+            let armSilence = contactPresent && !report.buttons.primary
+            return (
+                events: events,
+                armSilence: armSilence,
+                token: contactReportSequence
+            )
+        }
+
+        if result.armSilence {
+            armTapSilence(token: result.token)
+        } else {
+            cancelTapSilence()
+        }
+        return result.events
+    }
+
+    private func armTapSilence(token: UInt64) {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.finalizeContactAfterSilence(token: token)
+        }
+        let previous = lock.withLock {
+            let previous = tapSilenceWorkItem
+            tapSilenceWorkItem = workItem
+            return previous
+        }
+        previous?.cancel()
+        tapSilenceQueue.asyncAfter(
+            deadline: .now() + Self.tapSilenceDelay,
+            execute: workItem
+        )
+    }
+
+    private func cancelTapSilence() {
+        let previous = lock.withLock {
+            let previous = tapSilenceWorkItem
+            tapSilenceWorkItem = nil
+            return previous
+        }
+        previous?.cancel()
+    }
+
+    private func finalizeContactAfterSilence(token: UInt64) {
+        let events: [SemanticPointerEvent] = lock.withLock {
+            guard active,
+                  token == contactReportSequence,
+                  lastRawContactPresent,
+                  let lastContactReportNanos else {
+                return []
+            }
+
+            // Treat the silence boundary as contact end only after the token
+            // survived the full delay. Any newer report invalidates this token.
+            lastRawContactPresent = false
+            self.lastContactReportNanos = nil
+            tapSilenceWorkItem = nil
+            tapSurfaceDiagnostics.observeSilenceContactEnd()
+            Diagnostics.log(
+                "corehid contact lifecycle end source=report-silence"
+            )
+
+            do {
+                let events = try translator.finishContact(
+                    nowNanos: lastContactReportNanos
+                )
+                if let resolution = translator.takeTapResolution() {
+                    tapSurfaceDiagnostics.observeTapDecision()
+                    Diagnostics.log(
+                        "corehid tap decision outcome=\(resolution.rawValue) "
+                            + "source=report-silence"
+                    )
+                }
+                for event in events {
+                    recordSemanticButtonIfNeeded(event)
+                }
+                return events
+            } catch {
+                Diagnostics.log(
+                    "corehid tap silence finalization failed"
+                )
+                return []
+            }
+        }
+
+        for event in events {
+            onDeferredEvent(event)
+        }
+    }
+
+    private func recordSemanticButtonIfNeeded(
+        _ event: SemanticPointerEvent
+    ) {
+        if case let .button(button, down) = event.kind {
+            _ = button
+            _ = down
+            tapSurfaceDiagnostics.observeSemanticButton()
+            Diagnostics.log("corehid semantic input type=button")
         }
     }
 
     func deactivateAndReset() -> [SemanticPointerEvent] {
-        lock.withLock {
-            guard active else { return [] }
+        let result = lock.withLock {
+            guard active else {
+                return (
+                    events: [SemanticPointerEvent](),
+                    workItem: Optional<DispatchWorkItem>.none
+                )
+            }
             active = false
+            contactReportSequence &+= 1
+            let workItem = tapSilenceWorkItem
+            tapSilenceWorkItem = nil
             Diagnostics.log(tapSurfaceDiagnostics.summary)
-            return translator.reset()
+            return (events: translator.reset(), workItem: workItem)
         }
+        result.workItem?.cancel()
+        return result.events
     }
 
     /// Returns true only for the first terminal failure.
     func fail() -> Bool {
-        lock.withLock {
-            guard active else { return false }
+        let result = lock.withLock {
+            guard active else {
+                return (
+                    failed: false,
+                    workItem: Optional<DispatchWorkItem>.none
+                )
+            }
             active = false
+            contactReportSequence &+= 1
+            let workItem = tapSilenceWorkItem
+            tapSilenceWorkItem = nil
             Diagnostics.log(tapSurfaceDiagnostics.summary)
             _ = translator.reset()
-            return true
+            return (failed: true, workItem: workItem)
         }
+        result.workItem?.cancel()
+        return result.failed
     }
 
     var isActive: Bool {
@@ -323,10 +480,15 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
             try Task.checkCancellation()
 
             let clientSlot = CoreHIDPointerClientSlot(client)
-            let streamState = CoreHIDPointerStreamState()
+            let registry = self.registry
+            let streamState = CoreHIDPointerStreamState(
+                onDeferredEvent: { event in
+                    guard registry.isCurrent(generation) else { return }
+                    onEvent(event, generation)
+                }
+            )
             let releaseResponsibility =
                 CoreHIDPointerReleaseResponsibility()
-            let registry = self.registry
 
             // Critical ownership shape: the task captures the stream and slot,
             // never the seizing HIDDeviceClient directly. release() can drop
