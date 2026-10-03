@@ -7,22 +7,44 @@ protocol RemoteCursorPresenting: AnyObject, Sendable {
     func restoreLocal()
 }
 
-/// Owns only the user-facing cursor shape while CoreHID owns the built-in
-/// trackpad. Pointer isolation remains CoreHID's responsibility.
+private final class RemoteCursorRectView: NSView {
+    let remoteCursor: NSCursor
+
+    init(cursor: NSCursor) {
+        self.remoteCursor = cursor
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        addCursorRect(bounds, cursor: remoteCursor)
+    }
+}
+
+/// Presents the host-side remote-ownership cursor at the frozen handoff
+/// position without activating Ampersand or mutating the pointer position.
 ///
-/// The cursor shown at the Mac handoff edge is a native directional resize
-/// cursor: horizontal for left/right handoff and vertical for top/bottom.
-/// This is explicit remote-control presentation, not a workaround for pointer
-/// ownership or a synthetic movement/focus mutation.
+/// A one-shot NSCursor.set() is insufficient here: it changes Ampersand's
+/// application cursor stack, but another active application may still own the
+/// visible cursor. Instead, a tiny non-activating transparent AppKit panel is
+/// placed under the already-frozen host cursor and owns a normal cursor rect.
+/// AppKit/WindowServer therefore selects the native directional cursor using
+/// the same mechanism as ordinary views.
+///
+/// Pointer isolation remains exclusively CoreHID's responsibility.
 final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
     @unchecked Sendable
 {
     private let lock = NSLock()
     private var operationGeneration: UInt64 = 0
 
-    // Accessed only by blocks dispatched to the main queue.
-    private var isPresented = false
-    private var previousCursor: NSCursor?
+    // Main-queue owned.
+    private var presentationPanel: NSPanel?
 
     func presentRemote(edge: ScreenEdge) {
         let generation = nextGeneration()
@@ -32,14 +54,54 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
                 return
             }
 
-            if !self.isPresented {
-                self.previousCursor = NSCursor.current
-                self.isPresented = true
+            self.removePanelIfPresent()
+
+            let cursor = Self.cursor(for: edge)
+            let mouse = NSEvent.mouseLocation
+            guard let screen = Self.screen(containing: mouse) else {
+                Diagnostics.log(
+                    "host cursor presentation failed reason=no-screen"
+                )
+                return
             }
 
-            Self.cursor(for: edge).set()
+            let frame = Self.presentationFrame(
+                around: mouse,
+                in: screen.frame
+            )
+            let view = RemoteCursorRectView(cursor: cursor)
+            let panel = NSPanel(
+                contentRect: frame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false
+            panel.hidesOnDeactivate = false
+            panel.isFloatingPanel = true
+            panel.becomesKeyOnlyIfNeeded = true
+            panel.acceptsMouseMovedEvents = true
+            // Do not ignore mouse hit-testing: WindowServer must consider this
+            // view's cursor rect. CoreHID has already seized the built-in
+            // trackpad, and the panel is removed before ownership is released.
+            panel.ignoresMouseEvents = false
+            panel.level = .screenSaver
+            panel.collectionBehavior = [
+                .canJoinAllSpaces,
+                .fullScreenAuxiliary,
+                .stationary,
+                .ignoresCycle,
+            ]
+            panel.contentView = view
+            panel.orderFrontRegardless()
+            panel.invalidateCursorRects(for: view)
+
+            self.presentationPanel = panel
             Diagnostics.log(
-                "host cursor presentation remote edge=\(edge.rawValue)"
+                "host cursor presentation remote mode=cursor-rect "
+                    + "edge=\(edge.rawValue)"
             )
         }
     }
@@ -48,17 +110,22 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         let generation = nextGeneration()
         DispatchQueue.main.async { [weak self] in
             guard let self,
-                  self.isCurrent(generation),
-                  self.isPresented else {
+                  self.isCurrent(generation) else {
                 return
             }
+            guard self.presentationPanel != nil else { return }
 
-            let cursor = self.previousCursor ?? NSCursor.arrow
-            self.previousCursor = nil
-            self.isPresented = false
-            cursor.set()
-            Diagnostics.log("host cursor presentation local restored")
+            self.removePanelIfPresent()
+            Diagnostics.log(
+                "host cursor presentation local mode=cursor-rect restored"
+            )
         }
+    }
+
+    private func removePanelIfPresent() {
+        presentationPanel?.orderOut(nil)
+        presentationPanel?.close()
+        presentationPanel = nil
     }
 
     private func nextGeneration() -> UInt64 {
@@ -82,5 +149,28 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         case .top, .bottom:
             return .resizeUpDown
         }
+    }
+
+    private static func screen(containing point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first {
+            NSMouseInRect(point, $0.frame, false)
+        } ?? NSScreen.main
+    }
+
+    private static func presentationFrame(
+        around point: NSPoint,
+        in screenFrame: NSRect
+    ) -> NSRect {
+        let side: CGFloat = 48
+        let half = side / 2
+
+        let minX = screenFrame.minX
+        let maxX = max(minX, screenFrame.maxX - side)
+        let minY = screenFrame.minY
+        let maxY = max(minY, screenFrame.maxY - side)
+
+        let x = min(max(point.x - half, minX), maxX)
+        let y = min(max(point.y - half, minY), maxY)
+        return NSRect(x: x, y: y, width: side, height: side)
     }
 }
