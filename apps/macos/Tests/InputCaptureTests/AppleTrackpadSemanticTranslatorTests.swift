@@ -175,6 +175,48 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
+    @Test("sub-slop jitter does not accumulate into a false tap rejection")
+    func jitterUsesExcursionNotPathLength() throws {
+        var translator = AppleTrackpadSemanticTranslator(
+            tapMovementThreshold: 10
+        )
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 6, pointerY: 0, contactCount: 1),
+                nowNanos: 4_700_000_000
+            ) == [SemanticPointerEvent(.move(dx: 6, dy: 0))]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: -6, pointerY: 0, contactCount: 1),
+                nowNanos: 4_720_000_000
+            ) == [SemanticPointerEvent(.move(dx: -6, dy: 0))]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 6, pointerY: 0, contactCount: 1),
+                nowNanos: 4_740_000_000
+            ) == [SemanticPointerEvent(.move(dx: 6, dy: 0))]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: -6, pointerY: 0, contactCount: 1),
+                nowNanos: 4_760_000_000
+            ) == [SemanticPointerEvent(.move(dx: -6, dy: 0))]
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 4_800_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.button(button: 0, down: false)),
+            ]
+        )
+        #expect(translator.takeTapResolution() == .emitted)
+    }
+
     @Test("long touch does not synthesize tap")
     func longTouchIsNotTap() throws {
         var translator = AppleTrackpadSemanticTranslator(
