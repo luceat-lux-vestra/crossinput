@@ -42,12 +42,46 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     private var translator = AppleTrackpadSemanticTranslator()
+    private var lastRawPrimary = false
+    private var lastRawSecondary = false
+    private var lastRawOther = false
 
     func consume(_ data: Data) throws -> [SemanticPointerEvent] {
         try lock.withLock {
             guard active else { return [] }
             let report = try AppleTrackpadRawReportDecoder.decode(data)
-            return try translator.translate(report)
+
+            // Metadata-only physical diagnostics. These transitions reveal
+            // whether the seized CoreHID stream actually exposes button state
+            // without logging raw reports, coordinates, or other payload data.
+            if report.buttons.primary != lastRawPrimary {
+                lastRawPrimary = report.buttons.primary
+                Diagnostics.log(
+                    "corehid raw button transition button=primary down=\(report.buttons.primary)"
+                )
+            }
+            if report.buttons.secondary != lastRawSecondary {
+                lastRawSecondary = report.buttons.secondary
+                Diagnostics.log(
+                    "corehid raw button transition button=secondary down=\(report.buttons.secondary)"
+                )
+            }
+            if report.buttons.other != lastRawOther {
+                lastRawOther = report.buttons.other
+                Diagnostics.log(
+                    "corehid raw button transition button=other down=\(report.buttons.other)"
+                )
+            }
+
+            let events = try translator.translate(report)
+            for event in events {
+                if case let .button(button, down) = event.kind {
+                    Diagnostics.log(
+                        "corehid semantic button transition button=\(button) down=\(down)"
+                    )
+                }
+            }
+            return events
         }
     }
 
