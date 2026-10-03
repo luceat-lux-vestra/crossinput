@@ -154,10 +154,20 @@ public final class InputSender: @unchecked Sendable {
     /// Returns the accumulated kind when `newer` may merge into an adjacent
     /// `older` batch tail, else nil. Buttons never merge: dropping or
     /// reordering a down/up pair can leave remote button state inconsistent.
-    private static func coalesced(_ older: SemanticPointerEvent.Kind,
-                                  _ newer: SemanticPointerEvent.Kind) -> SemanticPointerEvent.Kind? {
+    private static func coalesced(
+        _ older: SemanticPointerEvent.Kind,
+        _ newer: SemanticPointerEvent.Kind,
+        movementDeliveryMode: PointerMovementDeliveryMode
+    ) -> SemanticPointerEvent.Kind? {
         switch (older, newer) {
         case let (.move(dx, dy), .move(dx2, dy2)):
+            // Streaming DeX movement is intentionally one-way so every raw
+            // trackpad movement sample can reach Android without response RTT.
+            // Do not collapse adjacent samples here: Android InputReader owns
+            // pointer acceleration, and changing report magnitude/cadence
+            // changes the resulting cursor motion. Acknowledged routes retain
+            // the historical aggregate batching contract.
+            guard movementDeliveryMode == .acknowledged else { return nil }
             return .move(dx: saturatingAdd(dx, dx2), dy: saturatingAdd(dy, dy2))
         case let (.scroll(h, v), .scroll(h2, v2)):
             return .scroll(horizontal: h + h2, vertical: v + v2)
@@ -231,7 +241,11 @@ public final class InputSender: @unchecked Sendable {
             if let last = pendingPointers.last,
                last.sessionGeneration == sessionSnapshot.generation,
                last.movementDeliveryMode == movementDeliveryMode,
-               let mergedKind = Self.coalesced(last.event.kind, event.kind) {
+               let mergedKind = Self.coalesced(
+                   last.event.kind,
+                   event.kind,
+                   movementDeliveryMode: movementDeliveryMode
+               ) {
                 // Same-kind accumulation preserves ordering: merging only ever
                 // rewrites the tail batch's payload. Its existing completion
                 // stays the single delivery result for the whole batch.
