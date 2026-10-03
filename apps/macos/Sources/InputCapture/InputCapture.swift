@@ -381,6 +381,10 @@ public final class InputCapture: @unchecked Sendable {
             return true
         }
 
+        // Carbon hot-key registration must be owned by the main event
+        // dispatcher. The capture run loop itself stays on tapQueue.
+        installEmergencyHotKey(generation: generation)
+
         tapQueue.async { [weak self] in
             guard let self else { return }
             let runLoop = CFRunLoopGetCurrent()
@@ -419,7 +423,6 @@ public final class InputCapture: @unchecked Sendable {
                 return
             }
 
-            self.installEmergencyHotKey(generation: generation)
             CFRunLoopRun()
 
             self.stateLock.withLock {
@@ -1501,6 +1504,18 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     private func installEmergencyHotKey(generation: UInt64) {
+        // Carbon event targets are serviced by the application's main event
+        // loop. Registering from the dedicated CGEventTap thread can succeed
+        // superficially while leaving the handler unreachable in production.
+        // Self-dispatch here keeps startTrusted() safe even if a future caller
+        // invokes it off-main.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.installEmergencyHotKey(generation: generation)
+            }
+            return
+        }
+
         let alreadyInstalled = stateLock.withLock {
             emergencyHotKey != nil || emergencyHotKeyHandler != nil
         }
@@ -1518,6 +1533,7 @@ public final class InputCapture: @unchecked Sendable {
                 let capture = Unmanaged<InputCapture>
                     .fromOpaque(userData)
                     .takeUnretainedValue()
+                Diagnostics.log("emergency hotkey detected source=carbon")
                 capture.requestEmergencyReturn()
                 return noErr
             },
@@ -1570,7 +1586,9 @@ public final class InputCapture: @unchecked Sendable {
         if !accepted {
             _ = UnregisterEventHotKey(hotKeyRef)
             _ = RemoveEventHandler(handlerRef)
+            return
         }
+        Diagnostics.log("emergency hotkey registered on main event dispatcher")
     }
 
     private func uninstallEmergencyHotKey() {
