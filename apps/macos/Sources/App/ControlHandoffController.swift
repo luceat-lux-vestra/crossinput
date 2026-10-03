@@ -227,6 +227,7 @@ final class ControlHandoffController: @unchecked Sendable {
     var onStateChange: ((ControlState) -> Void)?
 
     private let sender: InputSender
+    private let boundaryWatch: any BoundaryWatchServicing
     private let capabilityController: InputCapabilityController
     private let captureStart: @MainActor () -> Bool
     private let captureStop: @MainActor () -> Void
@@ -243,10 +244,17 @@ final class ControlHandoffController: @unchecked Sendable {
     private var lifecycleStarted = false
     private var controlEpoch: UInt64 = 0
     private var activeSuppressionGeneration: UInt64?
+    private var selectedRemoteTargetID: UInt32?
+    private var boundaryTokenCounter: UInt64 = 0
+    private var pendingBoundaryToken: UInt64?
+    private var activeBoundaryWatch: PreparedBoundaryWatch?
+    private var boundaryReturnIntentActive = false
 
     @MainActor
     init(
         sender: InputSender,
+        boundaryWatch: any BoundaryWatchServicing =
+            UnavailableBoundaryWatchService(),
         capture: InputCapture = InputCapture(),
         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
         capabilityController: InputCapabilityController = InputCapabilityController(),
@@ -256,6 +264,7 @@ final class ControlHandoffController: @unchecked Sendable {
         useEventTapNoWarp: Bool = false
     ) {
         self.sender = sender
+        self.boundaryWatch = boundaryWatch
         self.capture = capture
         self.switchMachine = switchMachine
         self.capabilityController = capabilityController
@@ -283,7 +292,16 @@ final class ControlHandoffController: @unchecked Sendable {
                   self.sender.isHandoffReady else {
                 return
             }
-            self.switchMachine.pointerAtEdge(edge)
+            self.switchMachine.pointerAtEdge(
+                edge,
+                requiresPreparation: true
+            )
+        }
+        capture.onListeningPointerMove = { [weak self] dx, dy in
+            self?.cancelBoundaryPreparationIfMovingAway(
+                dx: dx,
+                dy: dy
+            )
         }
         capture.onPointerEvent = { [weak self] event in
             self?.enqueue(event)
