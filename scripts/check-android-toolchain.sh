@@ -24,8 +24,8 @@ GRADLE_INFO="$(
   JAVA_HOME="$JAVA_HOME" ANDROID_HOME="$ANDROID_HOME" ./gradlew --version
 )"
 printf '%s\n' "$GRADLE_INFO"
-printf '%s\n' "$GRADLE_INFO" | grep -Eq '^Gradle 9\.7\.1$' ||
-  fail "Gradle wrapper is not 9.7.1"
+printf '%s\n' "$GRADLE_INFO" | grep -Eq '^Gradle 9\.8\.0$' ||
+  fail "Gradle wrapper is not 9.8.0"
 printf '%s\n' "$GRADLE_INFO" | grep -Eq '^(Launcher JVM|JVM): .*25' ||
   fail "Gradle is not running on Java 25"
 
@@ -69,4 +69,4 @@ if bad:
 print(f"Verified {len(candidates)} Kotlin classfiles at Java 25 major 69")
 PY
 
-echo "Toolchain verified: Java=$JAVA_VERSION Android=37 BuildTools=37.0.0 Gradle=9.7.1 classfile=69"
+echo "Toolchain verified: Java=$JAVA_VERSION Android=37 BuildTools=37.0.0 Gradle=9.8.0 classfile=69"
