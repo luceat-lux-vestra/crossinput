@@ -54,6 +54,7 @@ struct AppleTrackpadSemanticTranslatorTests {
                 SemanticPointerEvent(.button(button: 0, down: false)),
             ]
         )
+        #expect(translator.takeTapResolution() == .emitted)
     }
 
     @Test("short two-contact touch emits secondary tap-to-click")
@@ -117,6 +118,7 @@ struct AppleTrackpadSemanticTranslatorTests {
                 nowNanos: 3_040_000_000
             ).isEmpty
         )
+        #expect(translator.takeTapResolution() == .rejectedTravel)
     }
 
     @Test("two-contact motion beyond slop becomes scroll, never secondary tap")
