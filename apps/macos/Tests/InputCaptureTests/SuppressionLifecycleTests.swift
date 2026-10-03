@@ -618,6 +618,47 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertFalse(capture.isSuppressed)
     }
 
+    func testNoWarpSuppressionForwardsNativePointerSemanticsWithoutQuartzRestore() {
+        let observation = PointerStateObservation()
+        let pointerObservation = PointerEmissionObservation()
+        let capture = makeCapture(restore: { observation.restoreCount += 1 })
+        capture.onPointerEvent = { pointerObservation.append($0) }
+
+        XCTAssertEqual(capture.suppressWithoutWarp(), 1)
+
+        let move = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        move.setIntegerValueField(.mouseEventDeltaX, value: 7)
+        move.setIntegerValueField(.mouseEventDeltaY, value: -3)
+        XCTAssertNil(capture.handleForTesting(type: .mouseMoved, event: move))
+
+        let down = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: .zero,
+            mouseButton: .left
+        )!
+        XCTAssertNil(capture.handleForTesting(type: .leftMouseDown, event: down))
+
+        XCTAssertEqual(
+            pointerObservation.events,
+            [
+                PointerEvent(.move(dx: 7, dy: -3)),
+                PointerEvent(.button(button: 0, down: true)),
+            ]
+        )
+
+        capture.release(reason: .normalReturn)
+
+        XCTAssertEqual(observation.restoreCount, 0)
+        XCTAssertTrue(capture.isAwaitingEdgeExitForTesting)
+        XCTAssertFalse(capture.isSuppressed)
+    }
+
     func testLegacySuppressionStillUsesPointerRestore() {
         let observation = PointerStateObservation()
         let capture = makeCapture(restore: { observation.restoreCount += 1 })
