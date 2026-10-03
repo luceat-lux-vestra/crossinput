@@ -378,24 +378,24 @@ Only HostSuppressionController may consume local host input. For the production
 built-in-trackpad path, pointer isolation belongs to CoreHID seizure rather than
 repeated P0 Quartz confinement.
 
-#96 is reopened and HEALTHY is required:
+#96 requires explicit remote-active host cursor presentation:
 
-- the pointer observation tap is listen-only;
+- pointer observation is listen-only;
 - the modifying event tap is keyboard-only;
-- pointer event types are excluded from the modifying tap in the CoreHID
-  production topology;
+- an independent listen-only emergency keyDown tap provides a separate
+  Shift-Command-X receipt path;
 - CoreHID is the sole remote pointer ownership/semantic source;
-- local return uses ownership release, not cursor-presentation repair APIs;
-- no private SkyLight/CGS production dependency;
-- no synthetic click/focus stealing;
-- no hide/show/associate/warp reset stack or pointer-jump workaround;
-- no custom cursor solely to mask #96; and
-- no equivalent cursor-API permutation experiment without materially new
-  evidence.
+- after that ownership becomes ready, native directional cursor presentation is
+  published for the configured edge axis;
+- presentation is withdrawn at the synchronous local-return gate before
+  CoreHID release;
+- no private SkyLight/CGS dependency, custom cursor, hide/show/associate stack,
+  synthetic click/focus/movement, or Quartz cursor-repair warp is admitted.
 
-The invariant is not satisfied until exact-head physical MacBook built-in
-trackpad -> DeX -> Mac verification shows immediate healthy native cursor
-presentation with no click/focus/app-switch/manual recovery.
+Historical #96 evidence that repeated edge-hold warping can corrupt AppKit
+directional cursor rendering remains a negative regression constraint. The
+current physical acceptance criterion is that the Mac edge visibly shows the
+native directional cursor while DeX owns the built-in trackpad.
 
 ## 8. HandoffPolicy is pure
 
@@ -1057,8 +1057,8 @@ Broad replacement is authorized; one giant rewrite PR is not.
    architecture merely to keep them green;
 5. preserve CXI v1 framing and validated DeX routing unless separately approved
    protocol work supersedes them;
-6. preserve #96's HEALTHY-required invariant and the physically established
-   negative evidence; and
+6. preserve #96's remote-active directional-cursor invariant and the
+   physically established negative evidence; and
 7. reset-sensitive runtime changes require exact-head physical verification and
    ADR-0012 lineage handling.
 
