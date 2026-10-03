@@ -65,16 +65,21 @@ object Main {
         val inputManagerPointer = InputManagerPointerInjector(log, context)
         val uhidPointer = UhidPointerInjector(log, hid)
         val pointer = PointerDispatcher(log, uhidPointer, inputManagerPointer, pointerMode)
-        val discovery = DisplayDiscovery(context, writerLock, log, pointer::refreshMetrics)
+        val boundaryWatch = BoundaryWatchController(writerLock, log)
+        val discovery = DisplayDiscovery(context, writerLock, log) { displayId ->
+            pointer.refreshMetrics(displayId)
+            boundaryWatch.invalidateForDisplayChange(displayId)
+        }
         val keyboard = KeyboardBackend(log, context, hid, mode)
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { mainLooper.quitSafely() },
             destroyKeyboard = keyboard::destroy,
+            destroyBoundaryWatch = boundaryWatch::close,
             destroyPointer = pointer::close,
             destroyHid = hid::destroyAll,
             flush = { writerLock.withLock { it.flush() } },
         )
-        val controller = Controller(discovery, hid, pointer, keyboard, writerLock, log)
+        val controller = Controller(discovery, hid, pointer, boundaryWatch, keyboard, writerLock, log)
 
         val reader = FrameReader(FileInputStream(FileDescriptor.`in`))
         val stdinThread = Thread {
@@ -127,6 +132,7 @@ object Main {
 class MainShutdownLifecycle(
     private val requestMainLoopQuit: () -> Unit,
     private val destroyKeyboard: () -> Unit,
+    private val destroyBoundaryWatch: () -> Unit = {},
     private val destroyPointer: () -> Unit = {},
     private val destroyHid: () -> Unit,
     private val flush: () -> Unit,
@@ -144,12 +150,16 @@ class MainShutdownLifecycle(
             destroyKeyboard()
         } finally {
             try {
-                destroyPointer()
+                destroyBoundaryWatch()
             } finally {
                 try {
-                    destroyHid()
+                    destroyPointer()
                 } finally {
-                    flush()
+                    try {
+                        destroyHid()
+                    } finally {
+                        flush()
+                    }
                 }
             }
         }
@@ -246,11 +256,19 @@ enum class KeyboardBackendMode(val token: String) {
     }
 }
 
+internal object BoundaryAuthorityAdmission {
+    fun allows(
+        compositorRequired: Boolean,
+        authority: PointerBoundaryAuthority,
+    ): Boolean = !compositorRequired || authority == PointerBoundaryAuthority.COMPOSITOR
+}
+
 /** Frame dispatch. All writes go through [WriterLock]. */
 class Controller(
     private val discovery: DisplayDiscovery,
     private val hid: HidDeviceManager,
-    private val pointer: PointerInjector,
+    private val pointer: PointerDispatcher,
+    private val boundaryWatch: BoundaryWatchController,
     private val keyboard: KeyboardInjector,
     private val writerLock: WriterLock,
     private val log: Logger,
@@ -274,6 +292,11 @@ class Controller(
                 val (dx, dy) = Messages.pointerMoveRel(frame.payload)
                 val result = pointer.moveRelative(dx, dy)
                 writePointerResult(frame, result)
+                val authority = pointer.boundaryAuthority()
+                boundaryWatch.onPointerAuthorityObserved(authority)
+                if (result.status == PointerDelivery.Status.DELIVERED) {
+                    boundaryWatch.onPointerMove(dx, dy, authority)
+                }
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer move delivery status=${result.status}")
                 }
@@ -282,6 +305,7 @@ class Controller(
                 val btn = Messages.pointerButton(frame.payload)
                 val result = pointer.button(btn.button, btn.down)
                 writePointerResult(frame, result)
+                boundaryWatch.onPointerAuthorityObserved(pointer.boundaryAuthority())
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer button delivery status=${result.status}")
                 }
@@ -290,12 +314,17 @@ class Controller(
                 val (horizontal, vertical) = Messages.pointerScroll(frame.payload)
                 val result = pointer.scroll(horizontal, vertical)
                 writePointerResult(frame, result)
+                boundaryWatch.onPointerAuthorityObserved(pointer.boundaryAuthority())
                 if (result.status != PointerDelivery.Status.DELIVERED) {
                     log.warn("Main", "pointer scroll delivery status=${result.status}")
                 }
             }
             Protocol.TYPE_KEY_EVENT -> {
                 keyboard.keyEvent(Messages.keyEvent(frame.payload))
+            }
+            Protocol.TYPE_BOUNDARY_WATCH_START -> handleBoundaryWatchStart(frame)
+            Protocol.TYPE_BOUNDARY_WATCH_STOP -> {
+                boundaryWatch.stop(Messages.boundaryWatchStop(frame.payload))
             }
             Protocol.TYPE_PING -> writerLock.withLock {
                 it.write(Protocol.TYPE_PONG, frame.requestId, Messages.pong())
@@ -332,6 +361,7 @@ class Controller(
             return
         }
         val capabilities = Cxi.CAPABILITY_SEMANTIC_POINTER_RESULT or
+            Cxi.CAPABILITY_BOUNDARY_WATCH or
             if (pointer.supportsExplicitDisplayRouting) {
                 Cxi.CAPABILITY_EXPLICIT_POINTER_ROUTING
             } else {
@@ -358,6 +388,95 @@ class Controller(
         }
     }
 
+    private fun handleBoundaryWatchStart(frame: Frame) {
+        val request = Messages.boundaryWatchStart(frame.payload)
+        val selectedId = pointer.selectedDisplayId()
+        val display = discovery.find(request.displayId)
+        if (display == null || selectedId != request.displayId) {
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(
+                        request.controlToken,
+                        BoundaryWatchController.ERROR_TARGET_MISMATCH,
+                    ),
+                )
+            }
+            return
+        }
+
+        val authority = pointer.boundaryAuthority()
+        val compositorRequired = pointer.requiresCompositorBoundaryAuthority()
+        log.info(
+            "Main",
+            "boundary watch start target=${request.displayId} " +
+                "authority=${authority.name.lowercase()} compositorRequired=$compositorRequired",
+        )
+
+        if (!BoundaryAuthorityAdmission.allows(compositorRequired, authority)) {
+            log.warn(
+                "Main",
+                "boundary watch rejected target=${request.displayId} " +
+                    "required=compositor authority=${authority.name.lowercase()}",
+            )
+            writerLock.withLock {
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(
+                        request.controlToken,
+                        BoundaryWatchController.ERROR_BACKEND_CHANGED,
+                    ),
+                )
+            }
+            return
+        }
+
+        val result = boundaryWatch.start(
+            token = request.controlToken,
+            displayId = request.displayId,
+            layerStack = display.layerStack,
+            edge = request.edge,
+            authority = authority,
+        )
+        val error = result.errorCode
+        writerLock.withLock {
+            if (error == null) {
+                val mode = if (result.mode == BoundaryWatchController.MODE_COMPOSITOR) {
+                    "compositor"
+                } else {
+                    "delivered-coordinates"
+                }
+                log.info(
+                    "Main",
+                    "boundary watch ready target=${request.displayId} mode=$mode " +
+                        "layerStack=${result.layerStack}",
+                )
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_READY,
+                    frame.requestId,
+                    Messages.boundaryWatchReady(
+                        request.controlToken,
+                        request.displayId,
+                        result.mode,
+                        result.layerStack,
+                    ),
+                )
+            } else {
+                log.warn(
+                    "Main",
+                    "boundary watch preparation failed target=${request.displayId} code=$error",
+                )
+                it.write(
+                    Protocol.TYPE_BOUNDARY_WATCH_ERROR,
+                    frame.requestId,
+                    Messages.boundaryWatchError(request.controlToken, error),
+                )
+            }
+        }
+    }
+
     private fun handleListDisplays(frame: Frame) {
         val displays = discovery.displays()
         log.info("Main", "listing ${displays.size} display(s)")
@@ -367,6 +486,7 @@ class Controller(
     }
 
     private fun handleSelectDisplay(frame: Frame) {
+        boundaryWatch.invalidateForTargetChange()
         val displayId = Messages.selectDisplayId(frame.payload)
         val display = discovery.find(displayId)
         if (display == null) {

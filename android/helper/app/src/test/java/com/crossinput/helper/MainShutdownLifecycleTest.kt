@@ -27,6 +27,7 @@ class MainShutdownLifecycleTest {
         val lifecycle = MainShutdownLifecycle(
             requestMainLoopQuit = { events += "quit" },
             destroyKeyboard = { events += "keyboard" },
+            destroyBoundaryWatch = { events += "boundary" },
             destroyPointer = { events += "pointer" },
             destroyHid = { events += "hid" },
             flush = { events += "flush" },
@@ -35,6 +36,6 @@ class MainShutdownLifecycleTest {
         lifecycle.cleanupOnce()
         lifecycle.cleanupOnce()
 
-        assertEquals(listOf("keyboard", "pointer", "hid", "flush"), events)
+        assertEquals(listOf("keyboard", "boundary", "pointer", "hid", "flush"), events)
     }
 }

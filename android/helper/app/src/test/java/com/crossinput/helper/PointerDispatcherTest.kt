@@ -34,6 +34,8 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = true)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.COMPOSITOR, dispatcher.boundaryAuthority())
+        assertTrue(dispatcher.requiresCompositorBoundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         // The UHID contract must stay honest: system routing never claims a
         // target-specific selection.
@@ -48,6 +50,8 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = false)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertFalse(dispatcher.requiresCompositorBoundaryAuthority())
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid, never()).selectSystemRoute()
     }
@@ -61,6 +65,11 @@ class PointerDispatcherTest {
         val dispatcher = auto(desktopSink = true)
 
         assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertTrue(
+            "desktop requirement must survive initial UHID unavailability",
+            dispatcher.requiresCompositorBoundaryAuthority(),
+        )
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
         verify(uhid).close()
     }
@@ -157,6 +166,11 @@ class PointerDispatcherTest {
         dispatcher.selectDisplay(display)
 
         assertEquals(PointerDelivery.DELIVERED, dispatcher.moveRelative(5, 6))
+        assertEquals(PointerBoundaryAuthority.DELIVERED_COORDINATES, dispatcher.boundaryAuthority())
+        assertTrue(
+            "runtime fallback must not erase the desktop boundary contract",
+            dispatcher.requiresCompositorBoundaryAuthority(),
+        )
         verify(uhid).close()
         verify(inputManager, times(1)).moveRelative(5, 6)
     }

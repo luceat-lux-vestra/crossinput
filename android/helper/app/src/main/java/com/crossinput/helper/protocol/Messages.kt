@@ -38,6 +38,19 @@ object Messages {
         return Pair(bb.int, bb.int)
     }
 
+    data class BoundaryWatchStart(val controlToken: Long, val displayId: Int, val edge: Int)
+
+    fun boundaryWatchStart(payload: ByteArray): BoundaryWatchStart {
+        val bb = le(payload, 0)
+        return BoundaryWatchStart(
+            controlToken = bb.long,
+            displayId = bb.int,
+            edge = bb.get().toInt() and 0xFF,
+        )
+    }
+
+    fun boundaryWatchStop(payload: ByteArray): Long = le(payload, 0).long
+
     data class PointerButton(val button: Int, val down: Boolean)
 
     fun pointerButton(payload: ByteArray): PointerButton {
@@ -118,6 +131,27 @@ object Messages {
             .put(status.toByte())
             .putInt(deliveredDx)
             .putInt(deliveredDy)
+            .array()
+
+    fun boundaryWatchReady(controlToken: Long, displayId: Int, mode: Int, layerStack: Int): ByteArray =
+        ByteBuffer.allocate(17).order(ByteOrder.LITTLE_ENDIAN)
+            .putLong(controlToken)
+            .putInt(displayId)
+            .put(mode.toByte())
+            .putInt(layerStack)
+            .array()
+
+    fun boundaryReached(controlToken: Long, displayId: Int, edge: Int): ByteArray =
+        ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
+            .putLong(controlToken)
+            .putInt(displayId)
+            .put(edge.toByte())
+            .array()
+
+    fun boundaryWatchError(controlToken: Long, code: Int): ByteArray =
+        ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN)
+            .putLong(controlToken)
+            .put(code.toByte())
             .array()
 
     // ---- helpers ----

@@ -26,7 +26,7 @@ class DisplayDiscovery(
     context: Context,
     private val writer: WriterLock,
     private val log: Logger,
-    /** Invoked on display add/change so input backends can refresh cached metrics. */
+    /** Invoked on display add/change/remove so input and boundary state can be invalidated. */
     private val onDisplayEvent: ((displayId: Int) -> Unit)? = null,
 ) : DisplayManager.DisplayListener {
 
@@ -41,6 +41,7 @@ class DisplayDiscovery(
     override fun onDisplayChanged(displayId: Int) = notifyChanged(displayId)
     override fun onDisplayRemoved(displayId: Int) {
         log.info("DisplayDiscovery", "display removed id=$displayId")
+        onDisplayEvent?.invoke(displayId)
     }
 
     fun displays(): List<DisplayInfo> = allDisplays().mapNotNull { buildInfo(it) }
