@@ -23,6 +23,28 @@ final class CoreHIDTapSurfaceDiagnosticsTests: XCTestCase {
         XCTAssertEqual(diagnostics.semanticButtonEvents, 0)
     }
 
+    func testAggregateMetadataRecordsSilenceContactEnd() {
+        var diagnostics = CoreHIDTapSurfaceDiagnostics()
+
+        diagnostics.observeReport(
+            contactPresent: true,
+            contactTransition: true
+        )
+        diagnostics.observeSilenceContactEnd()
+        diagnostics.observeTapDecision()
+        diagnostics.observeSemanticButton()
+        diagnostics.observeSemanticButton()
+
+        XCTAssertEqual(diagnostics.zeroContactReports, 0)
+        XCTAssertEqual(diagnostics.contactTransitions, 1)
+        XCTAssertEqual(diagnostics.silenceContactEnds, 1)
+        XCTAssertEqual(diagnostics.tapDecisions, 1)
+        XCTAssertEqual(diagnostics.semanticButtonEvents, 2)
+        XCTAssertTrue(
+            diagnostics.summary.contains("silenceContactEnds=1")
+        )
+    }
+
     func testAggregateMetadataRecordsLiftDecisionAndSemanticButtonPair() {
         var diagnostics = CoreHIDTapSurfaceDiagnostics()
 
