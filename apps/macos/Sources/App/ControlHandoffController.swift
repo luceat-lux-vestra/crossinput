@@ -581,6 +581,258 @@ final class ControlHandoffController: @unchecked Sendable {
         switchMachine.setAutomaticReturnAuthority(authority)
     }
 
+    @MainActor
+    func updateRemoteTarget(_ targetID: UInt32?) {
+        let previous = lifecycleLock.withLock { () -> UInt32? in
+            let previous = selectedRemoteTargetID
+            selectedRemoteTargetID = targetID
+            return previous
+        }
+        guard previous != targetID else { return }
+
+        retireBoundaryWatch()
+        if switchMachine.state == .edgeArmed ||
+            switchMachine.state == .remoteActive {
+            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+        }
+    }
+
+    @MainActor
+    func handleBoundarySignal(_ signal: BoundaryWatchSignal) {
+        switch signal {
+        case let .reached(token, targetID, edge):
+            let accepted = lifecycleLock.withLock {
+                guard let activeBoundaryWatch,
+                      activeBoundaryWatch.mode == .compositor,
+                      activeBoundaryWatch.controlToken == token,
+                      activeBoundaryWatch.targetID == targetID,
+                      selectedRemoteTargetID == targetID,
+                      boundaryReturnIntentActive else {
+                    return false
+                }
+                return true
+            }
+            guard accepted,
+                  switchMachine.state == .remoteActive,
+                  capture.isSuppressed,
+                  edge == Self.remoteReturnEdge(
+                      for: switchMachine.entryEdge
+                  ),
+                  switchMachine.beginAuthoritativeBoundaryReturn() else {
+                return
+            }
+
+            // Authoritative boundary confirmation starts only the first phase.
+            // Restore native host ownership synchronously before localActive is
+            // published, matching every other #151 return path.
+            retireBoundaryWatch()
+            releaseHostOwnershipAndCapture(reason: .normalReturn)
+            sender.cancelPendingPointerEvents()
+            switchMachine.completeReturn(reason: .boundaryCrossed)
+
+        case let .failed(token, _):
+            let matches = lifecycleLock.withLock {
+                activeBoundaryWatch?.controlToken == token ||
+                    pendingBoundaryToken == token
+            }
+            guard matches else { return }
+            retireBoundaryWatch()
+            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            sender.cancelPendingPointerEvents()
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+        }
+    }
+
+    private func retireBoundaryWatch() {
+        let active = lifecycleLock.withLock {
+            pendingBoundaryToken = nil
+            boundaryReturnIntentActive = false
+            let active = activeBoundaryWatch
+            activeBoundaryWatch = nil
+            return active
+        }
+        if let active {
+            boundaryWatch.stop(active)
+        }
+    }
+
+    @MainActor
+    private func beginBoundaryPreparation(edge: ScreenEdge) {
+        let context = lifecycleLock.withLock {
+            () -> (token: UInt64, targetID: UInt32)? in
+            guard isEdgeSwitchEnabled,
+                  let targetID = selectedRemoteTargetID else {
+                return nil
+            }
+            boundaryTokenCounter &+= 1
+            if boundaryTokenCounter == 0 {
+                boundaryTokenCounter = 1
+            }
+            let token = boundaryTokenCounter
+            pendingBoundaryToken = token
+            boundaryReturnIntentActive = false
+            return (token, targetID)
+        }
+
+        guard let context else {
+            switchMachine.forceReturn(reason: .remoteUnavailable)
+            return
+        }
+
+        let returnEdge = Self.remoteReturnEdge(for: edge)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let prepared = try await boundaryWatch.start(
+                    controlToken: context.token,
+                    targetID: context.targetID,
+                    edge: returnEdge
+                )
+                completeBoundaryPreparation(prepared)
+            } catch {
+                failBoundaryPreparation(
+                    token: context.token,
+                    reason: String(describing: error)
+                )
+            }
+        }
+    }
+
+    @MainActor
+    private func completeBoundaryPreparation(
+        _ prepared: PreparedBoundaryWatch
+    ) {
+        let accepted = lifecycleLock.withLock {
+            guard isEdgeSwitchEnabled,
+                  pendingBoundaryToken == prepared.controlToken,
+                  selectedRemoteTargetID == prepared.targetID else {
+                return false
+            }
+            pendingBoundaryToken = nil
+            activeBoundaryWatch = prepared
+            boundaryReturnIntentActive = false
+            return true
+        }
+
+        guard accepted, switchMachine.state == .edgeArmed else {
+            lifecycleLock.withLock {
+                if activeBoundaryWatch?.controlToken ==
+                    prepared.controlToken {
+                    activeBoundaryWatch = nil
+                }
+            }
+            boundaryWatch.stop(prepared)
+            return
+        }
+
+        Diagnostics.log(
+            "boundary watch prepared mode="
+                + (prepared.mode == .compositor
+                    ? "compositor"
+                    : "delivered-coordinates")
+                + " target=\(prepared.targetID)"
+        )
+
+        guard switchMachine.remotePrepared() else {
+            retireBoundaryWatch()
+            return
+        }
+    }
+
+    @MainActor
+    private func failBoundaryPreparation(
+        token: UInt64,
+        reason: String
+    ) {
+        let stillPending = lifecycleLock.withLock {
+            guard pendingBoundaryToken == token else { return false }
+            pendingBoundaryToken = nil
+            return true
+        }
+        guard stillPending else { return }
+        Diagnostics.log(
+            "boundary watch preparation failed reason=\(reason)"
+        )
+        switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
+    private func observeBoundaryReturnIntent(_ event: PointerEvent) {
+        guard case let .move(dx, dy) = event.kind else { return }
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: switchMachine.entryEdge,
+            dx: CGFloat(dx),
+            dy: CGFloat(dy)
+        )
+        guard directed > 0 else { return }
+        lifecycleLock.withLock {
+            guard activeBoundaryWatch?.mode == .compositor else {
+                return
+            }
+            boundaryReturnIntentActive = false
+        }
+    }
+
+    private func confirmBoundaryReturnIntent(
+        requestedDx: Int32,
+        requestedDy: Int32
+    ) {
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: switchMachine.entryEdge,
+            dx: CGFloat(requestedDx),
+            dy: CGFloat(requestedDy)
+        )
+        guard directed != 0 else { return }
+        lifecycleLock.withLock {
+            guard activeBoundaryWatch?.mode == .compositor else {
+                return
+            }
+            boundaryReturnIntentActive = directed < 0
+        }
+    }
+
+    private func cancelBoundaryPreparationIfMovingAway(
+        dx: Int32,
+        dy: Int32
+    ) {
+        guard switchMachine.state == .edgeArmed else { return }
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: switchMachine.entryEdge,
+            dx: CGFloat(dx),
+            dy: CGFloat(dy)
+        )
+        guard directed < 0 else { return }
+
+        let active = lifecycleLock.withLock {
+            () -> PreparedBoundaryWatch? in
+            guard pendingBoundaryToken != nil ||
+                    activeBoundaryWatch != nil else {
+                return nil
+            }
+            pendingBoundaryToken = nil
+            boundaryReturnIntentActive = false
+            let active = activeBoundaryWatch
+            activeBoundaryWatch = nil
+            return active
+        }
+        if let active {
+            boundaryWatch.stop(active)
+        }
+        switchMachine.cancelEdgePreparation()
+    }
+
+    private static func remoteReturnEdge(
+        for hostEntryEdge: ScreenEdge
+    ) -> RemoteBoundaryEdge {
+        switch hostEntryEdge {
+        case .left: return .right
+        case .right: return .left
+        case .top: return .bottom
+        case .bottom: return .top
+        }
+    }
+
     func emergencyReturn() {
         releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
         sender.cancelPendingPointerEvents()
