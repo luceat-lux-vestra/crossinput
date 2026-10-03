@@ -34,10 +34,16 @@ return is a separate regression check.
 
 Production now gives this state an explicit owner. The directional cursor is
 published only after the CoreHID lease and matching keyboard admission are
-ready, and it is withdrawn at every synchronous local-return/failure gate before
-CoreHID ownership is released. It uses only native `NSCursor.resizeLeftRight`
-/ `.resizeUpDown`; it does not hide the cursor, warp the pointer, synthesize a
-click/focus transition, or install a custom cursor.
+ready. A small transparent **non-activating** AppKit panel is placed under the
+already-frozen host pointer and owns a native cursor rectangle using
+`NSCursor.resizeLeftRight` / `.resizeUpDown`. The panel is removed at every
+synchronous local-return/failure gate before CoreHID ownership is released.
+
+A one-shot `NSCursor.set()` implementation was physically rejected because it
+changed Ampersand's application cursor state but did not replace the visible
+arrow while another application owned the active cursor context. The cursor-rect
+implementation does not hide the cursor, warp the pointer, synthesize a
+click/focus transition, or install custom cursor artwork.
 
 ### Historical cursor-corruption evidence
 
