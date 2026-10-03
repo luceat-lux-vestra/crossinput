@@ -38,6 +38,49 @@ private final class CoreHIDPointerReleaseResponsibility: @unchecked Sendable {
 }
 
 @available(macOS 15.0, *)
+struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
+    private(set) var reports = 0
+    private(set) var contactPresentReports = 0
+    private(set) var zeroContactReports = 0
+    private(set) var contactTransitions = 0
+    private(set) var tapDecisions = 0
+    private(set) var semanticButtonEvents = 0
+
+    mutating func observeReport(
+        contactPresent: Bool,
+        contactTransition: Bool
+    ) {
+        reports += 1
+        if contactPresent {
+            contactPresentReports += 1
+        } else {
+            zeroContactReports += 1
+        }
+        if contactTransition {
+            contactTransitions += 1
+        }
+    }
+
+    mutating func observeTapDecision() {
+        tapDecisions += 1
+    }
+
+    mutating func observeSemanticButton() {
+        semanticButtonEvents += 1
+    }
+
+    var summary: String {
+        "corehid tap surface summary "
+            + "reports=\(reports) "
+            + "contactPresentReports=\(contactPresentReports) "
+            + "zeroContactReports=\(zeroContactReports) "
+            + "contactTransitions=\(contactTransitions) "
+            + "tapDecisions=\(tapDecisions) "
+            + "semanticButtons=\(semanticButtonEvents)"
+    }
+}
+
+@available(macOS 15.0, *)
 private final class CoreHIDPointerStreamState: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
@@ -46,6 +89,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
     private var lastRawSecondary = false
     private var lastRawOther = false
     private var lastRawContactPresent = false
+    private var tapSurfaceDiagnostics = CoreHIDTapSurfaceDiagnostics()
 
     func consume(_ data: Data) throws -> [SemanticPointerEvent] {
         try lock.withLock {
@@ -70,6 +114,10 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
 
             let contactPresent = report.contactCount > 0
             let contactTransition = contactPresent != lastRawContactPresent
+            tapSurfaceDiagnostics.observeReport(
+                contactPresent: contactPresent,
+                contactTransition: contactTransition
+            )
             if contactTransition {
                 lastRawContactPresent = contactPresent
                 Diagnostics.log("corehid raw input type=contact-transition")
@@ -78,6 +126,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
             let events = try translator.translate(report)
             if contactTransition, !contactPresent,
                let resolution = translator.takeTapResolution() {
+                tapSurfaceDiagnostics.observeTapDecision()
                 Diagnostics.log(
                     "corehid tap decision outcome=\(resolution.rawValue)"
                 )
@@ -86,6 +135,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
                 if case let .button(button, down) = event.kind {
                     _ = button
                     _ = down
+                    tapSurfaceDiagnostics.observeSemanticButton()
                     Diagnostics.log("corehid semantic input type=button")
                 }
             }
@@ -97,6 +147,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
         lock.withLock {
             guard active else { return [] }
             active = false
+            Diagnostics.log(tapSurfaceDiagnostics.summary)
             return translator.reset()
         }
     }
@@ -106,6 +157,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
         lock.withLock {
             guard active else { return false }
             active = false
+            Diagnostics.log(tapSurfaceDiagnostics.summary)
             _ = translator.reset()
             return true
         }
