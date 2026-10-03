@@ -133,8 +133,13 @@ public final class InputCapture: @unchecked Sendable {
     private enum PointerSuppressionStrategy: Sendable {
         /// Legacy event-tap pointer forwarding with edge-hold Quartz warps.
         case eventTapWarp
-        /// Another backend owns pointer semantics and physical pointer seizure.
-        /// Event-tap pointer events are consumed only as a no-leak guard.
+        /// Production built-in-trackpad path: preserve macOS pointer semantics
+        /// (tap-to-click, scrolling, and pointer acceleration) from CGEventTap
+        /// while consuming the events locally. No Quartz hold/restore warp is
+        /// permitted in this mode.
+        case eventTapNoWarp
+        /// Experimental backend owns pointer semantics and physical pointer
+        /// seizure. Event-tap pointer events are only a no-leak guard.
         case externalOwner
     }
 
@@ -471,10 +476,21 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Mode control
 
-    /// Legacy suppression path retained while the Architecture Leap is staged.
+    /// Legacy suppression path retained only for regression compatibility.
     /// Pointer semantics come from CGEventTap and movement is edge-held by Quartz.
     public func suppress() -> UInt64? {
         suppress(pointerStrategy: .eventTapWarp)
+    }
+
+    /// Production no-warp capture for the built-in trackpad.
+    ///
+    /// The active HID-level event tap remains the semantic source, so macOS
+    /// keeps responsibility for tap-to-click, button classification, scrolling,
+    /// and pointer acceleration. Events are consumed while remote-owned so the
+    /// local pointer/applications do not receive them. Unlike the legacy path,
+    /// this mode never calls CGWarpMouseCursorPosition.
+    public func suppressWithoutWarp() -> UInt64? {
+        suppress(pointerStrategy: .eventTapNoWarp)
     }
 
     /// Suppression path used when another backend owns host pointer seizure and
@@ -627,14 +643,15 @@ public final class InputCapture: @unchecked Sendable {
                 // The triggering event is returned to macOS after cleanup.
                 onPointerStateReset?()
                 armEdgeExitGate()
-            } else if pointerStrategy == .externalOwner {
-                // CoreHID release restores native pointer ownership in place.
-                // Any Quartz warp/synthetic move here would reintroduce the
-                // cursor-corruption trigger proven by issue #96.
+            } else if pointerStrategy == .externalOwner
+                        || pointerStrategy == .eventTapNoWarp {
+                // No-warp ownership returns the existing native pointer in
+                // place. Any Quartz restore/synthetic move here would reintroduce
+                // the cursor-corruption trigger proven by issue #96.
                 armEdgeExitGate()
             } else {
                 // Legacy path only: restore the crossing point while the old
-                // event-tap ownership implementation remains staged.
+                // warp-based implementation remains available to regression tests.
                 if let pointerRestoreOverride {
                     pointerRestoreOverride()
                 } else {
@@ -937,7 +954,9 @@ public final class InputCapture: @unchecked Sendable {
                     PointerEvent(.move(dx: dx, dy: dy)),
                     generation: snapshot.generation
                 )
-                holdPointerAtEdge(generation: snapshot.generation)
+                if snapshot.pointerStrategy == .eventTapWarp {
+                    holdPointerAtEdge(generation: snapshot.generation)
+                }
                 return nil
             }
             detectEdge()
