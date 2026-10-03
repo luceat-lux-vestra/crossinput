@@ -199,15 +199,26 @@ public final class InputCapture: @unchecked Sendable {
     public var onEmergencyReturnRequested: (@Sendable () -> Void)?
 
     private let tapQueue = DispatchQueue(label: "crossinput.capturertap", qos: .userInteractive)
+    /// Emergency return has its own listen-only cghid tap and run loop. It must
+    /// not depend on the keyboard-suppression tap, the main event dispatcher,
+    /// or Android/control-plane progress.
+    private let emergencyTapQueue = DispatchQueue(
+        label: "crossinput.emergencytap",
+        qos: .userInteractive
+    )
     /// Pointer observation is deliberately listen-only. Registering pointer
     /// event types on the long-lived modifying tap is the strongest remaining
     /// production-only delta from the HEALTHY standalone CoreHID probe (#96).
     private var pointerTap: CFMachPort?
     /// Only keyboard events are registered on the modifying tap.
     private var keyboardTap: CFMachPort?
+    /// Independent fail-safe observation for Shift-Command-X.
+    private var emergencyTap: CFMachPort?
     private var pointerRunLoopSource: CFRunLoopSource?
     private var keyboardRunLoopSource: CFRunLoopSource?
+    private var emergencyRunLoopSource: CFRunLoopSource?
     private var runLoop: CFRunLoop?
+    private var emergencyRunLoop: CFRunLoop?
     /// Invalidates queued run-loop installation work across stop/restart.
     /// Without this generation, stop() can win before the tapQueue block runs
     /// and that stale block can reattach an invalidated source afterwards.
@@ -347,14 +358,18 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public func startTrusted() -> Bool {
-        let existing = stateLock.withLock { (pointerTap, keyboardTap) }
+        let existing = stateLock.withLock {
+            (pointerTap, keyboardTap, emergencyTap)
+        }
         if let pointerTap = existing.0,
            let keyboardTap = existing.1,
+           let emergencyTap = existing.2,
            CGEvent.tapIsEnabled(tap: pointerTap),
-           CGEvent.tapIsEnabled(tap: keyboardTap) {
+           CGEvent.tapIsEnabled(tap: keyboardTap),
+           CGEvent.tapIsEnabled(tap: emergencyTap) {
             return true
         }
-        if existing.0 != nil || existing.1 != nil {
+        if existing.0 != nil || existing.1 != nil || existing.2 != nil {
             // A timed-out/user-disabled tap can remain non-nil even when
             // re-enabling failed. Recreate the pair atomically rather than
             // accepting a half-live ownership topology.
@@ -389,6 +404,20 @@ public final class InputCapture: @unchecked Sendable {
             )
         }
 
+        let emergencyCallback: CGEventTapCallBack = {
+            _, type, event, refcon in
+            guard let refcon else {
+                return Unmanaged.passUnretained(event)
+            }
+            let capture = Unmanaged<InputCapture>
+                .fromOpaque(refcon)
+                .takeUnretainedValue()
+            return capture.handleEmergencyTap(
+                type: type,
+                event: event
+            )
+        }
+
         guard let newPointerTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -410,6 +439,21 @@ public final class InputCapture: @unchecked Sendable {
             return false
         }
 
+        // Created after the modifying keyboard tap so this head-inserted
+        // listen-only observer is ahead of the consumer in the cghid tap list.
+        guard let newEmergencyTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: Self.eventMask([.keyDown]),
+            callback: emergencyCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            CFMachPortInvalidate(newPointerTap)
+            CFMachPortInvalidate(newKeyboardTap)
+            return false
+        }
+
         guard let pointerSource = CFMachPortCreateRunLoopSource(
             kCFAllocatorDefault,
             newPointerTap,
@@ -418,30 +462,40 @@ public final class InputCapture: @unchecked Sendable {
             kCFAllocatorDefault,
             newKeyboardTap,
             0
+        ), let emergencySource = CFMachPortCreateRunLoopSource(
+            kCFAllocatorDefault,
+            newEmergencyTap,
+            0
         ) else {
             CFMachPortInvalidate(newPointerTap)
             CFMachPortInvalidate(newKeyboardTap)
+            CFMachPortInvalidate(newEmergencyTap)
             return false
         }
 
         let generation: UInt64? = stateLock.withLock {
             // Concurrent starts are not expected in production, but fail
             // locally instead of publishing a second tap pair.
-            guard pointerTap == nil, keyboardTap == nil else { return nil }
+            guard pointerTap == nil,
+                  keyboardTap == nil,
+                  emergencyTap == nil else { return nil }
             tapLifecycleGeneration &+= 1
             if tapLifecycleGeneration == 0 {
                 tapLifecycleGeneration = 1
             }
             pointerTap = newPointerTap
             keyboardTap = newKeyboardTap
+            emergencyTap = newEmergencyTap
             pointerRunLoopSource = pointerSource
             keyboardRunLoopSource = keyboardSource
+            emergencyRunLoopSource = emergencySource
             resetLocalTransitionTrackingForFreshTapLocked()
             return tapLifecycleGeneration
         }
         guard let generation else {
             CFMachPortInvalidate(newPointerTap)
             CFMachPortInvalidate(newKeyboardTap)
+            CFMachPortInvalidate(newEmergencyTap)
             return true
         }
 
@@ -497,13 +551,58 @@ public final class InputCapture: @unchecked Sendable {
                 }
             }
         }
+        emergencyTapQueue.async { [weak self] in
+            guard let self else { return }
+            let emergencyRunLoop = CFRunLoopGetCurrent()
+            let source: CFRunLoopSource? = self.stateLock.withLock {
+                guard self.tapLifecycleGeneration == generation,
+                      self.emergencyTap != nil,
+                      let source = self.emergencyRunLoopSource else {
+                    return nil
+                }
+                self.emergencyRunLoop = emergencyRunLoop
+                return source
+            }
+            guard let source else { return }
+
+            CFRunLoopAddSource(
+                emergencyRunLoop,
+                source,
+                .commonModes
+            )
+            let stillCurrent = self.stateLock.withLock {
+                self.tapLifecycleGeneration == generation
+                    && self.emergencyTap != nil
+                    && self.emergencyRunLoopSource === source
+            }
+            guard stillCurrent else {
+                CFRunLoopRemoveSource(
+                    emergencyRunLoop,
+                    source,
+                    .commonModes
+                )
+                return
+            }
+
+            Diagnostics.log(
+                "emergency event tap active mode=listen-only independent=true"
+            )
+            CFRunLoopRun()
+
+            self.stateLock.withLock {
+                if self.tapLifecycleGeneration == generation {
+                    self.emergencyRunLoop = nil
+                }
+            }
+        }
         return true
     }
 
     public func stop() {
         release(reason: .captureStopped)
 
-        let runLoopToStop: CFRunLoop? = stateLock.withLock {
+        let runLoopsToStop: (CFRunLoop?, CFRunLoop?) =
+            stateLock.withLock {
             tapLifecycleGeneration &+= 1
             if tapLifecycleGeneration == 0 {
                 tapLifecycleGeneration = 1
@@ -516,6 +615,10 @@ public final class InputCapture: @unchecked Sendable {
             if let keyboardTap {
                 CFMachPortInvalidate(keyboardTap)
                 self.keyboardTap = nil
+            }
+            if let emergencyTap {
+                CFMachPortInvalidate(emergencyTap)
+                self.emergencyTap = nil
             }
             if let pointerRunLoopSource, let runLoop {
                 CFRunLoopRemoveSource(
@@ -531,22 +634,34 @@ public final class InputCapture: @unchecked Sendable {
                     .commonModes
                 )
             }
+            if let emergencyRunLoopSource, let emergencyRunLoop {
+                CFRunLoopRemoveSource(
+                    emergencyRunLoop,
+                    emergencyRunLoopSource,
+                    .commonModes
+                )
+            }
             pointerRunLoopSource = nil
             keyboardRunLoopSource = nil
+            emergencyRunLoopSource = nil
             watchdog?.cancel()
             watchdog = nil
             invalidateLocalTransitionTrackingLocked()
 
             let activeRunLoop = runLoop
+            let activeEmergencyRunLoop = emergencyRunLoop
             runLoop = nil
-            return activeRunLoop
+            emergencyRunLoop = nil
+            return (activeRunLoop, activeEmergencyRunLoop)
         }
 
         // CFRunLoopStop is documented thread-safe; call it directly instead of
-        // enqueueing on tapQueue, whose thread may be parked inside
-        // CFRunLoopRun() and could never service the block (issue #50).
-        if let runLoopToStop {
+        // enqueueing on either dedicated tap queue.
+        if let runLoopToStop = runLoopsToStop.0 {
             CFRunLoopStop(runLoopToStop)
+        }
+        if let emergencyRunLoopToStop = runLoopsToStop.1 {
+            CFRunLoopStop(emergencyRunLoopToStop)
         }
         uninstallEmergencyHotKey()
     }
@@ -1622,6 +1737,32 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     // MARK: - Emergency shortcut (⇧⌘X) — always works, independent of the Android link
+
+    private func handleEmergencyTap(
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        guard type == .keyDown else {
+            return Unmanaged.passUnretained(event)
+        }
+        let virtualKey = UInt16(
+            event.getIntegerValueField(.keyboardEventKeycode)
+        )
+        guard virtualKey == Self.emergencyKeyCode,
+              event.flags.intersection(Self.emergencyModifierMask)
+                == Self.emergencyModifiers else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let generation: UInt64? = stateLock.withLock {
+            isSuppressing ? suppressionGeneration : nil
+        }
+        Diagnostics.log(
+            "emergency shortcut detected source=independent-listen-tap"
+        )
+        requestEmergencyReturn(expectedGeneration: generation)
+        return Unmanaged.passUnretained(event)
+    }
 
     private func requestEmergencyReturn(expectedGeneration: UInt64? = nil) {
         if let onEmergencyReturnRequested {
