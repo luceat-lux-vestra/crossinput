@@ -272,6 +272,10 @@ internal object BoundaryAuthorityAdmission {
         authority == PointerBoundaryAuthority.COMPOSITOR
 }
 
+internal object PointerResultReplyPolicy {
+    fun shouldReply(requestId: Int): Boolean = requestId != 0
+}
+
 /** Frame dispatch. All writes go through [WriterLock]. */
 class Controller(
     private val discovery: DisplayDiscovery,
@@ -393,7 +397,7 @@ class Controller(
         // requestId 0 is the one-way semantic pointer lane. Production uses it
         // for high-rate compositor-authoritative movement and fail-safe button
         // cleanup, where a response would only add reverse-path traffic.
-        if (frame.requestId == 0) return
+        if (!PointerResultReplyPolicy.shouldReply(frame.requestId)) return
 
         val status = when (result.status) {
             PointerDelivery.Status.DELIVERED -> 0
