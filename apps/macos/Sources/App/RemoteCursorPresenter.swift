@@ -20,9 +20,8 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
     private let lock = NSLock()
     private var operationGeneration: UInt64 = 0
 
-    @MainActor
+    // Accessed only by blocks dispatched to the main queue.
     private var isPresented = false
-    @MainActor
     private var previousCursor: NSCursor?
 
     func presentRemote(edge: ScreenEdge) {
@@ -76,7 +75,6 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         lock.withLock { operationGeneration == generation }
     }
 
-    @MainActor
     private static func cursor(for edge: ScreenEdge) -> NSCursor {
         switch edge {
         case .left, .right:
