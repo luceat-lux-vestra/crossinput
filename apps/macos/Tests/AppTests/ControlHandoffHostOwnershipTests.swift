@@ -76,6 +76,38 @@ private final class FakeHostPointerLease: HostPointerOwnershipLease, @unchecked 
     }
 }
 
+private final class FakeRemoteCursorPresenter:
+    RemoteCursorPresenting, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var presentedEdgesStorage: [ScreenEdge] = []
+    private var effectiveRestoreCountStorage = 0
+    private var presented = false
+
+    var presentedEdges: [ScreenEdge] {
+        lock.withLock { presentedEdgesStorage }
+    }
+
+    var effectiveRestoreCount: Int {
+        lock.withLock { effectiveRestoreCountStorage }
+    }
+
+    func presentRemote(edge: ScreenEdge) {
+        lock.withLock {
+            presented = true
+            presentedEdgesStorage.append(edge)
+        }
+    }
+
+    func restoreLocal() {
+        lock.withLock {
+            guard presented else { return }
+            presented = false
+            effectiveRestoreCountStorage += 1
+        }
+    }
+}
+
 private final class FakeHostPointerBackend: HostPointerOwnershipBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation:
@@ -281,6 +313,54 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(5))
         }
         return condition()
+    }
+
+    @MainActor
+    func testRemoteCursorPresentationFollowsPublishedOwnership() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        XCTAssertTrue(await waitUntil { backend.hasStarted })
+        XCTAssertTrue(
+            presenter.presentedEdges.isEmpty,
+            "remote cursor must not be published before CoreHID ownership is ready"
+        )
+
+        let generation = try! XCTUnwrap(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+        let lease = FakeHostPointerLease(generation: 89)
+        backend.succeed(with: lease)
+
+        let ready = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            ) && capture.isExternalPointerOwnerActive(
+                generation: generation
+            ) && presenter.presentedEdges == [.left]
+        }
+        XCTAssertTrue(ready)
+
+        controller.emergencyReturn()
+
+        let restored = await waitUntil {
+            presenter.effectiveRestoreCount == 1
+                && machine.state == .localActive
+        }
+        XCTAssertTrue(restored)
+        XCTAssertEqual(lease.releaseCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
     }
 
     @MainActor
