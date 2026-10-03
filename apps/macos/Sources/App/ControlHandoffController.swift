@@ -525,6 +525,8 @@ final class ControlHandoffController: @unchecked Sendable {
             edgeSwitchEnabled = false
         }
 
+        retireBoundaryWatch()
+
         // Host ownership and keyboard suppression return locally before any
         // remote drain/cleanup. Neither may depend on transport progress.
         releaseHostOwnershipAndCapture(reason: .captureStopped)
@@ -836,12 +838,16 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     func emergencyReturn() {
+        // Emergency return is fail-safe only; ordinary product return is the
+        // authoritative remote-boundary path.
+        retireBoundaryWatch()
         releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
+        retireBoundaryWatch()
         releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
         sender.cancelPendingPointerEvents()
         switchMachine.forceReturn(reason: .remoteUnavailable)
@@ -1160,6 +1166,19 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(state: HandoffState, reason: TransitionReason) {
         switch state {
         case .remoteActive:
+            if switchMachine.requiresRemotePreparation {
+                let prepared = lifecycleLock.withLock {
+                    activeBoundaryWatch
+                }
+                guard prepared != nil else {
+                    sender.cancelPendingPointerEvents()
+                    switchMachine.forceReturn(
+                        reason: .remoteUnavailable
+                    )
+                    return
+                }
+            }
+
             guard isEdgeSwitchEnabled else {
                 releaseHostOwnershipAndCapture(reason: .captureStopped)
                 sender.cancelPendingPointerEvents()
@@ -1199,6 +1218,7 @@ final class ControlHandoffController: @unchecked Sendable {
             beginHostPointerAcquisition()
 
         case .localActive, .returning, .disabled:
+            retireBoundaryWatch()
             // Local-return fallback: preserve the capture generation until
             // remote keyboard admission is withdrawn and the CoreHID lease
             // has been released. Most paths already linearize synchronously;
@@ -1207,7 +1227,11 @@ final class ControlHandoffController: @unchecked Sendable {
             sender.cancelPendingPointerEvents()
 
         case .edgeArmed:
-            break
+            if switchMachine.requiresRemotePreparation {
+                beginBoundaryPreparation(
+                    edge: switchMachine.entryEdge
+                )
+            }
         }
     }
 
