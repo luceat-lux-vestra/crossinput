@@ -175,17 +175,35 @@ delivery, or remote-close state. `AppModel` is not a compatibility requirement.
 
 ## Runtime data path
 
+Production built-in-trackpad ownership deliberately separates pointer
+observation, pointer ownership, and keyboard suppression:
+
 ```text
-CGEventTap
-  -> MacEventTap
-  -> MacInputTranslator
+local pointer / edge observation
+  -> listen-only pointer CGEventTap
+  -> EdgeDetector / ownership-anomaly observation
+
+remote pointer
+  -> CoreHID built-in-trackpad seizure
+  -> raw report decoder / semantic translator
   -> current active ControlLease.InputIngress
   -> DeliveryWorker
   -> RemoteCommandLane
   -> CXI v1 adapter
   -> Android helper
   -> backend/system routing
+
+keyboard
+  -> modifying keyboard-only CGEventTap
+  -> MacInputTranslator
+  -> current active ControlLease.InputIngress
+  -> DeliveryWorker
+  -> RemoteCommandLane
+  -> CXI v1 adapter
 ```
+
+Pointer event types are not registered on the long-lived modifying tap in the
+CoreHID production topology. CoreHID is the sole remote pointer owner.
 
 The event callback never waits for a remote result.
 
@@ -311,13 +329,27 @@ synchronously for the fence.
 
 ## Host suppression and #96
 
-Only HostSuppressionController may consume host input or perform accepted P0
-cursor confinement.
+#96 is an open **HEALTHY-required** merge blocker. The former
+"accepted cursor-presentation limitation" disposition is historical only and is
+not valid for current development.
 
-#96 remains authoritative: retain P0 confinement, keep the native macOS cursor
-visible, accept the cursor-presentation limitation, and do not introduce private
-SkyLight/CGS, synthetic click/focus stealing, pointer-jump/custom-cursor
-workarounds, or equivalent experiments without materially new evidence.
+The production CoreHID topology separates ownership planes:
+
+- a listen-only pointer tap observes local edge/anomaly events;
+- a modifying tap registers keyboard events only;
+- CoreHID seizure is the sole remote pointer isolation/semantic owner; and
+- normal return drops CoreHID/keyboard ownership without cursor repair APIs.
+
+This split removes the strongest remaining production-only delta from the
+standalone HEALTHY CoreHID evidence: a long-lived modifying `cghidEventTap`
+subscribed to pointer events.
+
+Do not reintroduce private SkyLight/CGS dependencies, synthetic click/focus
+stealing, hide/show/associate/warp reset stacks, pointer-jump/custom-cursor
+workarounds, or equivalent already-rejected presentation permutations. A
+candidate closes #96 only after exact-head MacBook built-in-trackpad -> DeX ->
+Mac physical proof shows immediate healthy native directional/resize cursor
+presentation with no manual recovery.
 
 ## HandoffPolicy
 
