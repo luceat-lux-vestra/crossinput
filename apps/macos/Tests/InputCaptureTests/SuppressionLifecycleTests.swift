@@ -91,13 +91,20 @@ final class SuppressionLifecycleTests: XCTestCase {
             InputCapture.keyboardTapOptions.rawValue,
             CGEventTapOptions.defaultTap.rawValue
         )
+        XCTAssertEqual(
+            InputCapture.emergencyTapOptions.rawValue,
+            CGEventTapOptions.listenOnly.rawValue
+        )
 
         let pointerTypes = Set(InputCapture.pointerObservedEvents.map(\.rawValue))
         let keyboardTypes = Set(InputCapture.keyboardCapturedEvents.map(\.rawValue))
+        let emergencyTypes = Set(InputCapture.emergencyObservedEvents.map(\.rawValue))
 
         XCTAssertFalse(pointerTypes.isEmpty)
         XCTAssertFalse(keyboardTypes.isEmpty)
+        XCTAssertFalse(emergencyTypes.isEmpty)
         XCTAssertTrue(pointerTypes.isDisjoint(with: keyboardTypes))
+        XCTAssertTrue(pointerTypes.isDisjoint(with: emergencyTypes))
 
         XCTAssertTrue(pointerTypes.contains(CGEventType.mouseMoved.rawValue))
         XCTAssertTrue(pointerTypes.contains(CGEventType.scrollWheel.rawValue))
@@ -109,6 +116,12 @@ final class SuppressionLifecycleTests: XCTestCase {
         XCTAssertTrue(keyboardTypes.contains(CGEventType.flagsChanged.rawValue))
         XCTAssertFalse(keyboardTypes.contains(CGEventType.mouseMoved.rawValue))
         XCTAssertFalse(keyboardTypes.contains(CGEventType.leftMouseDown.rawValue))
+
+        XCTAssertEqual(
+            emergencyTypes,
+            Set([CGEventType.keyDown.rawValue]),
+            "fail-safe tap must observe only keyDown and never pointer payloads"
+        )
     }
 
     private func makeCapture(
