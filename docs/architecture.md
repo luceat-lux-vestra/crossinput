@@ -329,27 +329,36 @@ synchronously for the fence.
 
 ## Host suppression and #96
 
-#96 is an open **HEALTHY-required** merge blocker. The former
-"accepted cursor-presentation limitation" disposition is historical only and is
-not valid for current development.
+#96 is an open remote-ownership presentation blocker. It is not an accepted
+visual limitation.
 
-The production CoreHID topology separates ownership planes:
+The production built-in-trackpad topology separates three host planes:
 
-- a listen-only pointer tap observes local edge/anomaly events;
-- a modifying tap registers keyboard events only;
-- CoreHID seizure is the sole remote pointer isolation/semantic owner; and
-- normal return drops CoreHID/keyboard ownership without cursor repair APIs.
+- listen-only pointer observation for local edge/anomaly facts;
+- modifying keyboard-only suppression for remote keyboard ownership;
+- CoreHID seizure as the sole remote pointer isolation/semantic owner.
 
-This split removes the strongest remaining production-only delta from the
-standalone HEALTHY CoreHID evidence: a long-lived modifying `cghidEventTap`
-subscribed to pointer events.
+Emergency Return to Mac has an additional independent listen-only keyDown tap
+with its own run loop. Its receipt does not depend on the modifying keyboard
+tap, Carbon event dispatch, or Android progress.
 
-Do not reintroduce private SkyLight/CGS dependencies, synthetic click/focus
-stealing, hide/show/associate/warp reset stacks, pointer-jump/custom-cursor
-workarounds, or equivalent already-rejected presentation permutations. A
-candidate closes #96 only after exact-head MacBook built-in-trackpad -> DeX ->
-Mac physical proof shows immediate healthy native directional/resize cursor
-presentation with no manual recovery.
+Cursor presentation is a fourth, presentation-only owner tied to the same
+Control epoch:
+
+- it is published only after the CoreHID lease is published and matching
+  keyboard admission becomes ready;
+- left/right ownership uses native `NSCursor.resizeLeftRight`;
+- top/bottom ownership uses native `NSCursor.resizeUpDown`;
+- it is withdrawn at the synchronous local-return gate before CoreHID release;
+- stale main-thread presentation work is generation-rejected.
+
+The directional cursor does not provide isolation and is not a recovery hack.
+Do not reintroduce hide/show, `CGAssociate`, synthetic click/focus/movement,
+Quartz hold/restore warps, custom cursor masking, or private SkyLight/CGS
+presentation-reset permutations already rejected by #96 evidence.
+
+Exact-head physical proof must show the directional cursor during real
+`remoteActive` ownership and normal local cursor behavior after return.
 
 ## HandoffPolicy
 
