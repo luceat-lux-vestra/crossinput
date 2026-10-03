@@ -56,29 +56,23 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
             // without logging raw reports, coordinates, or other payload data.
             if report.buttons.primary != lastRawPrimary {
                 lastRawPrimary = report.buttons.primary
-                Diagnostics.log(
-                    "corehid raw button transition button=primary down=\(report.buttons.primary)"
-                )
+                Diagnostics.log("corehid raw input type=button-transition")
             }
             if report.buttons.secondary != lastRawSecondary {
                 lastRawSecondary = report.buttons.secondary
-                Diagnostics.log(
-                    "corehid raw button transition button=secondary down=\(report.buttons.secondary)"
-                )
+                Diagnostics.log("corehid raw input type=button-transition")
             }
             if report.buttons.other != lastRawOther {
                 lastRawOther = report.buttons.other
-                Diagnostics.log(
-                    "corehid raw button transition button=other down=\(report.buttons.other)"
-                )
+                Diagnostics.log("corehid raw input type=button-transition")
             }
 
             let events = try translator.translate(report)
             for event in events {
                 if case let .button(button, down) = event.kind {
-                    Diagnostics.log(
-                        "corehid semantic button transition button=\(button) down=\(down)"
-                    )
+                    _ = button
+                    _ = down
+                    Diagnostics.log("corehid semantic input type=button")
                 }
             }
             return events
