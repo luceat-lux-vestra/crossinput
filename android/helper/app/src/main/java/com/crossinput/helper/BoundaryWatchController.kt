@@ -229,6 +229,7 @@ class BoundaryWatchController internal constructor(
         var lastSampledIntentSequence: Long = 0,
         var returnIntentGeneration: Long = 0,
         var returnIntentActive: Boolean = false,
+        var sampleGraceRemaining: Int = 0,
         var emitted: Boolean = false,
     )
 
@@ -387,6 +388,7 @@ class BoundaryWatchController internal constructor(
                     }
                     state.tracker.reset()
                     state.lastSampledIntentSequence = state.returnIntentSequence
+                    state.sampleGraceRemaining = 0
                 }
             }
         }
@@ -439,12 +441,27 @@ class BoundaryWatchController internal constructor(
                 val state = watch
                 if (
                     closed || state == null || state.emitted ||
-                    !state.returnIntentActive ||
-                    state.returnIntentSequence <=
-                        state.lastSampledIntentSequence
+                    !state.returnIntentActive
                 ) {
                     workerRunning = false
                     return
+                }
+
+                val hasFreshIntent =
+                    state.returnIntentSequence >
+                        state.lastSampledIntentSequence
+                if (!hasFreshIntent) {
+                    if (state.sampleGraceRemaining <= 0) {
+                        workerRunning = false
+                        return
+                    }
+                    // Allow exactly one cadence-bounded compositor sample
+                    // without a newly delivered move. This bridges a single
+                    // sampling/report timing gap at the real edge, but cannot
+                    // by itself satisfy the four-sample / 250 ms plateau gate.
+                    state.sampleGraceRemaining--
+                } else {
+                    state.sampleGraceRemaining = 1
                 }
 
                 val last = lastSampleStartedNanos
@@ -509,11 +526,15 @@ class BoundaryWatchController internal constructor(
                     workerRunning = false
                     observationFailed = true
                 } else {
-                    // Consume exactly the fresh return intent represented by
-                    // this sample. Another compositor read requires another
-                    // return-direction move after this point.
+                    // Record the newest return intent represented by this
+                    // sample. The worker may bridge one cadence interval
+                    // without a new move, but then retires unless fresh
+                    // return-direction intent arrives.
                     state.lastSampledIntentSequence =
-                        snapshot.intentSequence
+                        maxOf(
+                            state.lastSampledIntentSequence,
+                            snapshot.intentSequence,
+                        )
                     reached = state.tracker.observe(
                         progress(state.edge, sample),
                         nowNanos(),
