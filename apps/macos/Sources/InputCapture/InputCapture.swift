@@ -133,14 +133,19 @@ public final class InputCapture: @unchecked Sendable {
     private enum PointerSuppressionStrategy: Sendable {
         /// Legacy event-tap pointer forwarding with edge-hold Quartz warps.
         case eventTapWarp
-        /// Production built-in-trackpad path: preserve macOS pointer semantics
-        /// (tap-to-click, scrolling, and pointer acceleration) from CGEventTap
-        /// while consuming the events locally. No Quartz hold/restore warp is
-        /// permitted in this mode.
+        /// Legacy no-warp event-decision seam retained for deterministic
+        /// compatibility tests. Production built-in-trackpad ownership uses
+        /// `externalOwner`; the system-installed pointer tap is listen-only.
         case eventTapNoWarp
-        /// Experimental backend owns pointer semantics and physical pointer
-        /// seizure. Event-tap pointer events are only a no-leak guard.
+        /// CoreHID owns pointer semantics and physical pointer seizure.
+        /// The pointer CGEventTap is observation-only; keyboard suppression is
+        /// isolated onto a separate modifying keyboard-only tap.
         case externalOwner
+    }
+
+    private enum EventTapRole: Sendable {
+        case pointerObservation
+        case keyboardSuppression
     }
 
     private enum RemoteKeyboardTransitionAdmission {
@@ -194,8 +199,14 @@ public final class InputCapture: @unchecked Sendable {
     public var onEmergencyReturnRequested: (@Sendable () -> Void)?
 
     private let tapQueue = DispatchQueue(label: "crossinput.capturertap", qos: .userInteractive)
-    private var tap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    /// Pointer observation is deliberately listen-only. Registering pointer
+    /// event types on the long-lived modifying tap is the strongest remaining
+    /// production-only delta from the HEALTHY standalone CoreHID probe (#96).
+    private var pointerTap: CFMachPort?
+    /// Only keyboard events are registered on the modifying tap.
+    private var keyboardTap: CFMachPort?
+    private var pointerRunLoopSource: CFRunLoopSource?
+    private var keyboardRunLoopSource: CFRunLoopSource?
     private var runLoop: CFRunLoop?
     /// Invalidates queued run-loop installation work across stop/restart.
     /// Without this generation, stop() can win before the tapQueue block runs
@@ -336,58 +347,101 @@ public final class InputCapture: @unchecked Sendable {
     }
 
     public func startTrusted() -> Bool {
-        if let existingTap = stateLock.withLock({ tap }) {
-            if CGEvent.tapIsEnabled(tap: existingTap) {
-                return true
-            }
+        let existing = stateLock.withLock { (pointerTap, keyboardTap) }
+        if let pointerTap = existing.0,
+           let keyboardTap = existing.1,
+           CGEvent.tapIsEnabled(tap: pointerTap),
+           CGEvent.tapIsEnabled(tap: keyboardTap) {
+            return true
+        }
+        if existing.0 != nil || existing.1 != nil {
             // A timed-out/user-disabled tap can remain non-nil even when
-            // re-enabling failed. Never report that stale tap as a successful
-            // fresh capture path.
-            Diagnostics.log("startTrusted(): stale disabled tap; recreating")
+            // re-enabling failed. Recreate the pair atomically rather than
+            // accepting a half-live ownership topology.
+            Diagnostics.log("startTrusted(): stale/partial tap pair; recreating")
             stop()
         }
 
-        var mask: CGEventMask = 0
-        for eventType in Self.capturedEvents {
-            mask |= CGEventMask(1 << eventType.rawValue)
-        }
-        let callback: CGEventTapCallBack = { proxy, type, event, refcon in
+        let pointerCallback: CGEventTapCallBack = {
+            proxy, type, event, refcon in
             guard let refcon else { return Unmanaged.passRetained(event) }
-            let capture = Unmanaged<InputCapture>.fromOpaque(refcon).takeUnretainedValue()
-            return capture.handle(proxy: proxy, type: type, event: event)
+            let capture = Unmanaged<InputCapture>
+                .fromOpaque(refcon)
+                .takeUnretainedValue()
+            return capture.handle(
+                proxy: proxy,
+                type: type,
+                event: event,
+                tapRole: .pointerObservation
+            )
         }
-        guard let newTap = CGEvent.tapCreate(
+        let keyboardCallback: CGEventTapCallBack = {
+            proxy, type, event, refcon in
+            guard let refcon else { return Unmanaged.passRetained(event) }
+            let capture = Unmanaged<InputCapture>
+                .fromOpaque(refcon)
+                .takeUnretainedValue()
+            return capture.handle(
+                proxy: proxy,
+                type: type,
+                event: event,
+                tapRole: .keyboardSuppression
+            )
+        }
+
+        guard let newPointerTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: callback,
+            options: Self.pointerTapOptions,
+            eventsOfInterest: Self.eventMask(Self.pointerObservedEvents),
+            callback: pointerCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else { return false }
-        guard let source = CFMachPortCreateRunLoopSource(
+
+        guard let newKeyboardTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: Self.keyboardTapOptions,
+            eventsOfInterest: Self.eventMask(Self.keyboardCapturedEvents),
+            callback: keyboardCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            CFMachPortInvalidate(newPointerTap)
+            return false
+        }
+
+        guard let pointerSource = CFMachPortCreateRunLoopSource(
             kCFAllocatorDefault,
-            newTap,
+            newPointerTap,
+            0
+        ), let keyboardSource = CFMachPortCreateRunLoopSource(
+            kCFAllocatorDefault,
+            newKeyboardTap,
             0
         ) else {
-            CFMachPortInvalidate(newTap)
+            CFMachPortInvalidate(newPointerTap)
+            CFMachPortInvalidate(newKeyboardTap)
             return false
         }
 
         let generation: UInt64? = stateLock.withLock {
             // Concurrent starts are not expected in production, but fail
-            // locally instead of publishing a second modifying tap.
-            guard tap == nil else { return nil }
+            // locally instead of publishing a second tap pair.
+            guard pointerTap == nil, keyboardTap == nil else { return nil }
             tapLifecycleGeneration &+= 1
             if tapLifecycleGeneration == 0 {
                 tapLifecycleGeneration = 1
             }
-            tap = newTap
-            runLoopSource = source
+            pointerTap = newPointerTap
+            keyboardTap = newKeyboardTap
+            pointerRunLoopSource = pointerSource
+            keyboardRunLoopSource = keyboardSource
             resetLocalTransitionTrackingForFreshTapLocked()
             return tapLifecycleGeneration
         }
         guard let generation else {
-            CFMachPortInvalidate(newTap)
+            CFMachPortInvalidate(newPointerTap)
+            CFMachPortInvalidate(newKeyboardTap)
             return true
         }
 
@@ -399,40 +453,42 @@ public final class InputCapture: @unchecked Sendable {
             guard let self else { return }
             let runLoop = CFRunLoopGetCurrent()
 
-            // Do not capture CFRunLoopSource across the Sendable queue
-            // boundary. Publish it under stateLock, then retrieve the exact
-            // current source from inside the tap queue.
-            let sourceToInstall: CFRunLoopSource? =
+            let sources: (CFRunLoopSource, CFRunLoopSource)? =
                 self.stateLock.withLock {
                     guard self.tapLifecycleGeneration == generation,
-                          self.tap != nil,
-                          let currentSource = self.runLoopSource else {
+                          self.pointerTap != nil,
+                          self.keyboardTap != nil,
+                          let pointerSource = self.pointerRunLoopSource,
+                          let keyboardSource = self.keyboardRunLoopSource else {
                         return nil
                     }
                     self.runLoop = runLoop
-                    return currentSource
+                    return (pointerSource, keyboardSource)
                 }
-            guard let sourceToInstall else { return }
+            guard let sources else { return }
 
-            CFRunLoopAddSource(runLoop, sourceToInstall, .commonModes)
+            CFRunLoopAddSource(runLoop, sources.0, .commonModes)
+            CFRunLoopAddSource(runLoop, sources.1, .commonModes)
 
             // stop() can race between publishing runLoop above and adding the
-            // source. Recheck the lifecycle generation before entering the
-            // blocking run loop; stale work removes its own source and exits.
+            // sources. Recheck the complete pair before entering the blocking
+            // run loop; stale work removes its sources and exits.
             let stillCurrent = self.stateLock.withLock {
                 self.tapLifecycleGeneration == generation
-                    && self.tap != nil
-                    && self.runLoopSource === sourceToInstall
+                    && self.pointerTap != nil
+                    && self.keyboardTap != nil
+                    && self.pointerRunLoopSource === sources.0
+                    && self.keyboardRunLoopSource === sources.1
             }
             guard stillCurrent else {
-                CFRunLoopRemoveSource(
-                    runLoop,
-                    sourceToInstall,
-                    .commonModes
-                )
+                CFRunLoopRemoveSource(runLoop, sources.0, .commonModes)
+                CFRunLoopRemoveSource(runLoop, sources.1, .commonModes)
                 return
             }
 
+            Diagnostics.log(
+                "event tap topology active pointer=listen-only keyboard=modifying"
+            )
             CFRunLoopRun()
 
             self.stateLock.withLock {
@@ -453,14 +509,30 @@ public final class InputCapture: @unchecked Sendable {
                 tapLifecycleGeneration = 1
             }
 
-            if let tap {
-                CFMachPortInvalidate(tap)
-                self.tap = nil
+            if let pointerTap {
+                CFMachPortInvalidate(pointerTap)
+                self.pointerTap = nil
             }
-            if let runLoopSource, let runLoop {
-                CFRunLoopRemoveSource(runLoop, runLoopSource, .commonModes)
+            if let keyboardTap {
+                CFMachPortInvalidate(keyboardTap)
+                self.keyboardTap = nil
             }
-            runLoopSource = nil
+            if let pointerRunLoopSource, let runLoop {
+                CFRunLoopRemoveSource(
+                    runLoop,
+                    pointerRunLoopSource,
+                    .commonModes
+                )
+            }
+            if let keyboardRunLoopSource, let runLoop {
+                CFRunLoopRemoveSource(
+                    runLoop,
+                    keyboardRunLoopSource,
+                    .commonModes
+                )
+            }
+            pointerRunLoopSource = nil
+            keyboardRunLoopSource = nil
             watchdog?.cancel()
             watchdog = nil
             invalidateLocalTransitionTrackingLocked()
@@ -501,9 +573,11 @@ public final class InputCapture: @unchecked Sendable {
     /// Suppression path used when another backend owns host pointer seizure and
     /// semantic pointer capture (CoreHID for the built-in trackpad).
     ///
-    /// CGEventTap remains installed for keyboard handling and local-input
-    /// anomaly detection. Pointer CGEvents are never silently deleted by this
-    /// mode; CoreHID is the only pointer-ownership mechanism.
+    /// A listen-only pointer CGEventTap remains installed for edge observation
+    /// and local-input anomaly detection. A separate keyboard-only modifying
+    /// tap owns keyboard suppression. Pointer event types are never registered
+    /// on the modifying tap in this mode; CoreHID is the only pointer-ownership
+    /// mechanism.
     ///
     /// The returned generation is initially acquisition-only. Keyboard input
     /// stays local until activateExternalPointerOwner(generation:) succeeds.
@@ -834,7 +908,12 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Event handling (capture thread)
 
-    private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handle(
+        proxy: CGEventTapProxy,
+        type: CGEventType,
+        event: CGEvent,
+        tapRole: EventTapRole
+    ) -> Unmanaged<CGEvent>? {
         // Capture the ownership epoch once for this event. Reading
         // `isSuppressing` and then reading `suppressionGeneration` later lets
         // a callback that began in epoch A be relabelled as epoch B after a
@@ -859,10 +938,10 @@ public final class InputCapture: @unchecked Sendable {
             stateLock.withLock {
                 invalidateLocalTransitionTrackingLocked()
             }
-            // A disabled modifying tap cannot prove keyboard suppression.
-            // If a remote epoch is active, fail local synchronously before
-            // attempting to re-enable the tap. This also triggers the Control
-            // owner to drop any published CoreHID lease.
+            // Losing either half of the tap pair invalidates the ownership
+            // proof. A disabled keyboard tap cannot prove suppression; a
+            // disabled pointer observer cannot prove edge/anomaly observation.
+            // Fail local before attempting to re-enable the affected tap.
             if let generation = suppressedGeneration {
                 Diagnostics.log(
                     "event tap disabled during suppression action=local-return"
@@ -872,7 +951,15 @@ public final class InputCapture: @unchecked Sendable {
                     expectedGeneration: generation
                 )
             }
-            if let currentTap = stateLock.withLock({ tap }) {
+            let currentTap: CFMachPort? = stateLock.withLock {
+                switch tapRole {
+                case .pointerObservation:
+                    return pointerTap
+                case .keyboardSuppression:
+                    return keyboardTap
+                }
+            }
+            if let currentTap {
                 CGEvent.tapEnable(tap: currentTap, enable: true)
             }
             return Unmanaged.passUnretained(event)
@@ -1035,8 +1122,24 @@ public final class InputCapture: @unchecked Sendable {
     /// Exercises the event-tap decision path without installing a system tap.
     /// This is internal so the macOS regression tests can verify synchronous
     /// takeover and same-event pass-through without generating user input.
-    internal func handleForTesting(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        handle(proxy: OpaquePointer(bitPattern: 1)!, type: type, event: event)
+    internal func handleForTesting(
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        let role: EventTapRole
+        switch type {
+        case .keyDown, .keyUp, .flagsChanged,
+             .tapDisabledByTimeout, .tapDisabledByUserInput:
+            role = .keyboardSuppression
+        default:
+            role = .pointerObservation
+        }
+        return handle(
+            proxy: OpaquePointer(bitPattern: 1)!,
+            type: type,
+            event: event,
+            tapRole: role
+        )
     }
 
     /// Handles keyboard events while suppressed. When suppressed, key events are
@@ -1654,14 +1757,30 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Mapping
 
-    private static let capturedEvents: [CGEventType] = [
+    /// Production pointer observation never lives on the modifying event tap.
+    /// Keep these sets disjoint; #96 physical proof depends on that topology.
+    static let pointerTapOptions: CGEventTapOptions = .listenOnly
+    static let keyboardTapOptions: CGEventTapOptions = .defaultTap
+
+    static let pointerObservedEvents: [CGEventType] = [
         .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
         .leftMouseDown, .leftMouseUp,
         .rightMouseDown, .rightMouseUp,
         .otherMouseDown, .otherMouseUp,
         .scrollWheel,
+    ]
+
+    static let keyboardCapturedEvents: [CGEventType] = [
         .keyDown, .keyUp, .flagsChanged,
     ]
+
+    private static func eventMask(
+        _ eventTypes: [CGEventType]
+    ) -> CGEventMask {
+        eventTypes.reduce(into: CGEventMask(0)) { mask, eventType in
+            mask |= CGEventMask(1 << eventType.rawValue)
+        }
+    }
 
     private static func buttonIndex(for type: CGEventType) -> UInt32 {
         switch type {
