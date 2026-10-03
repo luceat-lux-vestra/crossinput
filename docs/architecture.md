@@ -334,6 +334,8 @@ Validated #45/#37 behavior remains only where the selected pointer-routing path 
 
 System-routed UHID desktop targets do **not** get boundary authority from relative movement: Android InputReader may accelerate/clamp relative reports and semantic delivery is not a screen-coordinate observation. For DeX, Android-owned compositor observation supplies the authoritative remote boundary. Relative deltas express return intent only; a matching compositor boundary confirmation starts the two-phase return, and CoreHID ownership is released before `localActive` is published. The emergency shortcut remains an independent fail-safe.
 
+The same compositor authority also permits a low-latency movement lane. DeX/UHID movement is written in pointer-queue order with requestId `0` and does not wait for one `POINTER_RESULT` round trip per trackpad batch. This preserves physical report cadence and Android's native mouse acceleration. Stateful pointer transitions and explicit-display movement remain correlated/acknowledged barriers.
+
 An `acquire` decision remains subject to host readiness, clean Session/Target
 context, `prepared -> active` linearization, and predecessor remote-close
 exclusion.
