@@ -43,7 +43,11 @@ Every message is a single frame; all integers are **little-endian**:
 - requestId: for request-response matching where a message defines a correlated
   response. A non-zero requestId on a message does not by itself guarantee that
   the current v1 message type has a semantic response (notably current
-  `KEY_EVENT`).
+  `KEY_EVENT`). For semantic pointer messages, requestId `0` is the
+  one-way lane: the helper applies the event but does not emit
+  `POINTER_RESULT`. Production uses this only for compositor-authoritative
+  high-rate `POINTER_MOVE_REL` and best-effort fail-safe button cleanup;
+  ordinary pointer state transitions remain correlated.
 
 ## Message types
 
@@ -89,9 +93,18 @@ with fixtures and both implementations; ADR-0016 requires semantic outcome
 classes equivalent to `applied`, proven `notApplied`, and `ambiguous`.
 
 `POINTER_RESULT.status` is `0=DELIVERED`, `1=FAILED`, or
-`2=PARTIALLY_DELIVERED`. The helper reports the movement actually accepted by
-the selected backend. A partial UHID write is never retried; macOS accounts
-only for `deliveredDx`/`deliveredDy` and returns control locally.
+`2=PARTIALLY_DELIVERED`. For semantic pointer frames with a non-zero
+requestId, the helper reports the movement actually accepted by the selected
+backend. A partial UHID write is never retried; macOS accounts only for
+`deliveredDx`/`deliveredDy` and returns control locally.
+
+A semantic pointer frame with requestId `0` is explicitly unacknowledged.
+The helper MUST NOT emit `POINTER_RESULT` for it. In the current application
+this is used for high-rate DeX/UHID movement only while the separately prepared
+compositor boundary watch is authoritative. Backend/authority loss therefore
+fails local through `BOUNDARY_WATCH_ERROR` instead of one response RTT per
+movement batch. Buttons and scroll in ordinary control remain correlated
+ordering barriers.
 
 `HELLO_ACK` capability bits are additive within v1. A legacy two-byte ACK has
 no advertised features and must be rejected by an application that requires
@@ -99,7 +112,7 @@ the current semantic pointer path. The current helper advertises:
 
 | Bit | Name | Meaning |
 |---:|---|---|
-| 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
+| 0 | `semanticPointerResult` | semantic pointer requests with non-zero requestId return `POINTER_RESULT`; requestId 0 uses the defined one-way pointer lane |
 | 1 | `explicitPointerRouting` | the helper can serve pointer targets through an explicit-display-routing backend when required (desktop sinks may instead be served by the system-routed backend; see "Application path") |
 | 2 | `boundaryWatch` | additive v1 boundary-watch preparation/events are implemented; system-routed UHID desktop targets use Android compositor boundary authority while explicit-display targets retain delivered-coordinate authority |
 
@@ -270,7 +283,8 @@ sequenceDiagram
             Mac->>Helper: POINTER_MOVE_REL(dx, dy)
             Mac->>Helper: POINTER_BUTTON(button, down)
             Mac->>Helper: POINTER_SCROLL(horizontal, vertical)
-            Helper-->>Mac: POINTER_RESULT(status, delivered delta)
+            Helper-->>Mac: POINTER_RESULT(status, delivered delta) for correlated requestIds
+            Note over Mac,Helper: requestId 0 movement is one-way in compositor-authority mode
         end
     end
     opt current v1 keyboard compatibility path
