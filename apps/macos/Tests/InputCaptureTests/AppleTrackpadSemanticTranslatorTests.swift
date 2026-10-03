@@ -57,6 +57,27 @@ struct AppleTrackpadSemanticTranslatorTests {
         #expect(translator.takeTapResolution() == .emitted)
     }
 
+    @Test("bounded report silence can finalize one-contact tap without zero-contact report")
+    func reportSilenceFinalizesTap() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1),
+                nowNanos: 1_500_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.finishContact(
+                nowNanos: 1_540_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.button(button: 0, down: false)),
+            ]
+        )
+        #expect(translator.takeTapResolution() == .emitted)
+    }
+
     @Test("short two-contact touch emits secondary tap-to-click")
     func twoContactTapToClick() throws {
         var translator = AppleTrackpadSemanticTranslator()
