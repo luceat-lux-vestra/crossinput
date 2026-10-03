@@ -205,6 +205,15 @@ keyboard
 Pointer event types are not registered on the long-lived modifying tap in the
 CoreHID production topology. CoreHID is the sole remote pointer owner.
 
+Physical target evidence shows ordinary tap-to-click does not end with a
+zero-contact Report-ID-2 frame: contact-present reports stop instead. The
+production translator therefore treats **50 ms of unchanged report silence** as
+a bounded end-of-contact oracle. Every newer report invalidates the pending
+silence token, a real zero-contact report remains authoritative if one appears,
+and Control generation checks reject any deferred semantic event after return.
+Movement/scroll remains immediate and is never buffered behind tap
+classification.
+
 The event callback never waits for a remote result.
 
 ## Fail-closed Control acquisition
@@ -347,9 +356,14 @@ Control epoch:
 
 - it is published only after the CoreHID lease is published and matching
   keyboard admission becomes ready;
+- a small transparent non-activating AppKit panel is placed under the frozen
+  host-edge pointer and owns a normal cursor rectangle;
 - left/right ownership uses native `NSCursor.resizeLeftRight`;
 - top/bottom ownership uses native `NSCursor.resizeUpDown`;
-- it is withdrawn at the synchronous local-return gate before CoreHID release;
+- this deliberately avoids one-shot `NSCursor.set()`, whose application cursor
+  need not be the visible system cursor while another app is active;
+- the panel is withdrawn at the synchronous local-return gate before CoreHID
+  release;
 - stale main-thread presentation work is generation-rejected.
 
 The directional cursor does not provide isolation and is not a recovery hack.
