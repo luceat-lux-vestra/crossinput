@@ -171,6 +171,11 @@ public final class InputCapture: @unchecked Sendable {
     /// can release any captured pointer buttons before the triggering event is
     /// passed through to macOS.
     public var onPointerStateReset: (@Sendable () -> Void)?
+    /// Local movement while capture is only listening. This exists solely to
+    /// cancel asynchronous remote-boundary preparation when the user reverses
+    /// away from the configured host edge before ownership transfers.
+    public var onListeningPointerMove:
+        (@Sendable (Int32, Int32) -> Void)?
     /// Called when local CG input appears while an external backend is
     /// acquiring or owns pointer semantics. The triggering event is passed
     /// through when ownership is not yet active or must fail local.
@@ -959,6 +964,13 @@ public final class InputCapture: @unchecked Sendable {
                 }
                 return nil
             }
+            let dx = Int32(
+                event.getIntegerValueField(.mouseEventDeltaX)
+            )
+            let dy = Int32(
+                event.getIntegerValueField(.mouseEventDeltaY)
+            )
+            onListeningPointerMove?(dx, dy)
             detectEdge()
             return Unmanaged.passUnretained(event)
         case .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
