@@ -36,7 +36,8 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     private struct ContactGesture: Sendable {
         let startedAtNanos: UInt64
         var maxContactCount: Int
-        var travel: Int64 = 0
+        var displacementX: Int64 = 0
+        var displacementY: Int64 = 0
         var tapEligible = true
     }
 
@@ -217,8 +218,14 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             return []
         }
 
-        current.travel += Int64(abs(dx)) + Int64(abs(dy))
-        if current.travel > tapMovementThreshold {
+        current.displacementX += Int64(dx)
+        current.displacementY += Int64(dy)
+        let excursionSquared =
+            current.displacementX * current.displacementX
+                + current.displacementY * current.displacementY
+        let thresholdSquared =
+            tapMovementThreshold * tapMovementThreshold
+        if excursionSquared > thresholdSquared {
             current.tapEligible = false
         }
         gesture = current
