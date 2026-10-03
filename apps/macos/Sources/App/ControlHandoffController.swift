@@ -232,6 +232,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private let captureStart: @MainActor () -> Bool
     private let captureStop: @MainActor () -> Void
     private let hostPointerBackend: (any HostPointerOwnershipBackend)?
+    private let remoteCursorPresenter: any RemoteCursorPresenting
     private let useEventTapNoWarp: Bool
     private let hostPointerLeaseSlot = HostPointerLeaseSlot()
     private let hostPointerAcquisitionTaskSlot = HostPointerAcquisitionTaskSlot()
@@ -261,6 +262,8 @@ final class ControlHandoffController: @unchecked Sendable {
         captureStart: (@MainActor () -> Bool)? = nil,
         captureStop: (@MainActor () -> Void)? = nil,
         hostPointerBackend: (any HostPointerOwnershipBackend)? = nil,
+        remoteCursorPresenter: any RemoteCursorPresenting =
+            NativeRemoteCursorPresenter(),
         useEventTapNoWarp: Bool = false
     ) {
         self.sender = sender
@@ -271,6 +274,7 @@ final class ControlHandoffController: @unchecked Sendable {
         self.captureStart = captureStart ?? { capture.startTrusted() }
         self.captureStop = captureStop ?? { capture.stop() }
         self.hostPointerBackend = hostPointerBackend
+        self.remoteCursorPresenter = remoteCursorPresenter
         self.useEventTapNoWarp = useEventTapNoWarp
 
         switchMachine.onStateChange = { [weak self] transition in
@@ -482,6 +486,10 @@ final class ControlHandoffController: @unchecked Sendable {
     private func releaseHostOwnershipAndCapture(
         reason: SuppressionReleaseReason
     ) {
+        // Remote cursor shape belongs to the same ownership epoch. Withdraw it
+        // at the synchronous local-return gate before releasing CoreHID.
+        remoteCursorPresenter.restoreLocal()
+
         let lifecycleGeneration = invalidateControlAdmissionsGeneration()
         hostPointerAcquisitionTaskSlot.cancelCurrent()
 
@@ -1440,6 +1448,9 @@ final class ControlHandoffController: @unchecked Sendable {
                     return
                 }
 
+                self.remoteCursorPresenter.presentRemote(
+                    edge: self.switchMachine.entryEdge
+                )
                 Diagnostics.log(
                     "host pointer ownership ready captureGeneration=\(captureGeneration) "
                         + "hostGeneration=\(lease.generation)"
