@@ -25,16 +25,22 @@ On affected macOS configurations, the native directional/resize cursor can remai
 visually rendered as the normal arrow after Mac ↔ DeX handoff even though pointer
 movement, AppKit tracking, and cursor-region callbacks continue normally.
 
-This is a **known macOS cursor-presentation limitation**, tracked in issue #96.
-CrossInput keeps the current host-confinement architecture because repeated
-edge-hold cursor repositioning is required to keep the Mac pointer confined while
-raw relative movement is forwarded to DeX. A standalone AppKit/Quartz reproducer
-confirmed that repeated edge-hold `CGWarpMouseCursorPosition()` calls are
-sufficient to produce the presentation failure. The exact AppKit/WindowServer
-root cause remains unverified.
+This is tracked in issue #96 and is an **open HEALTHY-required blocker**, not an
+accepted current-development limitation. Historical releases may exhibit it, but
+a current merge candidate must restore native cursor presentation immediately
+after return without a click, Cmd-Tab, app activation, reconnect, restart, or
+other manual recovery.
+
+Repeated edge-hold `CGWarpMouseCursorPosition()` is a physically confirmed
+sufficient trigger and is not used by the CoreHID production ownership path.
+Current investigation instead isolates production integration state by keeping
+pointer observation on a listen-only tap, keyboard suppression on a separate
+modifying keyboard-only tap, and CoreHID as the sole remote pointer owner.
 
 Do not treat the visual arrow as loss of pointer capture by itself. If DeX input,
-host confinement, and local return otherwise work, the failure is presentation-
+host ownership, and local return otherwise work, classify the failure as the
+#96 presentation blocker and preserve diagnostics rather than applying cursor
+reset/hide/show/warp/focus workarounds. The failure is presentation-
 only.
 
 ### Known recovery behavior
