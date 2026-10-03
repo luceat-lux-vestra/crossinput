@@ -86,7 +86,7 @@ jobs:
 
       - name: Validate Gradle wrapper
         if: matrix.language == 'java-kotlin'
-        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Build Android helper for CodeQL
         if: matrix.language == 'java-kotlin'
