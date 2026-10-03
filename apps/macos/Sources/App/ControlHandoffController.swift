@@ -1515,7 +1515,8 @@ final class ControlHandoffController: @unchecked Sendable {
         case .remoteUnavailable: return .remoteUnavailable
         case .externalControlTakeover: return .externalControl
         case .deactivated: return .captureStopped
-        case .boundaryCrossed, .suppressionReleased, .activation, .edgeEntered:
+        case .boundaryCrossed, .suppressionReleased, .activation,
+             .edgeEntered, .edgeExited:
             return .normalReturn
         }
     }
