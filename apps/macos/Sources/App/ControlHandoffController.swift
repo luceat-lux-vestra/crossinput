@@ -899,7 +899,14 @@ final class ControlHandoffController: @unchecked Sendable {
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled) else { return nil }
             let epoch = controlEpoch
-            let outcome = sender.enqueuePointer(event) { [weak self] result in
+            let movementMode: PointerMovementDeliveryMode =
+                activeBoundaryWatch?.mode == .compositor
+                    ? .streaming
+                    : .acknowledged
+            let outcome = sender.enqueuePointer(
+                event,
+                movementDeliveryMode: movementMode
+            ) { [weak self] result in
                 self?.apply(delivery: result, controlEpoch: epoch)
             }
             return (outcome, epoch)
@@ -915,7 +922,14 @@ final class ControlHandoffController: @unchecked Sendable {
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled, activeSuppressionGeneration == suppressionGeneration else { return nil }
             let epoch = controlEpoch
-            let outcome = sender.enqueuePointer(event) { [weak self] result in
+            let movementMode: PointerMovementDeliveryMode =
+                activeBoundaryWatch?.mode == .compositor
+                    ? .streaming
+                    : .acknowledged
+            let outcome = sender.enqueuePointer(
+                event,
+                movementDeliveryMode: movementMode
+            ) { [weak self] result in
                 self?.apply(delivery: result, controlEpoch: epoch)
             }
             return (outcome, epoch)
@@ -945,7 +959,14 @@ final class ControlHandoffController: @unchecked Sendable {
                     return nil
                 }
                 let epoch = controlEpoch
-                let outcome = sender.enqueuePointer(event) { [weak self] result in
+                let movementMode: PointerMovementDeliveryMode =
+                    activeBoundaryWatch?.mode == .compositor
+                        ? .streaming
+                        : .acknowledged
+                let outcome = sender.enqueuePointer(
+                    event,
+                    movementDeliveryMode: movementMode
+                ) { [weak self] result in
                     self?.apply(delivery: result, controlEpoch: epoch)
                 }
                 return (outcome, epoch)
@@ -1015,6 +1036,18 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(delivery: PointerDeliveryResult, controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled, capture.isSuppressed else { return }
         switch delivery {
+        case let .submittedMovement(requestedDx, requestedDy):
+            // Compositor-authoritative DeX movement is intentionally not
+            // stalled on one POINTER_RESULT RTT per trackpad batch. A
+            // successful local write keeps the watchdog alive; Android's
+            // active boundary watch remains the fail-local authority if the
+            // UHID route changes or becomes unavailable.
+            capture.pokeWatchdog()
+            confirmBoundaryReturnIntent(
+                requestedDx: requestedDx,
+                requestedDy: requestedDy
+            )
+
         case let .deliveredMovement(
             requestedDx,
             requestedDy,
