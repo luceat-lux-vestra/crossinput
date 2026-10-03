@@ -206,9 +206,11 @@ class BoundaryWatchController internal constructor(
      * The rejected #195 candidate stopped sleeping once a plateau looked
      * plausible, which coupled dump frequency to high-rate pointer reports and
      * caused both pointer degradation and false interior plateaus. Sampling is
-     * now wall-clock bounded regardless of tracker state.
+     * now wall-clock bounded regardless of tracker state or worker lifetime.
      */
     private val sampleIntervalMillis: Long = 90L,
+    private val nowNanos: () -> Long = System::nanoTime,
+    private val sleepMillis: (Long) -> Unit = { millis -> Thread.sleep(millis) },
 ) {
     data class StartResult(
         val mode: Int,
@@ -237,6 +239,7 @@ class BoundaryWatchController internal constructor(
     private var oracle: BoundarySpriteOracle? = null
     private var watch: WatchState? = null
     private var workerRunning = false
+    private var lastSampleStartedNanos: Long? = null
     private var closed = false
     private val displayGenerations = mutableMapOf<Int, Long>()
 
@@ -277,6 +280,9 @@ class BoundaryWatchController internal constructor(
                     return StartResult(MODE_COMPOSITOR, layerStack, ERROR_ORACLE_UNAVAILABLE)
                 }
                 val first = try {
+                    synchronized(lock) {
+                        lastSampleStartedNanos = nowNanos()
+                    }
                     currentOracle.sample(layerStack)
                 } catch (_: Throwable) {
                     return StartResult(MODE_COMPOSITOR, layerStack, ERROR_ORACLE_UNAVAILABLE)
@@ -401,32 +407,62 @@ class BoundaryWatchController internal constructor(
     }
 
     private fun drainSamples() {
-        var firstSample = true
         while (true) {
-            if (!firstSample && sampleIntervalMillis > 0) {
+            val waitNanos = synchronized(lock) {
+                val last = lastSampleStartedNanos
+                if (last == null || sampleIntervalMillis <= 0) {
+                    0L
+                } else {
+                    val elapsed = (nowNanos() - last).coerceAtLeast(0L)
+                    (
+                        sampleIntervalMillis * 1_000_000L - elapsed
+                    ).coerceAtLeast(0L)
+                }
+            }
+
+            if (waitNanos > 0) {
+                val waitMillis =
+                    (waitNanos + 999_999L) / 1_000_000L
                 try {
-                    Thread.sleep(sampleIntervalMillis)
+                    sleepMillis(waitMillis)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     synchronized(lock) { workerRunning = false }
                     return
                 }
             }
-            firstSample = false
 
-            // Re-check state only after the cadence delay. A direction reversal,
-            // stop, target change, or lack of fresh return intent retires the
-            // worker without taking another expensive compositor snapshot.
+            // Re-check lifecycle, fresh return intent, and cadence after the
+            // delay. A new worker cannot bypass the previous worker's sample
+            // timestamp.
             val snapshot = synchronized(lock) {
                 val state = watch
                 if (
                     closed || state == null || state.emitted ||
                     !state.returnIntentActive ||
-                    state.returnIntentSequence <= state.lastSampledIntentSequence
+                    state.returnIntentSequence <=
+                        state.lastSampledIntentSequence
                 ) {
                     workerRunning = false
                     return
                 }
+
+                val last = lastSampleStartedNanos
+                if (last != null && sampleIntervalMillis > 0) {
+                    val elapsed =
+                        (nowNanos() - last).coerceAtLeast(0L)
+                    if (
+                        elapsed <
+                        sampleIntervalMillis * 1_000_000L
+                    ) {
+                        // A deterministic/injected clock may not advance when
+                        // the sleeper returns. Loop and recompute instead of
+                        // violating the lower bound.
+                        return@synchronized null
+                    }
+                }
+
+                lastSampleStartedNanos = nowNanos()
                 SampleRequest(
                     token = state.token,
                     displayId = state.displayId,
@@ -438,10 +474,16 @@ class BoundaryWatchController internal constructor(
                 )
             }
 
+            if (snapshot == null) continue
+
             val sample = try {
-                (oracle ?: throw IOException("oracle unavailable")).sample(snapshot.layerStack)
+                (oracle ?: throw IOException("oracle unavailable"))
+                    .sample(snapshot.layerStack)
             } catch (_: Throwable) {
-                failRuntime(snapshot.token, ERROR_OBSERVATION_FAILED)
+                failRuntime(
+                    snapshot.token,
+                    ERROR_OBSERVATION_FAILED,
+                )
                 return
             }
 
@@ -451,10 +493,12 @@ class BoundaryWatchController internal constructor(
             synchronized(lock) {
                 val state = watch
                 if (
-                    state == null || state.token != snapshot.token ||
+                    state == null ||
+                    state.token != snapshot.token ||
                     state.displayId != snapshot.displayId ||
                     !state.returnIntentActive ||
-                    state.returnIntentGeneration != snapshot.intentGeneration
+                    state.returnIntentGeneration !=
+                        snapshot.intentGeneration
                 ) {
                     staleSample = true
                 } else if (
@@ -465,13 +509,14 @@ class BoundaryWatchController internal constructor(
                     workerRunning = false
                     observationFailed = true
                 } else {
-                    // Consume exactly the return-intent generation observed by
-                    // this sample. A later sample requires at least one fresh
-                    // return-direction pointer move after this point.
-                    state.lastSampledIntentSequence = snapshot.intentSequence
+                    // Consume exactly the fresh return intent represented by
+                    // this sample. Another compositor read requires another
+                    // return-direction move after this point.
+                    state.lastSampledIntentSequence =
+                        snapshot.intentSequence
                     reached = state.tracker.observe(
                         progress(state.edge, sample),
-                        System.nanoTime(),
+                        nowNanos(),
                     )
                     if (reached) {
                         state.emitted = true
@@ -482,11 +527,18 @@ class BoundaryWatchController internal constructor(
 
             if (staleSample) continue
             if (observationFailed) {
-                emitError(snapshot.token, ERROR_OBSERVATION_FAILED)
+                emitError(
+                    snapshot.token,
+                    ERROR_OBSERVATION_FAILED,
+                )
                 return
             }
             if (reached) {
-                emitReached(snapshot.token, snapshot.displayId, snapshot.edge)
+                emitReached(
+                    snapshot.token,
+                    snapshot.displayId,
+                    snapshot.edge,
+                )
                 return
             }
         }
