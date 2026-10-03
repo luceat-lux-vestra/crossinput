@@ -63,6 +63,8 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x000A | POINTER_BUTTON | button u32 + down u8 (button: 0=left 1=right 2=middle) |
 | 0x000B | POINTER_SCROLL | horizontal f32 + vertical f32 (positive vertical = up; positive horizontal = left — mirrors the macOS scroll axes; Android backends convert to their native conventions: AXIS_HSCROLL positive is right, so the InputManager backend negates horizontal and the UHID backend inverts it into the AC Pan field) |
 | 0x000C | KEY_EVENT | keyCode u16 + metaState u32 + action u8 + repeatCount u8 (current v1 Android KeyEvent wire semantics; see below) |
+| 0x000D | BOUNDARY_WATCH_START | controlToken u64 + displayId u32 + edge u8 |
+| 0x000E | BOUNDARY_WATCH_STOP | controlToken u64 |
 
 ### Android → Mac
 
@@ -77,6 +79,9 @@ Every message is a single frame; all integers are **little-endian**:
 | 0x8007 | LOG_EVENT | level u8 + tag: u32 length + bytes + message: u32 length + bytes |
 | 0x8008 | FATAL_ERROR | code u32 + message: u32 length + bytes |
 | 0x8009 | POINTER_RESULT | status u8 + deliveredDx i32 + deliveredDy i32 |
+| 0x800A | BOUNDARY_WATCH_READY | controlToken u64 + displayId u32 + mode u8 + layerStack i32 |
+| 0x800B | BOUNDARY_REACHED | controlToken u64 + displayId u32 + edge u8 |
+| 0x800C | BOUNDARY_WATCH_ERROR | controlToken u64 + code u8 |
 
 There is currently **no correlated keyboard-result message** in the implemented
 v1 table. #141 will define its additive capability/message semantics together
@@ -96,6 +101,7 @@ the current semantic pointer path. The current helper advertises:
 |---:|---|---|
 | 0 | `semanticPointerResult` | semantic pointer requests return `POINTER_RESULT` |
 | 1 | `explicitPointerRouting` | the helper can serve pointer targets through an explicit-display-routing backend when required (desktop sinks may instead be served by the system-routed backend; see "Application path") |
+| 2 | `boundaryWatch` | additive v1 boundary-watch preparation/events are implemented; system-routed UHID desktop targets use Android compositor boundary authority while explicit-display targets retain delivered-coordinate authority |
 
 No keyboard semantic-result capability is implemented yet. #141 must allocate
 and document any additive capability/result encoding before production use.
@@ -297,3 +303,52 @@ sequenceDiagram
 leap-scrcpy's own protocol has a different shape (version/displayInfo/clipboard/UHID messages, big-endian). CXI is designed independently — recorded for documentation only:
 - `VersionMessage { major s32, minor s32 }`, `DisplayInfoMessage { width s32, height s32, rotation s32 }`, `UHidMessage { id s32, data buffer(s32) }` — not little-endian (serialized big-endian).
 - Note: leap-scrcpy implements UHID_CREATE2 with direct `/dev/uhid` open/write (no root needed, shell permission).
+
+
+## Boundary-watch extension (issue #145)
+
+The boundary-watch extension removes macOS-side screen-distance guessing from
+the system-routed UHID desktop return path.
+
+`BOUNDARY_WATCH_START` is a correlated request sent while host control is still
+local/edge-armed. `edge` names the remote display edge that returns toward
+macOS: `0=LEFT, 1=RIGHT, 2=TOP, 3=BOTTOM`.
+
+The helper validates that `displayId` is still the selected target and replies
+with either `BOUNDARY_WATCH_READY` or `BOUNDARY_WATCH_ERROR` using the same
+requestId. READY mode `0=DELIVERED_COORDINATES` keeps explicit screen-space
+accounting. Mode `1=COMPOSITOR` means system-routed UHID: relative HID deltas
+are return intent only and are never treated as screen coordinates.
+
+In compositor mode, SurfaceFlinger sampling is asynchronous and cadence-bounded.
+Every compositor sample observes a global minimum interval even if the sampling
+worker retires and restarts. A new sample also requires fresh return-direction
+pointer intent after the previous sample. Direction reversal invalidates the
+current return-intent generation. These rules prevent high-rate pointer traffic
+from driving back-to-back compositor dumps or confirming a stale interior
+plateau.
+
+The helper emits unsolicited `BOUNDARY_REACHED` only after sustained
+return-direction intent and stable authoritative boundary evidence.
+`BOUNDARY_WATCH_ERROR` with requestId 0 reports runtime loss of that authority.
+Error codes are `1=TARGET_MISMATCH, 2=ORACLE_UNAVAILABLE, 3=BACKEND_CHANGED,
+4=OBSERVATION_FAILED`.
+
+`controlToken` is host-generated and unique per Control epoch. macOS accepts an
+unsolicited event only when token, Session, selected target, current Control,
+return intent, and expected remote edge still match.
+
+Normal return is two-phase:
+
+```text
+remoteActive
+  -> authoritative BOUNDARY_REACHED
+  -> returning
+  -> withdraw remote keyboard admission
+  -> release CoreHID host ownership synchronously
+  -> localActive
+```
+
+`BOUNDARY_WATCH_STOP` is best-effort cleanup; local host return never waits for
+transport I/O. The emergency shortcut remains a fail-safe only and is not part
+of the ordinary return interaction.
