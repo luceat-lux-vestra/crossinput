@@ -27,7 +27,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     private struct ContactGesture: Sendable {
         let startedAtNanos: UInt64
         var maxContactCount: Int
-        var travel: Int32 = 0
+        var travel: Int64 = 0
         var pending: [SemanticPointerEvent] = []
         var movementCommitted = false
         var tapEligible = true
@@ -38,11 +38,11 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     private var suppressTapUntilLift = false
 
     private let tapMaxDurationNanos: UInt64
-    private let tapMovementThreshold: Int32
+    private let tapMovementThreshold: Int64
 
     init(
         tapMaxDurationNanos: UInt64 = 250_000_000,
-        tapMovementThreshold: Int32 = 12
+        tapMovementThreshold: Int64 = 12
     ) {
         self.tapMaxDurationNanos = tapMaxDurationNanos
         self.tapMovementThreshold = tapMovementThreshold
@@ -194,7 +194,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         }
 
         if dx != 0 || dy != 0 {
-            current.travel += abs(dx) + abs(dy)
+            current.travel += Int64(abs(dx)) + Int64(abs(dy))
             current.pending.append(
                 contentsOf: try movementEvents(
                     contactCount: report.contactCount,
