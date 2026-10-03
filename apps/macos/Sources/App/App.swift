@@ -110,10 +110,13 @@ final class AppModel: ObservableObject {
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
             captureStop: captureStop,
-            hostPointerBackend: HostPointerOwnershipBackends.makeDefault()
+            hostPointerBackend: nil,
+            useEventTapNoWarp: true
         )
-        // Fail closed until a confirmed target tells us whether the legacy
-        // relative-movement normal-return policy is even admissible.
+        // Event-tap no-warp preserves native macOS trackpad semantics while
+        // system-routed UHID remains non-authoritative for remote screen
+        // position. Normal DeX return therefore requires an independent
+        // authoritative boundary signal; emergency return remains fail-safe only.
         handoffController.setAutomaticReturnAuthority(.none)
         targetController = TargetSelectionController(session: reference)
 
