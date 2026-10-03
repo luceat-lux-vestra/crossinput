@@ -124,6 +124,35 @@ final class SuppressionLifecycleTests: XCTestCase {
         )
     }
 
+    func testIndependentEmergencyTapRequestsReturnWithoutConsumingChord() {
+        let capture = InputCapture(pointerRestoreOverride: {})
+        let requested = BoolObservation()
+        capture.onEmergencyReturnRequested = {
+            requested.set(true)
+        }
+
+        XCTAssertEqual(capture.suppressWithExternalPointerOwner(), 1)
+
+        let chord = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: 7, // kVK_ANSI_X
+            keyDown: true
+        )!
+        chord.flags = [.maskCommand, .maskShift]
+
+        let disposition = capture.handleEmergencyTapForTesting(
+            type: .keyDown,
+            event: chord
+        )
+
+        XCTAssertNotNil(
+            disposition,
+            "listen-only emergency observation must never consume the event"
+        )
+        XCTAssertTrue(requested.value)
+        capture.release(reason: .captureStopped)
+    }
+
     private func makeCapture(
         released: (@Sendable (SuppressionReleaseReason, UInt64) -> Void)? = nil,
         restore: (() -> Void)? = {}
