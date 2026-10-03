@@ -10,7 +10,14 @@ import Diagnostics
 /// `PointerAdmissionOutcome`, so a local decision can never be mistaken for
 /// a remote verdict.
 public enum PointerDeliveryResult: Sendable, Equatable {
-    // Movement results carry both the requested batch delta (what was asked
+    /// A compositor-authoritative movement frame crossed the local transport
+    /// write boundary without waiting for a correlated helper response.
+    /// Android boundary-watch failure remains the asynchronous fail-local
+    /// authority for this mode.
+    case submittedMovement(requestedDx: Int32, requestedDy: Int32)
+
+    // Acknowledged movement results carry both the requested batch delta
+    // (what was asked
     // of the helper, after coalescing) and the accepted delta. The state
     // machine needs the requested intent to credit return-direction movement
     // that a display-bound clamp fully absorbed (issue #45).
@@ -45,6 +52,16 @@ public enum KeyDeliveryResult: Sendable, Equatable {
 
 /// What `enqueuePointer` did with one captured event. This is the entire
 /// admission contract; it is orthogonal to `PointerDeliveryResult`.
+public enum PointerMovementDeliveryMode: Sendable, Equatable {
+    /// Preserve the legacy semantic-result contract. Used for explicit-display
+    /// routes and every pointer state transition.
+    case acknowledged
+    /// Low-latency compositor-authoritative movement. The frame is written in
+    /// pointer-queue order with requestId 0 and does not wait for POINTER_RESULT.
+    /// Buttons and scroll remain acknowledged ordering barriers.
+    case streaming
+}
+
 public enum PointerAdmissionOutcome: Sendable, Equatable {
     /// Appended as a new pending batch. The completion passed with this
     /// enqueue is the batch's single acknowledgement: it is invoked exactly
@@ -129,6 +146,7 @@ public final class InputSender: @unchecked Sendable {
         let completion: (@Sendable (PointerDeliveryResult) -> Void)?
         let pointerGeneration: UInt64
         let sessionGeneration: UInt64
+        let movementDeliveryMode: PointerMovementDeliveryMode
     }
 
     /// Returns the accumulated kind when `newer` may merge into an adjacent
@@ -195,9 +213,11 @@ public final class InputSender: @unchecked Sendable {
     /// Admission is O(1): tail inspection, tail merge, capacity check,
     /// amortized-O(1) append. No backward scans, no callback bookkeeping.
     @discardableResult
-    public func enqueuePointer(_ event: SemanticPointerEvent,
-                               completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil)
-        -> PointerAdmissionOutcome {
+    public func enqueuePointer(
+        _ event: SemanticPointerEvent,
+        movementDeliveryMode: PointerMovementDeliveryMode = .acknowledged,
+        completion: (@Sendable (PointerDeliveryResult) -> Void)? = nil
+    ) -> PointerAdmissionOutcome {
         let sessionSnapshot = session.snapshot()
         var outcome: PointerAdmissionOutcome?
         var shouldSchedule = false
@@ -207,6 +227,7 @@ public final class InputSender: @unchecked Sendable {
         stateLock.withLock {
             if let last = pendingPointers.last,
                last.sessionGeneration == sessionSnapshot.generation,
+               last.movementDeliveryMode == movementDeliveryMode,
                let mergedKind = Self.coalesced(last.event.kind, event.kind) {
                 // Same-kind accumulation preserves ordering: merging only ever
                 // rewrites the tail batch's payload. Its existing completion
@@ -219,7 +240,8 @@ public final class InputSender: @unchecked Sendable {
                     event: event,
                     completion: completion,
                     pointerGeneration: pointerGeneration,
-                    sessionGeneration: sessionSnapshot.generation))
+                    sessionGeneration: sessionSnapshot.generation,
+                    movementDeliveryMode: movementDeliveryMode))
                 outcome = .acceptedAsNewBatch
             } else if Self.isSheddable(event.kind) {
                 // Additive sample lost to bounded backpressure. This degrades
@@ -481,6 +503,27 @@ public final class InputSender: @unchecked Sendable {
                 type = .pointerScroll
                 payload = Messages.pointerScroll(horizontal: horizontal, vertical: vertical)
                 isMovement = false
+            }
+
+            if case let .move(dx, dy) = event.kind,
+               item.movementDeliveryMode == .streaming {
+                // Keep the physical trackpad cadence intact. The pointer queue
+                // serializes writes, so a later acknowledged button/scroll is
+                // still an ordering barrier behind every prior movement frame.
+                try connection.send(
+                    CxiFrame(
+                        type: .pointerMoveRel,
+                        requestId: 0,
+                        payload: payload
+                    )
+                )
+                guard session.snapshot().generation == item.sessionGeneration else {
+                    return .cancelled
+                }
+                return .submittedMovement(
+                    requestedDx: dx,
+                    requestedDy: dy
+                )
             }
 
             let response = try connection.requestBlocking(type,
