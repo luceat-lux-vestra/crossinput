@@ -86,53 +86,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             guard !clicked else {
                 throw TranslationError.invalidState
             }
-
-            if let button = activeButton {
-                activeButton = nil
-                gesture = nil
-                suppressTapUntilLift = false
-                tapResolution = .suppressedByPhysicalClick
-                return [
-                    SemanticPointerEvent(
-                        .button(button: button, down: false)
-                    )
-                ]
-            }
-
-            if suppressTapUntilLift {
-                suppressTapUntilLift = false
-                gesture = nil
-                tapResolution = .suppressedByPhysicalClick
-                return []
-            }
-
-            defer { gesture = nil }
-            guard let gesture else {
-                tapResolution = .noCandidate
-                return []
-            }
-            guard nowNanos >= gesture.startedAtNanos,
-                  nowNanos - gesture.startedAtNanos <= tapMaxDurationNanos else {
-                tapResolution = .rejectedDuration
-                return []
-            }
-            guard gesture.tapEligible else {
-                tapResolution = .rejectedTravel
-                return []
-            }
-
-            let button: UInt32
-            switch gesture.maxContactCount {
-            case 1: button = 0
-            case 2: button = 1
-            default:
-                throw TranslationError.invalidState
-            }
-            tapResolution = .emitted
-            return [
-                SemanticPointerEvent(.button(button: button, down: true)),
-                SemanticPointerEvent(.button(button: button, down: false)),
-            ]
+            return try finishContact(nowNanos: nowNanos)
         }
 
         if clicked && !wasClicked {
@@ -239,6 +193,59 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             dx: dx,
             dy: dy
         )
+    }
+
+    mutating func finishContact(
+        nowNanos: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) throws -> [SemanticPointerEvent] {
+        tapResolution = nil
+
+        if let button = activeButton {
+            activeButton = nil
+            gesture = nil
+            suppressTapUntilLift = false
+            tapResolution = .suppressedByPhysicalClick
+            return [
+                SemanticPointerEvent(
+                    .button(button: button, down: false)
+                )
+            ]
+        }
+
+        if suppressTapUntilLift {
+            suppressTapUntilLift = false
+            gesture = nil
+            tapResolution = .suppressedByPhysicalClick
+            return []
+        }
+
+        defer { gesture = nil }
+        guard let gesture else {
+            tapResolution = .noCandidate
+            return []
+        }
+        guard nowNanos >= gesture.startedAtNanos,
+              nowNanos - gesture.startedAtNanos <= tapMaxDurationNanos else {
+            tapResolution = .rejectedDuration
+            return []
+        }
+        guard gesture.tapEligible else {
+            tapResolution = .rejectedTravel
+            return []
+        }
+
+        let button: UInt32
+        switch gesture.maxContactCount {
+        case 1: button = 0
+        case 2: button = 1
+        default:
+            throw TranslationError.invalidState
+        }
+        tapResolution = .emitted
+        return [
+            SemanticPointerEvent(.button(button: button, down: true)),
+            SemanticPointerEvent(.button(button: button, down: false)),
+        ]
     }
 
     private func movementEvents(
