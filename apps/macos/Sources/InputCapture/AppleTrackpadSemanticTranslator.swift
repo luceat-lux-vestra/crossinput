@@ -19,6 +19,14 @@ import InputDomain
 /// non-zero HID delta is emitted immediately, while duration/travel are tracked
 /// independently to decide whether lift may also synthesize a tap.
 struct AppleTrackpadSemanticTranslator: Sendable {
+    enum TapResolution: String, Equatable, Sendable {
+        case emitted
+        case rejectedTravel
+        case rejectedDuration
+        case suppressedByPhysicalClick
+        case noCandidate
+    }
+
     enum TranslationError: Error, Equatable, Sendable {
         case unsupportedContactCount(Int)
         case unsupportedButtonBits
@@ -35,6 +43,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     private var activeButton: UInt32?
     private var gesture: ContactGesture?
     private var suppressTapUntilLift = false
+    private var tapResolution: TapResolution?
 
     private let tapMaxDurationNanos: UInt64
     private let tapMovementThreshold: Int64
@@ -70,6 +79,8 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         let clicked = report.buttons.primary
         let wasClicked = activeButton != nil
 
+        tapResolution = nil
+
         if report.contactCount == 0 {
             guard !clicked else {
                 throw TranslationError.invalidState
@@ -79,6 +90,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
                 activeButton = nil
                 gesture = nil
                 suppressTapUntilLift = false
+                tapResolution = .suppressedByPhysicalClick
                 return [
                     SemanticPointerEvent(
                         .button(button: button, down: false)
@@ -89,14 +101,22 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             if suppressTapUntilLift {
                 suppressTapUntilLift = false
                 gesture = nil
+                tapResolution = .suppressedByPhysicalClick
                 return []
             }
 
             defer { gesture = nil }
-            guard let gesture,
-                  gesture.tapEligible,
-                  nowNanos >= gesture.startedAtNanos,
+            guard let gesture else {
+                tapResolution = .noCandidate
+                return []
+            }
+            guard nowNanos >= gesture.startedAtNanos,
                   nowNanos - gesture.startedAtNanos <= tapMaxDurationNanos else {
+                tapResolution = .rejectedDuration
+                return []
+            }
+            guard gesture.tapEligible else {
+                tapResolution = .rejectedTravel
                 return []
             }
 
@@ -107,6 +127,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             default:
                 throw TranslationError.invalidState
             }
+            tapResolution = .emitted
             return [
                 SemanticPointerEvent(.button(button: button, down: true)),
                 SemanticPointerEvent(.button(button: button, down: false)),
@@ -236,6 +257,11 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         default:
             throw TranslationError.unsupportedContactCount(contactCount)
         }
+    }
+
+    mutating func takeTapResolution() -> TapResolution? {
+        defer { tapResolution = nil }
+        return tapResolution
     }
 
     mutating func reset() -> [SemanticPointerEvent] {
