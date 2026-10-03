@@ -55,6 +55,48 @@ final class InputSenderTests: XCTestCase {
                                                         deliveredDx: 3, deliveredDy: 4))
     }
 
+    func testStreamingMovementUsesOneWayFrameWithoutRequestRTT() {
+        let session = FakeSession(delay: 500_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(
+            session: reference,
+            pointerRequestTimeout: 1
+        )
+        let result = ResultBox<PointerDeliveryResult>()
+        let done = DispatchSemaphore(value: 0)
+
+        XCTAssertEqual(
+            sender.enqueuePointer(
+                PointerEvent(.move(dx: 7, dy: -3)),
+                movementDeliveryMode: .streaming
+            ) {
+                result.set($0)
+                done.signal()
+            },
+            .acceptedAsNewBatch
+        )
+
+        XCTAssertEqual(
+            done.wait(timeout: .now() + 0.2),
+            .success,
+            "streaming movement must complete at the local write boundary"
+        )
+        XCTAssertEqual(session.requestCount, 0)
+        XCTAssertEqual(session.sendCount, 1)
+        XCTAssertEqual(session.sentFrames.count, 1)
+        XCTAssertEqual(session.sentFrames.first?.type, .pointerMoveRel)
+        XCTAssertEqual(session.sentFrames.first?.requestId, 0)
+        XCTAssertEqual(
+            session.sentFrames.first?.payload,
+            Messages.pointerMoveRel(dx: 7, dy: -3)
+        )
+        XCTAssertEqual(
+            result.get(),
+            .submittedMovement(requestedDx: 7, requestedDy: -3)
+        )
+    }
+
     func testPartialMovementIsReportedWithoutRetry() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult,
