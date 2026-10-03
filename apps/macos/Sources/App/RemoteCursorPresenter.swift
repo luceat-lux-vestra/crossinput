@@ -48,7 +48,7 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
 
     func presentRemote(edge: ScreenEdge) {
         let generation = nextGeneration()
-        DispatchQueue.main.async { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self,
                   self.isCurrent(generation) else {
                 return
@@ -122,6 +122,7 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         }
     }
 
+    @MainActor
     private func removePanelIfPresent() {
         presentationPanel?.orderOut(nil)
         presentationPanel?.close()
