@@ -21,59 +21,35 @@ Issues found during development and verification, with causes and fixes. Work in
 
 ## macOS native cursor presentation
 
-On affected macOS configurations, the native directional/resize cursor can remain
-visually rendered as the normal arrow after Mac ↔ DeX handoff even though pointer
-movement, AppKit tracking, and cursor-region callbacks continue normally.
+The current #96 product symptom is a **remote-active presentation failure**:
 
-This is tracked in issue #96 and is an **open HEALTHY-required blocker**, not an
-accepted current-development limitation. Historical releases may exhibit it, but
-a current merge candidate must restore native cursor presentation immediately
-after return without a click, Cmd-Tab, app activation, reconnect, restart, or
-other manual recovery.
+- after Mac -> DeX ownership becomes ready, the Mac-side host cursor remains at
+  the configured handoff edge;
+- left/right ownership must present the native horizontal directional cursor;
+- top/bottom ownership must present the native vertical directional cursor;
+- an ordinary arrow during real remote ownership is #96 **BROKEN**.
 
-Repeated edge-hold `CGWarpMouseCursorPosition()` is a physically confirmed
-sufficient trigger and is not used by the CoreHID production ownership path.
-Current investigation instead isolates production integration state by keeping
-pointer observation on a listen-only tap, keyboard suppression on a separate
-modifying keyboard-only tap, and CoreHID as the sole remote pointer owner.
+This is not a post-return hover test. Normal local AppKit cursor behavior after
+return is a separate regression check.
 
-Do not treat the visual arrow as loss of pointer capture by itself. If DeX input,
-host ownership, and local return otherwise work, classify the failure as the
-#96 presentation blocker and preserve diagnostics rather than applying cursor
-reset/hide/show/warp/focus workarounds. The failure is presentation-
-only.
+Production now gives this state an explicit owner. The directional cursor is
+published only after the CoreHID lease and matching keyboard admission are
+ready, and it is withdrawn at every synchronous local-return/failure gate before
+CoreHID ownership is released. It uses only native `NSCursor.resizeLeftRight`
+/ `.resizeUpDown`; it does not hide the cursor, warp the pointer, synthesize a
+click/focus transition, or install a custom cursor.
 
-### Known recovery behavior
+### Historical cursor-corruption evidence
 
-Recovery is display- and app/window-local. The following behaviors were verified
-from known BROKEN states on the current P0 architecture:
+The older #96 standalone reproducer remains valid negative evidence. It showed
+that repeated edge-hold `CGWarpMouseCursorPosition()` is sufficient to leave
+native AppKit directional/resize cursor regions rendered as the ordinary arrow.
+Previously investigated hide/show, association, synthetic move/click/focus,
+private CGS/SkyLight, and equivalent reset stacks remain rejected.
 
-- keyboard-only switching to an application with a window on the affected display
-  can restore the native cursor presentation;
-- TextEdit on the affected display was independently verified as a working
-  recovery target;
-- real activation/click of an application window on the affected display can
-  restore presentation;
-- clicking the affected display's menu-bar region can restore presentation.
-
-The following are **not** reliable recovery actions:
-
-- pressing Shift or other generic keyboard activity;
-- Cmd-Tab to an application on another display;
-- merely hovering the affected display's menu bar;
-- arbitrary cursor-rect invalidation, redraw, or tracking-area rebuild in an
-  unrelated diagnostic window.
-
-Do not summarize this as “Cmd-Tab always fixes it.” The narrowest verified
-workaround is to bring an application with a window on the **affected display**
-frontmost; the exact recovery-producing macOS transition is still unknown.
-
-CrossInput intentionally does **not** ship the investigated alternatives that
-hide the macOS cursor, replace it with a custom cursor, use private SkyLight/CGS
-cursor ownership as a production dependency, synthesize clicks/focus changes, or
-allow the Mac pointer to move with remote DeX movement. Those approaches either
-break required interaction invariants or remove the native-cursor oracle rather
-than fixing the presentation state.
+Those historical recovery observations are diagnostic evidence only; they do
+not define the current product contract and must not be used as a normal
+recovery procedure.
 
 ## Keyboard
 
