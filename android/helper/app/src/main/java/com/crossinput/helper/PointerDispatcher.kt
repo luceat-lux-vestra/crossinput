@@ -66,10 +66,29 @@ class PointerDispatcher(
 
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
+    private var compositorBoundaryRequired = false
+
+    @Synchronized
+    fun selectedDisplayId(): Int? = selectedDisplay?.displayId
+
+    @Synchronized
+    fun boundaryAuthority(): PointerBoundaryAuthority = when (active) {
+        uhid -> PointerBoundaryAuthority.COMPOSITOR
+        inputManager -> PointerBoundaryAuthority.DELIVERED_COORDINATES
+        else -> PointerBoundaryAuthority.UNAVAILABLE
+    }
+
+    @Synchronized
+    fun requiresCompositorBoundaryAuthority(): Boolean =
+        compositorBoundaryRequired
 
     @Synchronized
     override fun selectDisplay(display: Display): Boolean {
         selectedDisplay = display
+        val systemRouteCandidate =
+            mode == PointerBackendMode.AUTO && isSystemRouteCandidate(display)
+        compositorBoundaryRequired =
+            mode == PointerBackendMode.UHID || systemRouteCandidate
         if (mode == PointerBackendMode.UHID) {
             // Forced UHID deliberately trades away explicit target routing.
             // Warn loudly and drive the system-routed device anyway instead of
@@ -91,10 +110,7 @@ class PointerDispatcher(
         // InputReader pipeline (the visible pointer sprite follows the UHID
         // device), so prefer UHID there. FLAG_DESKTOP is a heuristic, not a
         // guarantee; every other target keeps explicit InputManager targeting.
-        if (mode == PointerBackendMode.AUTO &&
-            isSystemRouteCandidate(display) &&
-            uhid.selectSystemRoute()
-        ) {
+        if (systemRouteCandidate && uhid.selectSystemRoute()) {
             active = uhid
             log.info(
                 TAG,
@@ -139,6 +155,7 @@ class PointerDispatcher(
         if (active !== inputManager) inputManager.close()
         active = null
         selectedDisplay = null
+        compositorBoundaryRequired = false
     }
 
     private fun deliver(send: (PointerInjector) -> PointerDelivery): PointerDelivery {

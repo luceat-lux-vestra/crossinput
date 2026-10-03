@@ -1,0 +1,6 @@
+{
+  "type": "BOUNDARY_WATCH_ERROR",
+  "requestId": 0,
+  "controlToken": "42",
+  "code": "BACKEND_CHANGED"
+}

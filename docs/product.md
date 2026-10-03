@@ -45,7 +45,7 @@ Text synchronization must prevent echo loops and must not log clipboard contents
 
 ## Current behavior and safety
 
-The bridge returns control to macOS on normal boundary return, emergency release, capture shutdown, timeout, helper failure, and unexpected disconnect. Remote failure must never permanently trap the local pointer or keyboard.
+The bridge returns control to macOS on an authoritative normal boundary return and also on emergency Return to Mac, Edge Switch disable, capture shutdown, timeout, helper failure, and unexpected disconnect. For system-routed desktop UHID targets such as Samsung DeX, relative HID deltas are return intent only; Android compositor observation owns the actual remote-boundary decision. The emergency shortcut is a last-resort fail-safe, not the ordinary return interaction. Remote failure must never permanently trap the local pointer or keyboard.
 
 When a session is ready, **Disable Edge Switch** stops remote-control
 acquisition and returns ownership to macOS without stopping the Android helper,
@@ -89,7 +89,7 @@ CXI v2 is not intended to become a universal cross-platform input framework and 
 
 ## Known limitations
 
-- On affected macOS versions, repeated host-cursor repositioning used to keep the Mac pointer confined during DeX control can leave the native directional/resize cursor visually rendered as an ordinary arrow even though pointer movement and AppKit tracking continue. A standalone AppKit/Quartz reproducer confirms repeated edge-hold warping is sufficient to trigger this presentation failure. The exact AppKit/WindowServer root cause is not confirmed. CrossInput intentionally retains the current confinement architecture because tested public/private alternatives either broke host confinement, hid the native cursor, or did not remove the presentation failure. See `docs/troubleshooting.md` and issue #96 for the verified recovery/workaround surface.
+- Historical Quartz edge-hold warping could corrupt native macOS directional/resize cursor presentation. The current built-in-trackpad production path no longer uses Quartz warping for remote ownership: CoreHID provides the no-leak host ownership boundary and normal return releases that lease in place. Issue #96 retains the historical evidence and regression oracle; exact-final-HEAD physical verification is still required to prove the replacement path preserves healthy native cursor presentation.
 - The v1 wire record still exposes raw Android display metadata for compatibility; the leakage and containment plan are recorded in [CXI v2 design](../protocol/v2-design.md).
 - Display hot-plug and state changes still require the complete failure-case regression matrix tracked in issue #17.
 - The packaged Mac application does not yet auto-deploy a matching helper; `HELLO_ACK` capability negotiation rejects an incompatible helper before input begins. Deployment packaging remains follow-up work.
