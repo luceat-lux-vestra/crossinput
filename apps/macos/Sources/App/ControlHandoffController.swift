@@ -1009,20 +1009,40 @@ final class ControlHandoffController: @unchecked Sendable {
     private func apply(delivery: PointerDeliveryResult, controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled, capture.isSuppressed else { return }
         switch delivery {
-        case let .deliveredMovement(requestedDx, requestedDy, deliveredDx, deliveredDy):
+        case let .deliveredMovement(
+            requestedDx,
+            requestedDy,
+            deliveredDx,
+            deliveredDy
+        ):
             // Confirmed acceptance proves the delivery pipeline is live; keep
             // the fail-safe watchdog from expiring during long sessions.
             capture.pokeWatchdog()
             logUsableSessionOnce()
-            // A normal boundary decision may move the machine to `.returning`
-            // but must not publish `.localActive` until native host ownership
-            // has actually been restored.
-            let returnStarted = switchMachine.beginBoundaryReturnIfNeeded(
-                requestedDx: CGFloat(requestedDx),
-                requestedDy: CGFloat(requestedDy),
-                deliveredDx: CGFloat(deliveredDx),
-                deliveredDy: CGFloat(deliveredDy)
-            )
+
+            let boundaryMode = lifecycleLock.withLock {
+                activeBoundaryWatch?.mode
+            }
+            if boundaryMode == .compositor {
+                // Relative UHID deltas are return intent only. The Android
+                // compositor remains the sole screen-boundary authority.
+                confirmBoundaryReturnIntent(
+                    requestedDx: requestedDx,
+                    requestedDy: requestedDy
+                )
+                return
+            }
+
+            // Explicit-coordinate routes retain the existing delivered
+            // movement authority. Native host ownership is still released
+            // before localActive is published.
+            let returnStarted =
+                switchMachine.beginBoundaryReturnIfNeeded(
+                    requestedDx: CGFloat(requestedDx),
+                    requestedDy: CGFloat(requestedDy),
+                    deliveredDx: CGFloat(deliveredDx),
+                    deliveredDy: CGFloat(deliveredDy)
+                )
             if returnStarted {
                 releaseHostOwnershipAndCapture(reason: .normalReturn)
                 sender.cancelPendingPointerEvents()
