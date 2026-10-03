@@ -390,6 +390,11 @@ class Controller(
     }
 
     private fun writePointerResult(frame: Frame, result: PointerDelivery) {
+        // requestId 0 is the one-way semantic pointer lane. Production uses it
+        // for high-rate compositor-authoritative movement and fail-safe button
+        // cleanup, where a response would only add reverse-path traffic.
+        if (frame.requestId == 0) return
+
         val status = when (result.status) {
             PointerDelivery.Status.DELIVERED -> 0
             PointerDelivery.Status.FAILED -> 1
