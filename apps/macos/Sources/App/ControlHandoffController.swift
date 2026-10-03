@@ -662,7 +662,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private func beginBoundaryPreparation(edge: ScreenEdge) {
         let context = lifecycleLock.withLock {
             () -> (token: UInt64, targetID: UInt32)? in
-            guard isEdgeSwitchEnabled,
+            guard edgeSwitchEnabled,
                   let targetID = selectedRemoteTargetID else {
                 return nil
             }
@@ -705,7 +705,7 @@ final class ControlHandoffController: @unchecked Sendable {
         _ prepared: PreparedBoundaryWatch
     ) {
         let accepted = lifecycleLock.withLock {
-            guard isEdgeSwitchEnabled,
+            guard edgeSwitchEnabled,
                   pendingBoundaryToken == prepared.controlToken,
                   selectedRemoteTargetID == prepared.targetID else {
                 return false
@@ -804,22 +804,24 @@ final class ControlHandoffController: @unchecked Sendable {
         )
         guard directed < 0 else { return }
 
-        let active = lifecycleLock.withLock {
-            () -> PreparedBoundaryWatch? in
+        let cancellation = lifecycleLock.withLock {
+            () -> (cancelled: Bool, active: PreparedBoundaryWatch?) in
             guard pendingBoundaryToken != nil ||
                     activeBoundaryWatch != nil else {
-                return nil
+                return (false, nil)
             }
             pendingBoundaryToken = nil
             boundaryReturnIntentActive = false
             let active = activeBoundaryWatch
             activeBoundaryWatch = nil
-            return active
+            return (true, active)
         }
-        if let active {
+        if let active = cancellation.active {
             boundaryWatch.stop(active)
         }
-        switchMachine.cancelEdgePreparation()
+        if cancellation.cancelled {
+            switchMachine.cancelEdgePreparation()
+        }
     }
 
     private static func remoteReturnEdge(
