@@ -374,20 +374,28 @@ The pre-Leap `InputCapture` responsibilities separate conceptually into:
 Exact names may change, but these responsibilities must not collapse back into
 one implicit owner.
 
-Only HostSuppressionController may consume local host input or perform accepted
-P0 cursor-confinement mutations.
+Only HostSuppressionController may consume local host input. For the production
+built-in-trackpad path, pointer isolation belongs to CoreHID seizure rather than
+repeated P0 Quartz confinement.
 
-The accepted #96 disposition remains authoritative:
+#96 is reopened and HEALTHY is required:
 
-- retain P0 confinement;
-- keep the native Mac cursor visible;
-- accept/document the cursor-presentation limitation;
+- the pointer observation tap is listen-only;
+- the modifying event tap is keyboard-only;
+- pointer event types are excluded from the modifying tap in the CoreHID
+  production topology;
+- CoreHID is the sole remote pointer ownership/semantic source;
+- local return uses ownership release, not cursor-presentation repair APIs;
 - no private SkyLight/CGS production dependency;
 - no synthetic click/focus stealing;
-- no pointer-jump workaround;
+- no hide/show/associate/warp reset stack or pointer-jump workaround;
 - no custom cursor solely to mask #96; and
-- no equivalent cursor-API permutation experiments without materially new
+- no equivalent cursor-API permutation experiment without materially new
   evidence.
+
+The invariant is not satisfied until exact-head physical MacBook built-in
+trackpad -> DeX -> Mac verification shows immediate healthy native cursor
+presentation with no click/focus/app-switch/manual recovery.
 
 ## 8. HandoffPolicy is pure
 
@@ -1049,7 +1057,8 @@ Broad replacement is authorized; one giant rewrite PR is not.
    architecture merely to keep them green;
 5. preserve CXI v1 framing and validated DeX routing unless separately approved
    protocol work supersedes them;
-6. preserve accepted #96 behavior unless materially new evidence reopens it; and
+6. preserve #96's HEALTHY-required invariant and the physically established
+   negative evidence; and
 7. reset-sensitive runtime changes require exact-head physical verification and
    ADR-0012 lineage handling.
 
