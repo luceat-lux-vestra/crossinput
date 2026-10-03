@@ -198,6 +198,63 @@ class BoundaryWatchControllerLifecycleTest {
     }
 
     @Test
+    fun oneMissingIntentCadenceGetsExactlyOneGraceSample() {
+        val output = ByteArrayOutputStream()
+        val writer = WriterLock(FrameWriter(output))
+        val clock = AtomicLong(0L)
+        val oracle = GraceSampleOracle(clock)
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { oracle },
+            trackerFactory = {
+                BoundaryPlateauTracker(
+                    requiredSamples = 99,
+                    minimumDurationNanos = Long.MAX_VALUE,
+                )
+            },
+            sampleIntervalMillis = 90L,
+            nowNanos = { clock.get() },
+            sleepMillis = { millis ->
+                clock.addAndGet(millis * 1_000_000L)
+            },
+        )
+
+        val started = controller.start(
+            token = 93L,
+            displayId = 2,
+            layerStack = 9,
+            edge = BoundaryWatchController.EDGE_RIGHT,
+            authority = PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertNull(started.errorCode)
+
+        controller.onPointerMove(
+            10,
+            0,
+            PointerBoundaryAuthority.COMPOSITOR,
+        )
+
+        assertTrue(
+            "fresh + one grace sample were not both observed",
+            oracle.third.await(1, TimeUnit.SECONDS),
+        )
+        assertFalse(
+            "worker must retire after one cadence gap without fresh intent",
+            oracle.fourth.await(100, TimeUnit.MILLISECONDS),
+        )
+        assertEquals(
+            listOf(
+                0L,
+                90_000_000L,
+                180_000_000L,
+            ),
+            oracle.sampleTimes(),
+        )
+        controller.close()
+    }
+
+    @Test
     fun backendFailoverInvalidatesActiveCompositorWatchImmediately() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
@@ -270,6 +327,35 @@ class BoundaryWatchControllerLifecycleTest {
             }
             if (count == 2) second.countDown()
             if (count == 3) third.countDown()
+            return SurfaceFlingerSpritePosition(
+                name = "Sprite#0",
+                layerStack = layerStack,
+                x = 100.0,
+                y = 50.0,
+            )
+        }
+
+        fun sampleTimes(): List<Long> =
+            synchronized(lock) { samples.toList() }
+    }
+
+    private class GraceSampleOracle(
+        private val clock: AtomicLong,
+    ) : BoundarySpriteOracle {
+        val third = CountDownLatch(1)
+        val fourth = CountDownLatch(1)
+        private val lock = Any()
+        private val samples = mutableListOf<Long>()
+
+        override fun sample(
+            layerStack: Int
+        ): SurfaceFlingerSpritePosition {
+            val count = synchronized(lock) {
+                samples += clock.get()
+                samples.size
+            }
+            if (count == 3) third.countDown()
+            if (count == 4) fourth.countDown()
             return SurfaceFlingerSpritePosition(
                 name = "Sprite#0",
                 layerStack = layerStack,
