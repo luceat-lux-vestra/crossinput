@@ -9,6 +9,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -131,6 +132,72 @@ class BoundaryWatchControllerLifecycleTest {
     }
 
     @Test
+    fun compositorCadenceSurvivesWorkerRestart() {
+        val output = ByteArrayOutputStream()
+        val writer = WriterLock(FrameWriter(output))
+        val clock = AtomicLong(0L)
+        val oracle = CadenceOracle(clock)
+        val controller = BoundaryWatchController(
+            writer = writer,
+            log = Logger(writer),
+            oracleFactory = { oracle },
+            trackerFactory = {
+                BoundaryPlateauTracker(
+                    requiredSamples = 99,
+                    minimumDurationNanos = Long.MAX_VALUE,
+                )
+            },
+            sampleIntervalMillis = 90L,
+            nowNanos = { clock.get() },
+            sleepMillis = { millis ->
+                clock.addAndGet(millis * 1_000_000L)
+            },
+        )
+
+        val started = controller.start(
+            token = 92L,
+            displayId = 2,
+            layerStack = 9,
+            edge = BoundaryWatchController.EDGE_RIGHT,
+            authority = PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertNull(started.errorCode)
+
+        controller.onPointerMove(
+            10,
+            0,
+            PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertTrue(
+            "first return-intent sample missing",
+            oracle.second.await(1, TimeUnit.SECONDS),
+        )
+
+        // The first worker has no further fresh intent and retires. A new
+        // pointer move starts another worker; it must still honor the previous
+        // worker's global sample timestamp.
+        controller.onPointerMove(
+            10,
+            0,
+            PointerBoundaryAuthority.COMPOSITOR,
+        )
+        assertTrue(
+            "second return-intent sample missing",
+            oracle.third.await(1, TimeUnit.SECONDS),
+        )
+
+        assertEquals(
+            listOf(
+                0L,
+                90_000_000L,
+                180_000_000L,
+            ),
+            oracle.sampleTimes(),
+        )
+        controller.close()
+    }
+
+    @Test
     fun backendFailoverInvalidatesActiveCompositorWatchImmediately() {
         val output = ByteArrayOutputStream()
         val writer = WriterLock(FrameWriter(output))
@@ -184,6 +251,35 @@ class BoundaryWatchControllerLifecycleTest {
 
         assertNull(started.errorCode)
         controller.close()
+    }
+
+    private class CadenceOracle(
+        private val clock: AtomicLong,
+    ) : BoundarySpriteOracle {
+        val second = CountDownLatch(1)
+        val third = CountDownLatch(1)
+        private val lock = Any()
+        private val samples = mutableListOf<Long>()
+
+        override fun sample(
+            layerStack: Int
+        ): SurfaceFlingerSpritePosition {
+            val count = synchronized(lock) {
+                samples += clock.get()
+                samples.size
+            }
+            if (count == 2) second.countDown()
+            if (count == 3) third.countDown()
+            return SurfaceFlingerSpritePosition(
+                name = "Sprite#0",
+                layerStack = layerStack,
+                x = 100.0,
+                y = 50.0,
+            )
+        }
+
+        fun sampleTimes(): List<Long> =
+            synchronized(lock) { samples.toList() }
     }
 
     private class ReversalRaceOracle : BoundarySpriteOracle {
