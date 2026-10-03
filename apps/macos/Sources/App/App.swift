@@ -574,7 +574,7 @@ private struct AppMenu: View {
 
             if model.controlState == .remote {
                 Divider()
-                Button("Return to Mac (⇧⌘X)") { model.emergencyReturn() }
+                Button("Emergency Return to Mac (⇧⌘X)") { model.emergencyReturn() }
             }
 
             Divider()
