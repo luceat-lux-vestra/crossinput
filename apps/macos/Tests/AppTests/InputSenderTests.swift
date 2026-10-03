@@ -97,6 +97,62 @@ final class InputSenderTests: XCTestCase {
         )
     }
 
+    func testStreamingMovementPreservesAdjacentTrackpadSamples() {
+        let session = FakeSession(sendDelay: 100_000_000)
+        let reference = SessionReference()
+        reference.set(session)
+        let sender = InputSender(session: reference)
+
+        XCTAssertEqual(
+            sender.enqueuePointer(
+                PointerEvent(.move(dx: 1, dy: 0)),
+                movementDeliveryMode: .streaming
+            ),
+            .acceptedAsNewBatch
+        )
+        XCTAssertEqual(
+            session.sendStarted.wait(timeout: .now() + 1),
+            .success,
+            "first streaming frame must be in flight before queueing followers"
+        )
+
+        XCTAssertEqual(
+            sender.enqueuePointer(
+                PointerEvent(.move(dx: 2, dy: 0)),
+                movementDeliveryMode: .streaming
+            ),
+            .acceptedAsNewBatch
+        )
+        XCTAssertEqual(
+            sender.enqueuePointer(
+                PointerEvent(.move(dx: 3, dy: 0)),
+                movementDeliveryMode: .streaming
+            ),
+            .acceptedAsNewBatch,
+            "streaming movement must preserve source sample cadence instead of coalescing the queue tail"
+        )
+
+        sender.waitForDrain()
+
+        let movementFrames = session.sentFrames.filter {
+            $0.type == .pointerMoveRel && $0.requestId == 0
+        }
+        XCTAssertEqual(movementFrames.count, 3)
+        XCTAssertEqual(
+            movementFrames.map(\.payload),
+            [
+                Messages.pointerMoveRel(dx: 1, dy: 0),
+                Messages.pointerMoveRel(dx: 2, dy: 0),
+                Messages.pointerMoveRel(dx: 3, dy: 0),
+            ]
+        )
+        XCTAssertEqual(
+            session.requestCount,
+            0,
+            "preserving cadence must not reintroduce request/response RTT"
+        )
+    }
+
     func testPartialMovementIsReportedWithoutRetry() {
         let session = FakeSession(response: CxiFrame(
             type: .pointerResult,
