@@ -27,6 +27,144 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
+    @Test("short one-contact touch emits primary tap-to-click on lift")
+    func oneContactTapToClick() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1),
+                nowNanos: 1_000_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 2, pointerY: -1, contactCount: 1),
+                nowNanos: 1_050_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 1_120_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.button(button: 0, down: false)),
+            ]
+        )
+    }
+
+    @Test("short two-contact touch emits secondary tap-to-click")
+    func twoContactTapToClick() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1),
+                nowNanos: 2_000_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 2),
+                nowNanos: 2_030_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1),
+                nowNanos: 2_080_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 2_120_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 1, down: true)),
+                SemanticPointerEvent(.button(button: 1, down: false)),
+            ]
+        )
+    }
+
+    @Test("movement beyond touch slop cancels tap and flushes pending motion")
+    func movementCancelsTap() throws {
+        var translator = AppleTrackpadSemanticTranslator(
+            tapMovementThreshold: 10
+        )
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 4, pointerY: 0, contactCount: 1),
+                nowNanos: 3_000_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 7, pointerY: 0, contactCount: 1),
+                nowNanos: 3_020_000_000
+            ) == [
+                SemanticPointerEvent(.move(dx: 4, dy: 0)),
+                SemanticPointerEvent(.move(dx: 7, dy: 0)),
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 3_040_000_000
+            ).isEmpty
+        )
+    }
+
+    @Test("two-contact motion beyond slop becomes scroll, never secondary tap")
+    func scrollCancelsSecondaryTap() throws {
+        var translator = AppleTrackpadSemanticTranslator(
+            tapMovementThreshold: 10
+        )
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 3, pointerY: -2, contactCount: 2),
+                nowNanos: 4_000_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 4, pointerY: -3, contactCount: 2),
+                nowNanos: 4_020_000_000
+            ) == [
+                SemanticPointerEvent(.scroll(horizontal: 3, vertical: -2)),
+                SemanticPointerEvent(.scroll(horizontal: 4, vertical: -3)),
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 4_040_000_000
+            ).isEmpty
+        )
+    }
+
+    @Test("long touch does not synthesize tap")
+    func longTouchIsNotTap() throws {
+        var translator = AppleTrackpadSemanticTranslator(
+            tapMaxDurationNanos: 200_000_000
+        )
+
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1),
+                nowNanos: 5_000_000_000
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0),
+                nowNanos: 5_250_000_001
+            ).isEmpty
+        )
+    }
+
     @Test("Button1 maps by contact count and latches release identity")
     func clickTransitions() throws {
         var translator = AppleTrackpadSemanticTranslator()
