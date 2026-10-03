@@ -21,6 +21,8 @@ object Protocol {
     const val TYPE_POINTER_BUTTON: Int = 0x000A
     const val TYPE_POINTER_SCROLL: Int = 0x000B
     const val TYPE_KEY_EVENT: Int = 0x000C
+    const val TYPE_BOUNDARY_WATCH_START: Int = 0x000D
+    const val TYPE_BOUNDARY_WATCH_STOP: Int = 0x000E
 
     const val TYPE_HELLO_ACK: Int = 0x8001
     const val TYPE_DISPLAY_LIST: Int = 0x8002
@@ -31,4 +33,7 @@ object Protocol {
     const val TYPE_LOG_EVENT: Int = 0x8007
     const val TYPE_FATAL_ERROR: Int = 0x8008
     const val TYPE_POINTER_RESULT: Int = 0x8009
+    const val TYPE_BOUNDARY_WATCH_READY: Int = 0x800A
+    const val TYPE_BOUNDARY_REACHED: Int = 0x800B
+    const val TYPE_BOUNDARY_WATCH_ERROR: Int = 0x800C
 }
