@@ -154,6 +154,36 @@ function decodePayload(type, payload) {
         deliveredDy: payload.readInt32LE(5),
       };
     }
+    case "BOUNDARY_WATCH_READY": {
+      const modes = ["DELIVERED_COORDINATES", "COMPOSITOR"];
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        displayId: u32(payload, 8),
+        mode: modes[payload[12]] ?? payload[12],
+        layerStack: payload.readInt32LE(13),
+      };
+    }
+    case "BOUNDARY_REACHED": {
+      const edges = ["LEFT", "RIGHT", "TOP", "BOTTOM"];
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        displayId: u32(payload, 8),
+        edge: edges[payload[12]] ?? payload[12],
+      };
+    }
+    case "BOUNDARY_WATCH_ERROR": {
+      const codes = [
+        null,
+        "TARGET_MISMATCH",
+        "ORACLE_UNAVAILABLE",
+        "BACKEND_CHANGED",
+        "OBSERVATION_FAILED",
+      ];
+      return {
+        controlToken: payload.readBigUInt64LE(0).toString(),
+        code: codes[payload[8]] ?? payload[8],
+      };
+    }
     default:
       fail(`no decoder for type ${type}`);
   }
