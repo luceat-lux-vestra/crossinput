@@ -444,8 +444,8 @@ public final class InputCapture: @unchecked Sendable {
         guard let newEmergencyTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: Self.eventMask([.keyDown]),
+            options: Self.emergencyTapOptions,
+            eventsOfInterest: Self.eventMask(Self.emergencyObservedEvents),
             callback: emergencyCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -1902,6 +1902,7 @@ public final class InputCapture: @unchecked Sendable {
     /// Keep these sets disjoint; #96 physical proof depends on that topology.
     static let pointerTapOptions: CGEventTapOptions = .listenOnly
     static let keyboardTapOptions: CGEventTapOptions = .defaultTap
+    static let emergencyTapOptions: CGEventTapOptions = .listenOnly
 
     static let pointerObservedEvents: [CGEventType] = [
         .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
@@ -1913,6 +1914,10 @@ public final class InputCapture: @unchecked Sendable {
 
     static let keyboardCapturedEvents: [CGEventType] = [
         .keyDown, .keyUp, .flagsChanged,
+    ]
+
+    static let emergencyObservedEvents: [CGEventType] = [
+        .keyDown,
     ]
 
     private static func eventMask(
