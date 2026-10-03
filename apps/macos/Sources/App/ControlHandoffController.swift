@@ -889,6 +889,7 @@ final class ControlHandoffController: @unchecked Sendable {
     ///   genuine remote failure (dropping an ordered button boundary can
     ///   strand remote button state).
     private func enqueue(_ event: PointerEvent) {
+        observeBoundaryReturnIntent(event)
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled) else { return nil }
             let epoch = controlEpoch
@@ -904,6 +905,7 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     private func enqueue(_ event: PointerEvent, suppressionGeneration: UInt64) {
+        observeBoundaryReturnIntent(event)
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? = lifecycleLock.withLock {
             guard edgeSwitchEnabled, activeSuppressionGeneration == suppressionGeneration else { return nil }
             let epoch = controlEpoch
@@ -922,6 +924,7 @@ final class ControlHandoffController: @unchecked Sendable {
         _ event: PointerEvent,
         hostGeneration: UInt64
     ) {
+        observeBoundaryReturnIntent(event)
         let admission: (outcome: PointerAdmissionOutcome, controlEpoch: UInt64)? =
             lifecycleLock.withLock {
                 guard edgeSwitchEnabled,
