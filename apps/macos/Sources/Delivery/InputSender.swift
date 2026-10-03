@@ -64,8 +64,8 @@ public enum PointerMovementDeliveryMode: Sendable, Equatable {
 
 public enum PointerAdmissionOutcome: Sendable, Equatable {
     /// Appended as a new pending batch. The completion passed with this
-    /// enqueue is the batch's single acknowledgement: it is invoked exactly
-    /// once with the batch's delivery result (or `.cancelled`).
+    /// enqueue owns the batch's single delivery result: it is invoked exactly
+    /// once with acknowledged/submitted delivery (or `.cancelled`).
     case acceptedAsNewBatch
     /// Merged into the adjacent tail batch. The tail batch's original
     /// completion owns the single delivery result; this enqueue's completion,
@@ -88,8 +88,10 @@ public enum PointerAdmissionOutcome: Sendable, Equatable {
 /// Architecture (ADR-0011): captured events pass through O(1) queue admission
 /// into bounded `PendingPointerBatch` transport batches. Adjacent additive
 /// events (move+move, scroll+scroll) merge into the tail batch, so one batch
-/// yields one remote request, one delivery result, one completion, and at
-/// most one handoff-accounting operation. Button transitions are state
+/// yields one ordered remote frame/request, one delivery result, one
+/// completion, and at most one handoff-accounting operation. Compositor-mode
+/// movement completes at the local write boundary; stateful/explicit-route
+/// work retains correlated helper acknowledgement. Button transitions are state
 /// changes, not samples: they never merge and are never dropped silently.
 ///
 /// Two lifecycle domains are kept separate:
@@ -131,14 +133,14 @@ public final class InputSender: @unchecked Sendable {
     private var heldButtons: Set<UInt32> = []
     private var heldButtonsSessionGeneration: UInt64?
 
-    /// Issue #62 observability: one metadata-only `RequestObservation` per
-    /// completed admitted batch, classified with the full failure taxonomy
-    /// (timeout vs stream-closed vs write failure vs malformed vs helper
-    /// failure). Fired from `pointerQueue`; never carries input payloads.
+    /// Issue #62 observability for correlated pointer requests. Streaming
+    /// compositor movement intentionally has no per-frame remote outcome;
+    /// boundary-watch/session failure owns its asynchronous fail-local signal.
+    /// Fired from `pointerQueue`; never carries input payloads.
     public var onDeliveryObservation: (@Sendable (RequestObservation) -> Void)?
 
     /// One transport batch: possibly many merged raw capture events, but
-    /// exactly one delivery acknowledgement obligation. The completion is
+    /// exactly one delivery-result obligation. The completion is
     /// supplied by the enqueue that created the batch and may be nil when a
     /// caller only needs the synchronous admission outcome.
     private struct PendingPointerBatch {
@@ -196,10 +198,11 @@ public final class InputSender: @unchecked Sendable {
     ///
     /// Returns the admission decision synchronously; the completion is bound
     /// to delivery, not admission (ADR-0011):
-    /// - `.acceptedAsNewBatch` — the completion is the batch's single
-    ///   acknowledgement and is invoked exactly once with the batch's
-    ///   `PointerDeliveryResult` (`delivered*`, `partiallyDeliveredMovement`,
-    ///   `failed`, or lifecycle `.cancelled`).
+    /// - `.acceptedAsNewBatch` — the completion owns the batch's single
+    ///   delivery result and is invoked exactly once with
+    ///   `PointerDeliveryResult` (`submittedMovement`, `delivered*`,
+    ///   `partiallyDeliveredMovement`, `failed`, or lifecycle
+    ///   `.cancelled`).
     /// - `.coalescedIntoExistingBatch` — the tail batch's original completion
     ///   owns the single result; this enqueue's completion is never invoked.
     /// - `.shedLocally` — a saturated queue dropped an additive sample before
@@ -231,7 +234,7 @@ public final class InputSender: @unchecked Sendable {
                let mergedKind = Self.coalesced(last.event.kind, event.kind) {
                 // Same-kind accumulation preserves ordering: merging only ever
                 // rewrites the tail batch's payload. Its existing completion
-                // stays the single acknowledgement for the whole batch.
+                // stays the single delivery result for the whole batch.
                 pendingPointers[pendingPointers.count - 1].event = SemanticPointerEvent(mergedKind)
                 if case .scroll = event.kind { scrollMergedIntoTail = true }
                 outcome = .coalescedIntoExistingBatch
@@ -441,8 +444,8 @@ public final class InputSender: @unchecked Sendable {
         // Best-effort accounting: a failed send is attempted, not released.
         var succeeded = 0
         for button in buttons {
-            // Cleanup is best effort. Zero marks an uncorrelated response, so
-            // it cannot satisfy an unrelated in-flight request.
+            // Cleanup is best effort. requestId 0 is the one-way pointer lane,
+            // so the helper emits no correlated response.
             do {
                 try connection.send(CxiFrame(
                     type: .pointerButton,
