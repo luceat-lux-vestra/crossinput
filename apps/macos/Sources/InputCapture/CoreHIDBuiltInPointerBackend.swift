@@ -45,6 +45,7 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
     private var lastRawPrimary = false
     private var lastRawSecondary = false
     private var lastRawOther = false
+    private var lastRawContactPresent = false
 
     func consume(_ data: Data) throws -> [SemanticPointerEvent] {
         try lock.withLock {
@@ -67,7 +68,20 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
                 Diagnostics.log("corehid raw input type=button-transition")
             }
 
+            let contactPresent = report.contactCount > 0
+            let contactTransition = contactPresent != lastRawContactPresent
+            if contactTransition {
+                lastRawContactPresent = contactPresent
+                Diagnostics.log("corehid raw input type=contact-transition")
+            }
+
             let events = try translator.translate(report)
+            if contactTransition, !contactPresent,
+               let resolution = translator.takeTapResolution() {
+                Diagnostics.log(
+                    "corehid tap decision outcome=\(resolution.rawValue)"
+                )
+            }
             for event in events {
                 if case let .button(button, down) = event.kind {
                     _ = button
