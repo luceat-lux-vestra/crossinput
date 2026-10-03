@@ -110,13 +110,15 @@ final class AppModel: ObservableObject {
             capabilityController: inputCapabilityController,
             captureStart: captureStart,
             captureStop: captureStop,
-            hostPointerBackend: nil,
-            useEventTapNoWarp: true
+            hostPointerBackend: HostPointerOwnershipBackends.makeDefault(),
+            useEventTapNoWarp: false
         )
-        // Event-tap no-warp preserves native macOS trackpad semantics while
-        // system-routed UHID remains non-authoritative for remote screen
-        // position. Normal DeX return therefore requires an independent
-        // authoritative boundary signal; emergency return remains fail-safe only.
+        // CoreHID remains the production host-ownership boundary because it is
+        // the only physically proven no-leak built-in-trackpad seizure path.
+        // The consume-only event-tap path is retained as an experiment: it
+        // preserves macOS semantics but has not proven local pointer isolation.
+        // Normal DeX return requires an independent authoritative boundary
+        // signal; emergency return remains fail-safe only.
         handoffController.setAutomaticReturnAuthority(.none)
         targetController = TargetSelectionController(session: reference)
 
