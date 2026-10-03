@@ -231,6 +231,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private let captureStart: @MainActor () -> Bool
     private let captureStop: @MainActor () -> Void
     private let hostPointerBackend: (any HostPointerOwnershipBackend)?
+    private let useEventTapNoWarp: Bool
     private let hostPointerLeaseSlot = HostPointerLeaseSlot()
     private let hostPointerAcquisitionTaskSlot = HostPointerAcquisitionTaskSlot()
     private var transitionGate = TransitionSequenceGate()
@@ -251,7 +252,8 @@ final class ControlHandoffController: @unchecked Sendable {
         capabilityController: InputCapabilityController = InputCapabilityController(),
         captureStart: (@MainActor () -> Bool)? = nil,
         captureStop: (@MainActor () -> Void)? = nil,
-        hostPointerBackend: (any HostPointerOwnershipBackend)? = nil
+        hostPointerBackend: (any HostPointerOwnershipBackend)? = nil,
+        useEventTapNoWarp: Bool = false
     ) {
         self.sender = sender
         self.capture = capture
@@ -260,6 +262,7 @@ final class ControlHandoffController: @unchecked Sendable {
         self.captureStart = captureStart ?? { capture.startTrusted() }
         self.captureStop = captureStop ?? { capture.stop() }
         self.hostPointerBackend = hostPointerBackend
+        self.useEventTapNoWarp = useEventTapNoWarp
 
         switchMachine.onStateChange = { [weak self] transition in
             Task { @MainActor in
@@ -872,10 +875,24 @@ final class ControlHandoffController: @unchecked Sendable {
                 usableSessionLogged = false
             }
 
+            if useEventTapNoWarp {
+                guard let generation = capture.suppressWithoutWarp() else {
+                    sender.cancelPendingPointerEvents()
+                    switchMachine.forceReturn(reason: .remoteUnavailable)
+                    return
+                }
+                lifecycleLock.withLock {
+                    activeSuppressionGeneration = generation
+                }
+                Diagnostics.log(
+                    "host pointer ownership ready source=event-tap-no-warp "
+                        + "captureGeneration=\(generation)"
+                )
+                return
+            }
+
             if hostPointerBackend == nil {
-                // Compatibility seam for the pre-Leap regression suite only.
-                // Production AppModel always injects makeDefault(), including
-                // an unavailable fail-closed backend on unsupported systems.
+                // Legacy compatibility seam for regression tests only.
                 if let generation = capture.suppress() {
                     lifecycleLock.withLock {
                         activeSuppressionGeneration = generation
