@@ -41,7 +41,9 @@ struct AppleTrackpadSemanticTranslatorTests {
             try translator.translate(
                 decode(pointerX: 2, pointerY: -1, contactCount: 1),
                 nowNanos: 1_050_000_000
-            ).isEmpty
+            ) == [
+                SemanticPointerEvent(.move(dx: 2, dy: -1))
+            ]
         )
         #expect(
             try translator.translate(
@@ -87,7 +89,7 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
-    @Test("movement beyond touch slop cancels tap and flushes pending motion")
+    @Test("movement is immediate and beyond touch slop cancels tap")
     func movementCancelsTap() throws {
         var translator = AppleTrackpadSemanticTranslator(
             tapMovementThreshold: 10
@@ -97,15 +99,16 @@ struct AppleTrackpadSemanticTranslatorTests {
             try translator.translate(
                 decode(pointerX: 4, pointerY: 0, contactCount: 1),
                 nowNanos: 3_000_000_000
-            ).isEmpty
+            ) == [
+                SemanticPointerEvent(.move(dx: 4, dy: 0))
+            ]
         )
         #expect(
             try translator.translate(
                 decode(pointerX: 7, pointerY: 0, contactCount: 1),
                 nowNanos: 3_020_000_000
             ) == [
-                SemanticPointerEvent(.move(dx: 4, dy: 0)),
-                SemanticPointerEvent(.move(dx: 7, dy: 0)),
+                SemanticPointerEvent(.move(dx: 7, dy: 0))
             ]
         )
         #expect(
@@ -126,15 +129,16 @@ struct AppleTrackpadSemanticTranslatorTests {
             try translator.translate(
                 decode(pointerX: 3, pointerY: -2, contactCount: 2),
                 nowNanos: 4_000_000_000
-            ).isEmpty
+            ) == [
+                SemanticPointerEvent(.scroll(horizontal: 3, vertical: -2))
+            ]
         )
         #expect(
             try translator.translate(
                 decode(pointerX: 4, pointerY: -3, contactCount: 2),
                 nowNanos: 4_020_000_000
             ) == [
-                SemanticPointerEvent(.scroll(horizontal: 3, vertical: -2)),
-                SemanticPointerEvent(.scroll(horizontal: 4, vertical: -3)),
+                SemanticPointerEvent(.scroll(horizontal: 4, vertical: -3))
             ]
         )
         #expect(
@@ -142,6 +146,30 @@ struct AppleTrackpadSemanticTranslatorTests {
                 decode(contactCount: 0),
                 nowNanos: 4_040_000_000
             ).isEmpty
+        )
+    }
+
+    @Test("sub-slop motion is never buffered behind tap classification")
+    func subSlopMotionIsImmediate() throws {
+        var translator = AppleTrackpadSemanticTranslator(
+            tapMovementThreshold: 12
+        )
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 1, pointerY: 1, contactCount: 1),
+                nowNanos: 4_500_000_000
+            ) == [
+                SemanticPointerEvent(.move(dx: 1, dy: 1))
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 2, pointerY: -1, contactCount: 1),
+                nowNanos: 4_510_000_000
+            ) == [
+                SemanticPointerEvent(.move(dx: 2, dy: -1))
+            ]
         )
     }
 
