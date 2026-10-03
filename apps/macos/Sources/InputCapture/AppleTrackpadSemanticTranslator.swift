@@ -15,8 +15,9 @@ import InputDomain
 ///
 /// A short, low-travel one-contact sequence becomes a primary tap. A short,
 /// low-travel sequence that reaches two contacts becomes a secondary tap.
-/// Deliberate movement crosses a small touch-slop first; pending movement is
-/// then emitted in order so the threshold does not permanently lose distance.
+/// Movement and scroll are never delayed for tap classification: every proven
+/// non-zero HID delta is emitted immediately, while duration/travel are tracked
+/// independently to decide whether lift may also synthesize a tap.
 struct AppleTrackpadSemanticTranslator: Sendable {
     enum TranslationError: Error, Equatable, Sendable {
         case unsupportedContactCount(Int)
@@ -28,8 +29,6 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         let startedAtNanos: UInt64
         var maxContactCount: Int
         var travel: Int64 = 0
-        var pending: [SemanticPointerEvent] = []
-        var movementCommitted = false
         var tapEligible = true
     }
 
@@ -96,7 +95,6 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             defer { gesture = nil }
             guard let gesture,
                   gesture.tapEligible,
-                  !gesture.movementCommitted,
                   nowNanos >= gesture.startedAtNanos,
                   nowNanos - gesture.startedAtNanos <= tapMaxDurationNanos else {
                 return []
@@ -193,37 +191,26 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             current.tapEligible = false
         }
 
-        if dx != 0 || dy != 0 {
-            current.travel += Int64(abs(dx)) + Int64(abs(dy))
-            current.pending.append(
-                contentsOf: try movementEvents(
-                    contactCount: report.contactCount,
-                    dx: dx,
-                    dy: dy
-                )
-            )
-            if current.travel > tapMovementThreshold {
-                current.tapEligible = false
-            }
-        }
-
-        if current.movementCommitted {
-            let events = current.pending
-            current.pending.removeAll(keepingCapacity: true)
+        guard dx != 0 || dy != 0 else {
             gesture = current
-            return events
+            return []
         }
 
-        if !current.tapEligible {
-            current.movementCommitted = true
-            let events = current.pending
-            current.pending.removeAll(keepingCapacity: true)
-            gesture = current
-            return events
+        current.travel += Int64(abs(dx)) + Int64(abs(dy))
+        if current.travel > tapMovementThreshold {
+            current.tapEligible = false
         }
-
         gesture = current
-        return []
+
+        // Pointer fidelity wins over deferred gesture classification. Holding
+        // early deltas until touch-slop is crossed creates a deterministic
+        // pause followed by a burst, which is visible as trackpad lag/jump.
+        // Tap eligibility remains independent and is decided only on lift.
+        return try movementEvents(
+            contactCount: report.contactCount,
+            dx: dx,
+            dy: dy
+        )
     }
 
     private func movementEvents(
