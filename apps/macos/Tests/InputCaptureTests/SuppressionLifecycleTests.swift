@@ -82,6 +82,35 @@ private final class TestEventBox: @unchecked Sendable {
 }
 
 final class SuppressionLifecycleTests: XCTestCase {
+    func testProductionEventTapTopologyKeepsPointerOffModifyingTap() {
+        XCTAssertEqual(
+            InputCapture.pointerTapOptions.rawValue,
+            CGEventTapOptions.listenOnly.rawValue
+        )
+        XCTAssertEqual(
+            InputCapture.keyboardTapOptions.rawValue,
+            CGEventTapOptions.defaultTap.rawValue
+        )
+
+        let pointerTypes = Set(InputCapture.pointerObservedEvents.map(\.rawValue))
+        let keyboardTypes = Set(InputCapture.keyboardCapturedEvents.map(\.rawValue))
+
+        XCTAssertFalse(pointerTypes.isEmpty)
+        XCTAssertFalse(keyboardTypes.isEmpty)
+        XCTAssertTrue(pointerTypes.isDisjoint(with: keyboardTypes))
+
+        XCTAssertTrue(pointerTypes.contains(CGEventType.mouseMoved.rawValue))
+        XCTAssertTrue(pointerTypes.contains(CGEventType.scrollWheel.rawValue))
+        XCTAssertTrue(pointerTypes.contains(CGEventType.leftMouseDown.rawValue))
+        XCTAssertFalse(pointerTypes.contains(CGEventType.keyDown.rawValue))
+
+        XCTAssertTrue(keyboardTypes.contains(CGEventType.keyDown.rawValue))
+        XCTAssertTrue(keyboardTypes.contains(CGEventType.keyUp.rawValue))
+        XCTAssertTrue(keyboardTypes.contains(CGEventType.flagsChanged.rawValue))
+        XCTAssertFalse(keyboardTypes.contains(CGEventType.mouseMoved.rawValue))
+        XCTAssertFalse(keyboardTypes.contains(CGEventType.leftMouseDown.rawValue))
+    }
+
     private func makeCapture(
         released: (@Sendable (SuppressionReleaseReason, UInt64) -> Void)? = nil,
         restore: (() -> Void)? = {}
