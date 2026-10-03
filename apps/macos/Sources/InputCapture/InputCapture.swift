@@ -1764,6 +1764,13 @@ public final class InputCapture: @unchecked Sendable {
         return Unmanaged.passUnretained(event)
     }
 
+    internal func handleEmergencyTapForTesting(
+        type: CGEventType,
+        event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        handleEmergencyTap(type: type, event: event)
+    }
+
     private func requestEmergencyReturn(expectedGeneration: UInt64? = nil) {
         if let onEmergencyReturnRequested {
             onEmergencyReturnRequested()
