@@ -44,6 +44,11 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     private var activeButton: UInt32?
     private var gesture: ContactGesture?
     private var suppressTapUntilLift = false
+    /// CoreHID seizure bypasses macOS' three-finger-drag recognizer. Keep a
+    /// dedicated sequence so 3-contact movement is one primary drag and the
+    /// 3 -> 2 -> 1 partial lift cannot leak scroll/move semantics.
+    private var threeFingerSequenceActive = false
+    private var threeFingerDragActive = false
     private var tapResolution: TapResolution?
 
     private let tapMaxDurationNanos: UInt64
@@ -70,7 +75,7 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         _ report: AppleTrackpadRawReportDecoder.Report,
         nowNanos: UInt64
     ) throws -> [SemanticPointerEvent] {
-        guard (0...2).contains(report.contactCount) else {
+        guard (0...3).contains(report.contactCount) else {
             throw TranslationError.unsupportedContactCount(report.contactCount)
         }
         guard !report.buttons.secondary, !report.buttons.other else {
@@ -85,6 +90,20 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         if report.contactCount == 0 {
             guard !clicked else {
                 throw TranslationError.invalidState
+            }
+            if threeFingerSequenceActive {
+                threeFingerSequenceActive = false
+                gesture = nil
+                suppressTapUntilLift = false
+                if threeFingerDragActive {
+                    threeFingerDragActive = false
+                    return [
+                        SemanticPointerEvent(
+                            .button(button: 0, down: false)
+                        )
+                    ]
+                }
+                return []
             }
             return try finishContact(nowNanos: nowNanos)
         }
@@ -130,6 +149,42 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             return [
                 SemanticPointerEvent(.move(dx: dx, dy: dy))
             ]
+        }
+
+        // Three-finger drag is normally recognized above raw HID by macOS.
+        // While seized, synthesize that semantic directly: the first non-zero
+        // 3-contact movement presses primary, subsequent movement drags, and
+        // leaving 3 contacts releases primary exactly once. Pure 3-finger
+        // contact without movement never clicks.
+        if report.contactCount == 3 {
+            threeFingerSequenceActive = true
+            gesture = nil
+            suppressTapUntilLift = true
+            guard dx != 0 || dy != 0 else { return [] }
+
+            var events: [SemanticPointerEvent] = []
+            if !threeFingerDragActive {
+                threeFingerDragActive = true
+                events.append(
+                    SemanticPointerEvent(.button(button: 0, down: true))
+                )
+            }
+            events.append(
+                SemanticPointerEvent(.move(dx: dx, dy: dy))
+            )
+            return events
+        }
+
+        if threeFingerSequenceActive {
+            var events: [SemanticPointerEvent] = []
+            if threeFingerDragActive {
+                threeFingerDragActive = false
+                events.append(
+                    SemanticPointerEvent(.button(button: 0, down: false))
+                )
+            }
+            // Keep suppressing partial-lift semantics until all contacts lift.
+            return events
         }
 
         // After the physical button is released but contacts remain, suppress
@@ -278,6 +333,16 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     mutating func reset() -> [SemanticPointerEvent] {
         gesture = nil
         suppressTapUntilLift = false
+        threeFingerSequenceActive = false
+
+        if threeFingerDragActive {
+            threeFingerDragActive = false
+            activeButton = nil
+            return [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        }
+
         guard let button = activeButton else { return [] }
         activeButton = nil
         return [
