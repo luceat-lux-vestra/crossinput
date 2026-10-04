@@ -100,6 +100,54 @@ final class HostPointerLeaseSlot: @unchecked Sendable {
         let lease: (any HostPointerOwnershipLease)?
     }
 
+    /// Returns the current ownership without removing it. Physical release
+    /// must succeed before the lifecycle owner clears this slot; otherwise the
+    /// controller would discard the only generation-scoped evidence handle
+    /// while the registry intentionally remains fail-closed.
+    func currentOwnership() -> TakenOwnership? {
+        lock.withLock {
+            guard let captureGeneration =
+                    entry?.captureGeneration ?? pendingCaptureGeneration else {
+                return nil
+            }
+            return TakenOwnership(
+                captureGeneration: captureGeneration,
+                lease: entry?.lease
+            )
+        }
+    }
+
+    func currentOwnership(
+        captureGeneration: UInt64
+    ) -> TakenOwnership? {
+        lock.withLock {
+            let pendingMatches =
+                pendingCaptureGeneration == captureGeneration
+            let entryMatches =
+                entry?.captureGeneration == captureGeneration
+            guard pendingMatches || entryMatches else { return nil }
+            return TakenOwnership(
+                captureGeneration: captureGeneration,
+                lease: entryMatches ? entry?.lease : nil
+            )
+        }
+    }
+
+    func currentOwnership(
+        hostGeneration: UInt64
+    ) -> TakenOwnership? {
+        lock.withLock {
+            guard let entry,
+                  entry.lease.generation == hostGeneration else {
+                return nil
+            }
+            return TakenOwnership(
+                captureGeneration: entry.captureGeneration,
+                lease: entry.lease
+            )
+        }
+    }
+
     /// Removes the current ownership without unseizing. The lifecycle owner
     /// must withdraw keyboard remote admission before releasing the lease.
     func takeCurrent() -> TakenOwnership? {
@@ -217,6 +265,160 @@ private final class HostPointerAcquisitionTaskSlot: @unchecked Sendable {
     }
 }
 
+final class HostPhysicalReleaseAttemptCoordinator: @unchecked Sendable {
+    private final class Attempt {
+        let generation: UInt64
+        private let condition = NSCondition()
+        private var result: Bool?
+
+        init(generation: UInt64) {
+            self.generation = generation
+        }
+
+        func finish(_ result: Bool) {
+            condition.lock()
+            self.result = result
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func wait() -> Bool {
+            condition.lock()
+            while result == nil {
+                condition.wait()
+            }
+            let completed = result ?? false
+            condition.unlock()
+            return completed
+        }
+    }
+
+    private let lock = NSLock()
+    private var activeAttempt: Attempt?
+
+    /// Coalesces all callers for one host-ownership generation onto the same
+    /// synchronous release attempt. A different generation can never join an
+    /// in-flight attempt; that would violate the registry ownership invariant.
+    @discardableResult
+    func perform(
+        generation: UInt64,
+        operation: () -> Bool
+    ) -> Bool {
+        let decision = lock.withLock {
+            () -> (attempt: Attempt, owner: Bool)? in
+            if let activeAttempt {
+                guard activeAttempt.generation == generation else {
+                    return nil
+                }
+                return (activeAttempt, false)
+            }
+            let attempt = Attempt(generation: generation)
+            activeAttempt = attempt
+            return (attempt, true)
+        }
+
+        guard let decision else {
+            return false
+        }
+        if !decision.owner {
+            return decision.attempt.wait()
+        }
+
+        let result = operation()
+        decision.attempt.finish(result)
+        lock.withLock {
+            if activeAttempt === decision.attempt {
+                activeAttempt = nil
+            }
+        }
+        return result
+    }
+}
+
+final class HostReturnAttemptCoordinator: @unchecked Sendable {
+    private final class Attempt {
+        let captureGeneration: UInt64
+        private let condition = NSCondition()
+        private var result: Bool?
+
+        init(captureGeneration: UInt64) {
+            self.captureGeneration = captureGeneration
+        }
+
+        func finish(_ result: Bool) {
+            condition.lock()
+            self.result = result
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func wait() -> Bool {
+            condition.lock()
+            while result == nil {
+                condition.wait()
+            }
+            let completed = result ?? false
+            condition.unlock()
+            return completed
+        }
+    }
+
+    private enum Decision {
+        case owner(Attempt)
+        case join(Attempt)
+        case standalone
+        case reject
+    }
+
+    private let lock = NSLock()
+    private var activeAttempt: Attempt?
+
+    /// Coalesces the complete host-return transaction for one capture
+    /// generation. A caller that arrives after admissions/lease state has been
+    /// cleared may still join the in-flight attempt with a nil generation;
+    /// a concrete different generation is never allowed to join.
+    @discardableResult
+    func perform(
+        captureGeneration: UInt64?,
+        operation: () -> Bool
+    ) -> Bool {
+        let decision = lock.withLock { () -> Decision in
+            if let activeAttempt {
+                if let captureGeneration,
+                   captureGeneration != activeAttempt.captureGeneration {
+                    return .reject
+                }
+                return .join(activeAttempt)
+            }
+
+            guard let captureGeneration else {
+                return .standalone
+            }
+            let attempt = Attempt(captureGeneration: captureGeneration)
+            activeAttempt = attempt
+            return .owner(attempt)
+        }
+
+        switch decision {
+        case .reject:
+            return false
+        case .standalone:
+            return operation()
+        case .join(let attempt):
+            return attempt.wait()
+        case .owner(let attempt):
+            let result = operation()
+            attempt.finish(result)
+            lock.withLock {
+                if activeAttempt === attempt {
+                    activeAttempt = nil
+                }
+            }
+            return result
+        }
+    }
+}
+
 /// Thin composition boundary between capture and the control-handoff machine.
 /// It owns pointer safety and movement accounting, but has no session or ADB
 /// vocabulary. Session failures arrive as `remoteUnavailable()`.
@@ -236,6 +438,10 @@ final class ControlHandoffController: @unchecked Sendable {
     private let useEventTapNoWarp: Bool
     private let hostPointerLeaseSlot = HostPointerLeaseSlot()
     private let hostPointerAcquisitionTaskSlot = HostPointerAcquisitionTaskSlot()
+    private let hostPhysicalReleaseAttemptCoordinator =
+        HostPhysicalReleaseAttemptCoordinator()
+    private let hostReturnAttemptCoordinator =
+        HostReturnAttemptCoordinator()
     private var transitionGate = TransitionSequenceGate()
     /// Serializes the control enable gate with capture callbacks. A callback
     /// already admitted before Disable is invalidated by the pointer
@@ -350,33 +556,37 @@ final class ControlHandoffController: @unchecked Sendable {
         }
         capture.onSuppressionReleased = { [weak self] reason, generation in
             guard let self else { return }
-            // Close admissions synchronously for this exact capture epoch.
-            // A stale release callback cannot invalidate a replacement epoch.
-            let invalidated = self.invalidateControlAdmissions(
-                captureGeneration: generation
-            )
-            // Local pointer ownership must not wait for the main actor.
-            // The capture generation pair prevents a stale callback from
-            // releasing a newer host-pointer lease.
-            self.hostPointerAcquisitionTaskSlot.cancel(
-                captureGeneration: generation
-            )
-            self.hostPointerLeaseSlot
-                .take(captureGeneration: generation)?
-                .lease?
-                .release()
 
-            // Only a capture-originated release that actually closed the
-            // current admission epoch owns the async state-machine return.
-            // Controller-originated paths invalidate first and perform their
-            // own synchronous/ordered state transition.
-            guard invalidated else { return }
+            // Controller-originated capture.release() runs synchronously inside
+            // the already-owned return transaction after admissions and the
+            // lease slot have been cleared. Do not recursively join that same
+            // transaction from its callback thread. A genuinely
+            // capture-originated release still owns either the admission epoch
+            // or its generation-scoped lease/pending slot and therefore enters
+            // the shared whole-return coordinator below.
+            let ownsReturnBoundary =
+                self.lifecycleLock.withLock {
+                    self.activeSuppressionGeneration == generation
+                }
+                || self.hostPointerLeaseSlot.currentOwnership(
+                    captureGeneration: generation
+                ) != nil
+            guard ownsReturnBoundary else { return }
 
-            // Remote cleanup is deliberately after host ownership is already
-            // local, but it must be scheduled from this exact return boundary.
-            // A later MainActor state projection may be superseded by rapid
-            // re-entry and therefore cannot be the sole cleanup owner.
-            self.sender.releaseRemotelyHeldButtons()
+            let released = self.releaseHostOwnershipAndCapture(
+                reason: reason,
+                captureGeneration: generation,
+                captureAlreadyReleased: true
+            )
+            self.sender.cancelPendingPointerEvents()
+            guard released else {
+                Diagnostics.log(
+                    "capture-originated return blocked "
+                        + "reason=host-return-unproven "
+                        + "captureGeneration=\(generation)"
+                )
+                return
+            }
 
             Task { @MainActor in
                 self.switchMachine.forceReturn(
@@ -427,8 +637,11 @@ final class ControlHandoffController: @unchecked Sendable {
         // boundary as well: an inconsistent pending acquisition or published
         // lease must not survive a TCC capability change merely because the
         // presentation gate was already disabled.
-        releaseHostOwnershipAndCapture(reason: .captureStopped)
+        let released = releaseHostOwnershipAndCapture(
+            reason: .captureStopped
+        )
         sender.cancelPendingPointerEvents()
+        guard released else { return }
         captureStop()
     }
 
@@ -485,33 +698,183 @@ final class ControlHandoffController: @unchecked Sendable {
         ) != nil
     }
 
-    /// Synchronous local-return gate shared by every controller-originated
-    /// return path. Admissions are invalidated before pending acquisition is
-    /// cancelled and before an active host lease is dropped.
-    private func releaseHostOwnershipAndCapture(
-        reason: SuppressionReleaseReason
+    /// An acquired lease can lose the publication race after CoreHID has
+    /// already seized the device. Release it exactly once through the same
+    /// physical proof gate used by published ownership. A failed proof is
+    /// terminal for this in-process generation: the CoreHID registry remains
+    /// reserved and blocks replacement seizure until process restart instead
+    /// of spawning a retry loop that cannot change terminal release state.
+    private func releaseUnpublishedLease(
+        _ lease: any HostPointerOwnershipLease,
+        context: String
     ) {
+        let released = lease.release()
         Diagnostics.log(
-            "host return phase=requested reason=\(String(describing: reason))"
+            context
+                + " hostGeneration=\(lease.generation) "
+                + "physical=\(released)"
+        )
+        if !released {
+            Diagnostics.log(
+                context
+                    + " hostGeneration=\(lease.generation) "
+                    + "terminal=true action=registry-held"
+            )
+        }
+    }
+
+    @discardableResult
+    private func releasePublishedLease(
+        _ lease: any HostPointerOwnershipLease,
+        context: String
+    ) -> Bool {
+        let released = hostPhysicalReleaseAttemptCoordinator.perform(
+            generation: lease.generation
+        ) {
+            lease.release()
+        }
+        Diagnostics.log(
+            context
+                + " hostGeneration=\(lease.generation) "
+                + "physical=\(released)"
+        )
+        return released
+    }
+
+    /// Releases the exact published/pending ownership generation without
+    /// discarding its generation-scoped evidence before physical proof succeeds.
+    @discardableResult
+    private func releaseOwnershipIfPresent(
+        captureGeneration: UInt64,
+        context: String
+    ) -> Bool {
+        guard let ownership = hostPointerLeaseSlot.currentOwnership(
+            captureGeneration: captureGeneration
+        ) else {
+            return true
+        }
+
+        if let lease = ownership.lease {
+            let released = releasePublishedLease(
+                lease,
+                context: context
+            )
+            guard released else {
+                Diagnostics.log(
+                    context
+                        + " blocked reason=corehid-still-owned "
+                        + "hostGeneration=\(lease.generation)"
+                )
+                return false
+            }
+            _ = hostPointerLeaseSlot.take(
+                hostGeneration: lease.generation
+            )
+        } else {
+            _ = hostPointerLeaseSlot.take(
+                captureGeneration: captureGeneration
+            )
+        }
+        return true
+    }
+
+    /// Returns the exact capture generation that currently owns (or is
+    /// acquiring) host control. Once the owner has cleared those slots, a
+    /// concurrent caller may pass nil to HostReturnAttemptCoordinator and join
+    /// the still-published in-flight attempt.
+    private func currentHostReturnGeneration() -> UInt64? {
+        let lifecycleGeneration = lifecycleLock.withLock {
+            activeSuppressionGeneration
+        }
+        return lifecycleGeneration
+            ?? hostPointerLeaseSlot.currentOwnership()?.captureGeneration
+    }
+
+    /// Synchronous local-return gate shared by every controller-originated
+    /// return path and by capture-originated release callbacks. The complete
+    /// cursor cleanup -> admission -> keyboard -> CoreHID -> post-release
+    /// cursor observation -> capture transaction is coalesced per capture generation.
+    @discardableResult
+    private func releaseHostOwnershipAndCapture(
+        reason: SuppressionReleaseReason,
+        captureGeneration expectedCaptureGeneration: UInt64? = nil,
+        captureAlreadyReleased: Bool = false
+    ) -> Bool {
+        let returnGeneration =
+            expectedCaptureGeneration ?? currentHostReturnGeneration()
+
+        return hostReturnAttemptCoordinator.perform(
+            captureGeneration: returnGeneration
+        ) {
+            self.performHostReturn(
+                reason: reason,
+                expectedCaptureGeneration: expectedCaptureGeneration,
+                captureAlreadyReleased: captureAlreadyReleased
+            )
+        }
+    }
+
+    private func performHostReturn(
+        reason: SuppressionReleaseReason,
+        expectedCaptureGeneration: UInt64?,
+        captureAlreadyReleased: Bool
+    ) -> Bool {
+        Diagnostics.log(
+            "host return phase=requested reason=\(String(describing: reason)) "
+                + "captureGeneration="
+                + (expectedCaptureGeneration.map { String($0) } ?? "current")
         )
 
-        // Remote cursor shape belongs to the same ownership epoch. Withdraw it
-        // at the synchronous local-return gate before releasing CoreHID.
-        remoteCursorPresenter.restoreLocal()
+        // Cursor presentation is part of the same capture epoch. Cleanup must
+        // complete (or be explicitly reported unproven) before CoreHID release
+        // can begin. The post-CoreHID visible-cursor oracle is evaluated later,
+        // at the boundary where the system can actually converge.
+        let cursorCleanupSucceeded = remoteCursorPresenter.restoreLocal()
+        Diagnostics.log(
+            "host return phase=cursor-cleanup-completed success="
+                + "\(cursorCleanupSucceeded)"
+        )
 
-        let lifecycleGeneration = invalidateControlAdmissionsGeneration()
+        let lifecycleGeneration: UInt64?
+        if let expectedCaptureGeneration {
+            let invalidated = invalidateControlAdmissions(
+                captureGeneration: expectedCaptureGeneration
+            )
+            lifecycleGeneration =
+                invalidated ? expectedCaptureGeneration : nil
+        } else {
+            lifecycleGeneration = invalidateControlAdmissionsGeneration()
+        }
         Diagnostics.log(
             "host return phase=admissions-invalidated captureGeneration="
                 + (lifecycleGeneration.map { String($0) } ?? "none")
         )
-        hostPointerAcquisitionTaskSlot.cancelCurrent()
+
+        if let expectedCaptureGeneration {
+            hostPointerAcquisitionTaskSlot.cancel(
+                captureGeneration: expectedCaptureGeneration
+            )
+        } else {
+            hostPointerAcquisitionTaskSlot.cancelCurrent()
+        }
         Diagnostics.log("host return phase=acquisition-cancelled")
 
-        // Remove publication first, but do not unseize yet. If lifecycle state
-        // was already lost, the slot still carries the capture generation.
-        let ownership = hostPointerLeaseSlot.takeCurrent()
+        // Keep the generation slot until cursor-helper cleanup and physical
+        // CoreHID release are proven. A post-release NSCursor appearance sample
+        // is diagnostic only: the local UI may legitimately choose a cursor
+        // different from the pre-remote snapshot.
+        let ownership: HostPointerLeaseSlot.TakenOwnership?
+        if let expectedCaptureGeneration {
+            ownership = hostPointerLeaseSlot.currentOwnership(
+                captureGeneration: expectedCaptureGeneration
+            )
+        } else {
+            ownership = hostPointerLeaseSlot.currentOwnership()
+        }
         let captureGeneration =
-            lifecycleGeneration ?? ownership?.captureGeneration
+            lifecycleGeneration
+            ?? ownership?.captureGeneration
+            ?? (captureAlreadyReleased ? expectedCaptureGeneration : nil)
 
         // Keyboard must be local before the seizing CoreHID client is dropped.
         if let captureGeneration {
@@ -531,15 +894,53 @@ final class ControlHandoffController: @unchecked Sendable {
             Diagnostics.log(
                 "host return phase=corehid-release-requested hostGeneration=\(lease.generation)"
             )
-            lease.release()
-            Diagnostics.log(
-                "host return phase=corehid-release-completed hostGeneration=\(lease.generation)"
+            let released = releasePublishedLease(
+                lease,
+                context: "host return phase=corehid-release-completed"
             )
-        } else {
-            Diagnostics.log("host return phase=corehid-release-skipped reason=no-active-lease")
+            guard released else {
+                Diagnostics.log(
+                    "host return phase=blocked reason=corehid-still-owned "
+                        + "hostGeneration=\(lease.generation)"
+                )
+                return false
+            }
+        } else if ownership == nil {
+            Diagnostics.log(
+                "host return phase=corehid-release-skipped reason=no-active-lease"
+            )
         }
 
-        if let captureGeneration {
+        // The helper cleanup result is the presentation-ownership proof: the
+        // helper removed cursor ownership, disabled its private background
+        // authority, and exited before CoreHID release. NSCursor.currentSystem
+        // after physical release is still useful telemetry, but exact equality
+        // with a pre-remote TIFF snapshot is not a sound ownership oracle: the
+        // local application under the pointer may legitimately select a
+        // different native cursor.
+        let cursorAppearanceRestored = remoteCursorPresenter.observeLocalAppearanceRestored()
+        Diagnostics.log(
+            "host return phase=cursor-local-observation-completed restored="
+                + "\(cursorAppearanceRestored)"
+        )
+        guard cursorCleanupSucceeded else {
+            Diagnostics.log(
+                "host return phase=blocked reason=cursor-cleanup-unproven"
+            )
+            return false
+        }
+
+        if let lease = ownership?.lease {
+            _ = hostPointerLeaseSlot.take(
+                hostGeneration: lease.generation
+            )
+        } else if let ownership {
+            _ = hostPointerLeaseSlot.take(
+                captureGeneration: ownership.captureGeneration
+            )
+        }
+
+        if let captureGeneration, !captureAlreadyReleased {
             Diagnostics.log(
                 "host return phase=capture-release-requested captureGeneration=\(captureGeneration)"
             )
@@ -547,18 +948,17 @@ final class ControlHandoffController: @unchecked Sendable {
             Diagnostics.log(
                 "host return phase=capture-release-completed captureGeneration=\(captureGeneration)"
             )
+        } else if captureAlreadyReleased {
+            Diagnostics.log(
+                "host return phase=capture-release-skipped reason=already-released"
+            )
+        }
 
-            // Schedule remote persistent-state cleanup immediately after the
-            // synchronous host return. Do not depend on the asynchronous
-            // state-machine/UI projection: rapid re-entry can legitimately
-            // make an older local transition stale before MainActor applies it.
+        if captureGeneration != nil {
             sender.releaseRemotelyHeldButtons()
         }
-        // No generation means another return path already invalidated this
-        // ownership period. Never issue an unscoped release here: a concurrent
-        // replacement epoch may already exist by the time this stale caller
-        // reaches the capture boundary.
 
+        return true
     }
 
     @MainActor
@@ -575,8 +975,11 @@ final class ControlHandoffController: @unchecked Sendable {
 
         // Host ownership and keyboard suppression return locally before any
         // remote drain/cleanup. Neither may depend on transport progress.
-        releaseHostOwnershipAndCapture(reason: .captureStopped)
+        let released = releaseHostOwnershipAndCapture(
+            reason: .captureStopped
+        )
         sender.cancelPendingPointerEvents()
+        guard released else { return }
 
         let deactivation = switchMachine.deactivate()
         if let deactivation {
@@ -641,8 +1044,11 @@ final class ControlHandoffController: @unchecked Sendable {
         retireBoundaryWatch()
         if switchMachine.state == .edgeArmed ||
             switchMachine.state == .remoteActive {
-            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .remoteUnavailable
+            )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
     }
@@ -667,17 +1073,22 @@ final class ControlHandoffController: @unchecked Sendable {
                   capture.isSuppressed,
                   edge == Self.remoteReturnEdge(
                       for: switchMachine.entryEdge
-                  ),
-                  switchMachine.beginAuthoritativeBoundaryReturn() else {
+                  ) else {
                 return
             }
 
-            // Authoritative boundary confirmation starts only the first phase.
-            // Restore native host ownership synchronously before localActive is
-            // published, matching every other #151 return path.
+            // Do not publish .returning while CoreHID is still physically
+            // seized. Keep the machine remote-owned while the controller holds
+            // the internal pending physical-return attempt.
             retireBoundaryWatch()
-            releaseHostOwnershipAndCapture(reason: .normalReturn)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .normalReturn
+            )
             sender.cancelPendingPointerEvents()
+            guard released,
+                  switchMachine.beginAuthoritativeBoundaryReturn() else {
+                return
+            }
             switchMachine.completeReturn(reason: .boundaryCrossed)
 
         case let .failed(token, _):
@@ -687,8 +1098,11 @@ final class ControlHandoffController: @unchecked Sendable {
             }
             guard matches else { return }
             retireBoundaryWatch()
-            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .remoteUnavailable
+            )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
     }
@@ -925,16 +1339,27 @@ final class ControlHandoffController: @unchecked Sendable {
         // Emergency return is fail-safe only; ordinary product return is the
         // authoritative remote-boundary path.
         retireBoundaryWatch()
-        releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
+        let released = releaseHostOwnershipAndCapture(
+            reason: .emergencyHotkey
+        )
         sender.cancelPendingPointerEvents()
+        guard released else {
+            Diagnostics.log(
+                "emergency return phase=blocked reason=corehid-still-owned"
+            )
+            return
+        }
         Diagnostics.log("emergency return phase=state-return-requested")
         switchMachine.forceReturn()
     }
 
     func remoteUnavailable() {
         retireBoundaryWatch()
-        releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+        let released = releaseHostOwnershipAndCapture(
+            reason: .remoteUnavailable
+        )
         sender.cancelPendingPointerEvents()
+        guard released else { return }
         switchMachine.forceReturn(reason: .remoteUnavailable)
     }
 
@@ -950,6 +1375,12 @@ final class ControlHandoffController: @unchecked Sendable {
 
     func isEmergencyReentryBlockedForTesting() -> Bool {
         lifecycleLock.withLock { emergencyReentryBlocked }
+    }
+
+    func hasPublishedHostPointerLeaseForTesting(
+        generation: UInt64
+    ) -> Bool {
+        hostPointerLeaseSlot.isCurrent(hostGeneration: generation)
     }
 
     func hasActiveHostPointerLeaseForTesting(
@@ -1113,8 +1544,11 @@ final class ControlHandoffController: @unchecked Sendable {
 
     private func handleButtonSafetyRejection(controlEpoch: UInt64) {
         guard isControlEpochCurrent(controlEpoch), isEdgeSwitchEnabled else { return }
-        releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+        let released = releaseHostOwnershipAndCapture(
+            reason: .remoteUnavailable
+        )
         sender.cancelPendingPointerEvents()
+        guard released else { return }
         // A rejected button transition means remote button state can no longer
         // be trusted: release whatever was previously accepted by the helper
         // before treating cleanup as complete (best effort, generation-safe).
@@ -1164,23 +1598,32 @@ final class ControlHandoffController: @unchecked Sendable {
             // Explicit-coordinate routes retain the existing delivered
             // movement authority. Native host ownership is still released
             // before localActive is published.
-            let returnStarted =
-                switchMachine.beginBoundaryReturnIfNeeded(
+            let returnPrepared =
+                switchMachine.prepareBoundaryReturnIfNeeded(
                     requestedDx: CGFloat(requestedDx),
                     requestedDy: CGFloat(requestedDy),
                     deliveredDx: CGFloat(deliveredDx),
                     deliveredDy: CGFloat(deliveredDy)
                 )
-            if returnStarted {
-                releaseHostOwnershipAndCapture(reason: .normalReturn)
+            if returnPrepared {
+                let released = releaseHostOwnershipAndCapture(
+                    reason: .normalReturn
+                )
                 sender.cancelPendingPointerEvents()
+                guard released,
+                      switchMachine.beginAuthoritativeBoundaryReturn() else {
+                    return
+                }
                 switchMachine.completeReturn(reason: .boundaryCrossed)
             }
         case .partiallyDeliveredMovement:
             // Partial delivery is a remote-availability failure, not a valid
             // normal-boundary observation. Fail local before publishing state.
-            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .remoteUnavailable
+            )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(reason: .remoteUnavailable)
         case .cancelled:
             recordCancelledDelivery()
@@ -1190,8 +1633,11 @@ final class ControlHandoffController: @unchecked Sendable {
         case .failed:
             // A helper-side failure is a control-oriented availability loss.
             // Restore host ownership synchronously before state-machine/UI work.
-            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .remoteUnavailable
+            )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(reason: .remoteUnavailable)
         }
     }
@@ -1223,10 +1669,11 @@ final class ControlHandoffController: @unchecked Sendable {
             Diagnostics.log(
                 "keyboard delivery failed action=local-return"
             )
-            releaseHostOwnershipAndCapture(
+            let released = releaseHostOwnershipAndCapture(
                 reason: .remoteUnavailable
             )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(
                 reason: .remoteUnavailable
             )
@@ -1302,8 +1749,11 @@ final class ControlHandoffController: @unchecked Sendable {
             }
 
             guard isEdgeSwitchEnabled else {
-                releaseHostOwnershipAndCapture(reason: .captureStopped)
+                let released = releaseHostOwnershipAndCapture(
+                    reason: .captureStopped
+                )
                 sender.cancelPendingPointerEvents()
+                guard released else { return }
                 switchMachine.forceReturn(reason: .deactivated)
                 return
             }
@@ -1339,14 +1789,26 @@ final class ControlHandoffController: @unchecked Sendable {
 
             beginHostPointerAcquisition()
 
-        case .localActive, .returning, .disabled:
+        case .returning:
+            // Production return paths may enter .returning only after physical
+            // host ownership has already been restored. Never re-enter release
+            // from the projection callback for the same generation.
             retireBoundaryWatch()
-            // Local-return fallback: preserve the capture generation until
-            // remote keyboard admission is withdrawn and the CoreHID lease
-            // has been released. Most paths already linearize synchronously;
-            // this callback remains the fail-safe owner for direct transitions.
-            releaseHostOwnershipAndCapture(reason: releaseReason(for: reason))
+
+        case .localActive, .disabled:
+            retireBoundaryWatch()
+            // Fail-safe projection for direct lifecycle transitions. Normal
+            // controller-owned paths have already removed the lease, so this
+            // is a no-op there rather than a second physical release attempt.
+            let released = releaseHostOwnershipAndCapture(
+                reason: releaseReason(for: reason)
+            )
             sender.cancelPendingPointerEvents()
+            if !released {
+                Diagnostics.log(
+                    "host return projection blocked reason=corehid-still-owned"
+                )
+            }
 
         case .edgeArmed:
             if switchMachine.requiresRemotePreparation {
@@ -1392,8 +1854,11 @@ final class ControlHandoffController: @unchecked Sendable {
             // clean only the new generation and leave a stale seizing lease or
             // acquisition task behind; fail the entire host-ownership boundary
             // local before returning the state machine.
-            releaseHostOwnershipAndCapture(reason: .remoteUnavailable)
+            let released = releaseHostOwnershipAndCapture(
+                reason: .remoteUnavailable
+            )
             sender.cancelPendingPointerEvents()
+            guard released else { return }
             switchMachine.forceReturn(reason: .remoteUnavailable)
             return
         }
@@ -1426,7 +1891,10 @@ final class ControlHandoffController: @unchecked Sendable {
                 do {
                     try Task.checkCancellation()
                 } catch {
-                    lease.release()
+                    self.releaseUnpublishedLease(
+                        lease,
+                        context: "cancelled acquisition release"
+                    )
                     return
                 }
 
@@ -1443,7 +1911,10 @@ final class ControlHandoffController: @unchecked Sendable {
                     lease,
                     captureGeneration: captureGeneration
                 ) else {
-                    lease.release()
+                    self.releaseUnpublishedLease(
+                        lease,
+                        context: "failed publication release"
+                    )
 
                     // Publication can lose for two different reasons:
                     // local return already invalidated this capture epoch, or
@@ -1491,10 +1962,12 @@ final class ControlHandoffController: @unchecked Sendable {
                     let invalidated = self.invalidateControlAdmissions(
                         captureGeneration: captureGeneration
                     )
-                    self.hostPointerLeaseSlot
-                        .take(captureGeneration: captureGeneration)?
-                        .lease?
-                        .release()
+                    let physicallyReleased =
+                        self.releaseOwnershipIfPresent(
+                            captureGeneration: captureGeneration,
+                            context: "post-publication validation release"
+                        )
+                    guard physicallyReleased else { return }
                     self.capture.release(
                         reason: .remoteUnavailable,
                         generation: captureGeneration
@@ -1507,34 +1980,56 @@ final class ControlHandoffController: @unchecked Sendable {
                     return
                 }
 
+                // Cursor presentation is part of the remote-epoch commit,
+                // not a best-effort decoration after input admission. CoreHID
+                // already owns/fixes the host pointer here, so prove the
+                // WindowServer-visible cursor first while keyboard/pointer
+                // delivery remains locally inadmissible.
+                let cursorReady = await self.remoteCursorPresenter.presentRemote(
+                    edge: self.switchMachine.entryEdge,
+                    onFailure: { [weak self] in
+                        self?.handleRemoteCursorFailure(
+                            captureGeneration: captureGeneration,
+                            hostGeneration: lease.generation,
+                            acquisitionEpoch: epoch
+                        )
+                    }
+                )
+                guard cursorReady,
+                      lease.isActive,
+                      self.isControlEpochCurrent(epoch),
+                      self.isEdgeSwitchEnabled,
+                      self.capture.isSuppressed,
+                      self.hostPointerLeaseSlot.isCurrent(
+                          hostGeneration: lease.generation,
+                          captureGeneration: captureGeneration
+                      ) else {
+                    self.handleRemoteCursorFailure(
+                        captureGeneration: captureGeneration,
+                        hostGeneration: lease.generation,
+                        acquisitionEpoch: epoch
+                    )
+                    return
+                }
+
+                // This is the remote-input commit point. No CoreHID pointer
+                // event or keyboard transition may be admitted before cursor
+                // presentation has independently reached READY.
                 guard self.capture.activateExternalPointerOwner(
                     generation: captureGeneration
                 ) else {
-                    let invalidated = self.invalidateControlAdmissions(
-                        captureGeneration: captureGeneration
+                    self.handleRemoteCursorFailure(
+                        captureGeneration: captureGeneration,
+                        hostGeneration: lease.generation,
+                        acquisitionEpoch: epoch
                     )
-                    self.hostPointerLeaseSlot
-                        .take(captureGeneration: captureGeneration)?
-                        .lease?
-                        .release()
-                    self.capture.release(
-                        reason: .remoteUnavailable,
-                        generation: captureGeneration
-                    )
-                    if invalidated {
-                        self.switchMachine.forceReturn(
-                            reason: .remoteUnavailable
-                        )
-                    }
                     return
                 }
 
-                self.remoteCursorPresenter.presentRemote(
-                    edge: self.switchMachine.entryEdge
-                )
                 Diagnostics.log(
                     "host pointer ownership ready captureGeneration=\(captureGeneration) "
-                        + "hostGeneration=\(lease.generation)"
+                        + "hostGeneration=\(lease.generation) cursorReady=true "
+                        + "inputAdmission=true"
                 )
             } catch is CancellationError {
                 return
@@ -1548,10 +2043,12 @@ final class ControlHandoffController: @unchecked Sendable {
                 let invalidated = self.invalidateControlAdmissions(
                     captureGeneration: captureGeneration
                 )
-                self.hostPointerLeaseSlot
-                    .take(captureGeneration: captureGeneration)?
-                    .lease?
-                    .release()
+                let physicallyReleased =
+                    self.releaseOwnershipIfPresent(
+                        captureGeneration: captureGeneration,
+                        context: "acquisition failure release"
+                    )
+                guard physicallyReleased else { return }
                 self.capture.release(
                     reason: .remoteUnavailable,
                     generation: captureGeneration
@@ -1576,12 +2073,45 @@ final class ControlHandoffController: @unchecked Sendable {
         }
     }
 
+    private func handleRemoteCursorFailure(
+        captureGeneration: UInt64,
+        hostGeneration: UInt64,
+        acquisitionEpoch: UInt64
+    ) {
+        guard isControlEpochCurrent(acquisitionEpoch),
+              hostPointerLeaseSlot.isCurrent(
+                  hostGeneration: hostGeneration,
+                  captureGeneration: captureGeneration
+              ),
+              lifecycleLock.withLock({
+                  activeSuppressionGeneration == captureGeneration
+              }) else {
+            return
+        }
+
+        Diagnostics.log(
+            "host cursor presentation failed action=local-return "
+                + "captureGeneration=\(captureGeneration) "
+                + "hostGeneration=\(hostGeneration)"
+        )
+
+        let released = releaseHostOwnershipAndCapture(
+            reason: .remoteUnavailable
+        )
+        sender.cancelPendingPointerEvents()
+        guard released,
+              switchMachine.state == .remoteActive else {
+            return
+        }
+        switchMachine.forceReturn(reason: .remoteUnavailable)
+    }
+
     private func handleHostPointerFailure(
         hostGeneration: UInt64,
         acquisitionEpoch: UInt64
     ) {
         guard let ownership =
-                hostPointerLeaseSlot.take(
+                hostPointerLeaseSlot.currentOwnership(
                     hostGeneration: hostGeneration
                 ) else {
             // A failure before lease publication is handled by acquire()
@@ -1594,28 +2124,22 @@ final class ControlHandoffController: @unchecked Sendable {
                 + "hostGeneration=\(hostGeneration)"
         )
 
+        // A published CoreHID failure may arrive after cursor READY and remote
+        // input admission. It therefore owns no bespoke teardown path: join
+        // the same generation-scoped cursor -> keyboard -> physical release ->
+        // final cursor proof -> capture transaction used by every other return
+        // source. This also makes a concurrent emergency/normal return wait on
+        // the same result instead of racing past cursor cleanup.
         let belongsToAcquisitionEpoch =
             isControlEpochCurrent(acquisitionEpoch)
-        let invalidated = invalidateControlAdmissions(
-            captureGeneration: captureGeneration
-        )
-        hostPointerAcquisitionTaskSlot.cancel(
-            captureGeneration: captureGeneration
-        )
-
-        // Failure follows the same return linearization as normal paths:
-        // keyboard local -> CoreHID unseize -> capture teardown.
-        _ = capture.deactivateExternalPointerOwner(
-            generation: captureGeneration
-        )
-        ownership.lease?.release()
-        capture.release(
+        let released = releaseHostOwnershipAndCapture(
             reason: .remoteUnavailable,
-            generation: captureGeneration
+            captureGeneration: captureGeneration
         )
+        sender.cancelPendingPointerEvents()
 
-        guard belongsToAcquisitionEpoch,
-              invalidated,
+        guard released,
+              belongsToAcquisitionEpoch,
               isEdgeSwitchEnabled,
               switchMachine.state == .remoteActive else {
             return

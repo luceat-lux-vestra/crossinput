@@ -177,6 +177,37 @@ final class EdgeSwitchStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .localActive)
     }
 
+    func testPreparedBoundaryReturnStaysRemoteUntilLifecycleOwnerBeginsReturn() {
+        let machine = makeRemoteActive(edge: .right)
+
+        XCTAssertFalse(
+            machine.prepareBoundaryReturnIfNeeded(
+                requestedDx: 10,
+                requestedDy: 0,
+                deliveredDx: 10,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertTrue(
+            machine.prepareBoundaryReturnIfNeeded(
+                requestedDx: -80,
+                requestedDy: 0,
+                deliveredDx: -20,
+                deliveredDy: 0
+            )
+        )
+        XCTAssertEqual(
+            machine.state,
+            .remoteActive,
+            "physical release preparation must not publish .returning"
+        )
+
+        XCTAssertTrue(machine.beginAuthoritativeBoundaryReturn())
+        XCTAssertEqual(machine.state, .returning)
+        machine.completeReturn(reason: .boundaryCrossed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
     func testPartiallyAbsorbedPullBackCreditsFullRequestedIntent() {
         // What the wall eats cannot slow the user's exit: partial absorption
         // in the return direction still credits the whole requested delta.

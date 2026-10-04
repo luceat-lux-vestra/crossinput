@@ -1,5 +1,6 @@
 @preconcurrency import Dispatch
 import Foundation
+import Darwin
 
 /// Diagnostics/logging utilities.
 ///
@@ -14,8 +15,8 @@ import Foundation
 /// - `log(_:)` is called on the event-tap thread; it only acquires the buffer
 ///   lock to append a line and snapshot the buffer when it fills. The current
 ///   thread never touches the file.
-/// - The writer queue is the only owner of the `FileHandle`; every snapshot is
-///   appended serially so concurrent flushes cannot interleave or lose lines.
+/// - Each process serializes its own flushes on writerQueue; the final file
+///   append uses O_APPEND so helper processes cannot race a seek-to-end/write.
 /// - `flushSync()` blocks until every snapshot enqueued before it is written
 ///   (used by app teardown and tests).
 public enum Diagnostics {
@@ -145,17 +146,35 @@ public enum Diagnostics {
         return "\(stamp) \(message)"
     }
 
-    /// Runs only on writerQueue; the sole writer of the log file.
+    /// Runs only on this process' writerQueue. O_APPEND is still required:
+    /// CoreHID ownership and cursor authority run in disposable child
+    /// processes that share the same diagnostic file. seek-to-end followed by
+    /// write is not an inter-process atomic append boundary.
     private static func append(_ lines: [String]) {
         guard !lines.isEmpty else { return }
         let payload = lines.joined(separator: "\n") + "\n"
         guard let data = payload.data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: logURL) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: logURL)
+
+        let fd = Darwin.open(
+            logURL.path,
+            O_WRONLY | O_CREAT | O_APPEND,
+            S_IRUSR | S_IWUSR
+        )
+        guard fd >= 0 else { return }
+        defer { _ = Darwin.close(fd) }
+
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                let written = Darwin.write(
+                    fd,
+                    baseAddress.advanced(by: offset),
+                    rawBuffer.count - offset
+                )
+                guard written > 0 else { return }
+                offset += written
+            }
         }
     }
 }

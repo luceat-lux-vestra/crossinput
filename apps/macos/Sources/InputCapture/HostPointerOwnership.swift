@@ -12,17 +12,20 @@ public protocol HostPointerOwnershipLease: AnyObject, Sendable {
 
     /// Transfers fail-safe release responsibility to the Control lifecycle.
     ///
-    /// Before this point a backend may have to release itself if monitoring
-    /// fails before publication. After this point only the lifecycle owner may
-    /// unseize, because it must withdraw keyboard admission first.
+    /// Before this point acquisition cleanup remains backend-owned. After
+    /// publication, Control owns the release ordering barrier and backend
+    /// failure callbacks must converge on that same lifecycle release path.
     func transferReleaseResponsibilityToLifecycleOwner()
 
-    /// Must restore local host pointer ownership synchronously.
-    func release()
+    /// Returns true only after local host pointer ownership is physically
+    /// restored. A false result means the caller must retain the lease and
+    /// must not publish localActive yet.
+    @discardableResult
+    func release() -> Bool
 }
 
 public extension HostPointerOwnershipLease {
-    /// Backends without an independent self-release path need no extra state.
+    /// Backends without a publication-sensitive release path need no state.
     func transferReleaseResponsibilityToLifecycleOwner() {}
 }
 
