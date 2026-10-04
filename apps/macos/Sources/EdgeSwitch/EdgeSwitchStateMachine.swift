@@ -338,13 +338,30 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         }
     }
 
-    /// Accounts one remote movement and, when the legacy movement authority
-    /// crosses its threshold, transitions only to `.returning`.
-    ///
-    /// The lifecycle owner uses this coordinated form so native host-pointer
-    /// ownership can be restored synchronously before `.localActive` is
-    /// published. The compatibility `pointerMoved` wrapper above completes
-    /// immediately for state-machine-only callers.
+    /// Accounts one remote movement and reports when the legacy movement
+    /// authority has crossed its return threshold, without publishing a state
+    /// transition. The lifecycle owner uses this preparation form to restore
+    /// physical host ownership before entering `.returning`.
+    @discardableResult
+    public func prepareBoundaryReturnIfNeeded(
+        requestedDx: CGFloat,
+        requestedDy: CGFloat,
+        deliveredDx: CGFloat,
+        deliveredDy: CGFloat
+    ) -> Bool {
+        run {
+            accountBoundaryReturnIfNeeded(
+                requestedDx: requestedDx,
+                requestedDy: requestedDy,
+                deliveredDx: deliveredDx,
+                deliveredDy: deliveredDy
+            )
+        }
+    }
+
+    /// Compatibility form for state-machine-only callers. Production control
+    /// code should use prepareBoundaryReturnIfNeeded(), release physical host
+    /// ownership, then beginAuthoritativeBoundaryReturn().
     @discardableResult
     public func beginBoundaryReturnIfNeeded(
         requestedDx: CGFloat,
@@ -353,56 +370,68 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         deliveredDy: CGFloat
     ) -> Bool {
         run {
-            guard stateStorage == .remoteActive else { return false }
-            guard automaticReturnAuthority == .relativeMovement else { return false }
-            // Zero delivery is not a movement: must not consume the first-event
-            // exemption (a failed/empty send should leave the machine untouched).
-            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else {
+            guard accountBoundaryReturnIfNeeded(
+                requestedDx: requestedDx,
+                requestedDy: requestedDy,
+                deliveredDx: deliveredDx,
+                deliveredDy: deliveredDy
+            ) else {
                 return false
             }
-            let edge = entryEdgeStorage
-            let requestedDelta = Self.androidDirectedDelta(
-                entryEdge: edge,
-                dx: requestedDx,
-                dy: requestedDy
-            )
-            let deliveredDelta = Self.androidDirectedDelta(
-                entryEdge: edge,
-                dx: deliveredDx,
-                dy: deliveredDy
-            )
-            // Issue #45: return-direction intent is credited in full even when
-            // the helper's display-bound clamp absorbed all of it; inward
-            // movement only ever advances by what was accepted.
-            let delta = requestedDelta < 0 ? requestedDelta : deliveredDelta
-            let first = !hasReceivedFirstMove
-            hasReceivedFirstMove = true
-            if first {
-                // The first event after entering is warp/synthetic residual, not
-                // deliberate user movement. It never returns control and never
-                // leaves a negative baseline that would poison later decisions:
-                // clamp to 0 (issue #37).
-                virtualAxisPosition = max(0, delta)
-            } else {
-                virtualAxisPosition += delta
-            }
-            let position = virtualAxisPosition
-            if isDiagnosticsEnabled {
-                Diagnostics.log(
-                    "edge pointerMoved entry=\(edge.rawValue) state=\(stateStorage.rawValue) "
-                        + "movement=received first=\(first) "
-                        + "boundaryClamped=\(requestedDelta < 0 && deliveredDelta != requestedDelta)"
-                )
-            }
-            // The first event after entering never returns (issue #37); leftover
-            // warp/synthetic deltas must not bounce the user out of the remote target.
-            guard !first, position <= -returnHysteresis else { return false }
-
-            virtualAxisPosition = 0
-            hasReceivedFirstMove = false
             transition(to: .returning, reason: .boundaryCrossed)
             return true
         }
+    }
+
+    private func accountBoundaryReturnIfNeeded(
+        requestedDx: CGFloat,
+        requestedDy: CGFloat,
+        deliveredDx: CGFloat,
+        deliveredDy: CGFloat
+    ) -> Bool {
+        guard stateStorage == .remoteActive else { return false }
+        guard automaticReturnAuthority == .relativeMovement else { return false }
+        // Zero delivery is not a movement: must not consume the first-event
+        // exemption (a failed/empty send should leave the machine untouched).
+        guard requestedDx != 0 || requestedDy != 0 ||
+                deliveredDx != 0 || deliveredDy != 0 else {
+            return false
+        }
+        let edge = entryEdgeStorage
+        let requestedDelta = Self.androidDirectedDelta(
+            entryEdge: edge,
+            dx: requestedDx,
+            dy: requestedDy
+        )
+        let deliveredDelta = Self.androidDirectedDelta(
+            entryEdge: edge,
+            dx: deliveredDx,
+            dy: deliveredDy
+        )
+        // Issue #45: return-direction intent is credited in full even when
+        // the helper's display-bound clamp absorbed all of it; inward
+        // movement only ever advances by what was accepted.
+        let delta = requestedDelta < 0 ? requestedDelta : deliveredDelta
+        let first = !hasReceivedFirstMove
+        hasReceivedFirstMove = true
+        if first {
+            virtualAxisPosition = max(0, delta)
+        } else {
+            virtualAxisPosition += delta
+        }
+        let position = virtualAxisPosition
+        if isDiagnosticsEnabled {
+            Diagnostics.log(
+                "edge pointerMoved entry=\(edge.rawValue) state=\(stateStorage.rawValue) "
+                    + "movement=received first=\(first) "
+                    + "boundaryClamped=\(requestedDelta < 0 && deliveredDelta != requestedDelta)"
+            )
+        }
+        guard !first, position <= -returnHysteresis else { return false }
+
+        virtualAxisPosition = 0
+        hasReceivedFirstMove = false
+        return true
     }
 
     public func completeReturn(reason: TransitionReason) {

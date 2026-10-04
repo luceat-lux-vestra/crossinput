@@ -12,7 +12,7 @@ protocol RemoteCursorPresenting: AnyObject, Sendable {
     ) async -> Bool
     @discardableResult
     func restoreLocal() -> Bool
-    func proveLocalRestored() -> Bool
+    func observeLocalAppearanceRestored() -> Bool
 }
 
 protocol RemoteCursorHelperControlling: AnyObject, Sendable {
@@ -68,7 +68,7 @@ final class RemoteCursorHelperProcessController:
     }
 
     private static let readyByte: UInt8 = 0xa5
-    private static let readyTimeoutMilliseconds: Int32 = 1_000
+    private static let readyTimeoutMilliseconds: Int32 = 2_500
     private static let gracefulExitTimeout: TimeInterval = 0.35
 
     private let lock = NSLock()
@@ -881,9 +881,10 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         edge: ScreenEdge,
         onFailure: @escaping @Sendable () -> Void
     ) async -> Bool {
-        // Keep a parent-side appearance proof independent of the disposable
-        // helper. The child can request/clean up restoration while CoreHID is
-        // still seized; this snapshot is checked only after physical release.
+        // Keep a parent-side appearance snapshot independent of the disposable
+        // helper. It is sampled after physical release for diagnostics only;
+        // local UI may legitimately choose a different cursor once ownership
+        // has returned to macOS.
         let localAppearance = Self.capturePreRemoteAppearance()
         appearanceLock.withLock {
             preRemoteAppearance = localAppearance
@@ -912,7 +913,7 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         return cleanupSucceeded
     }
 
-    func proveLocalRestored() -> Bool {
+    func observeLocalAppearanceRestored() -> Bool {
         guard let expected = appearanceLock.withLock({
             preRemoteAppearance
         }) else {
@@ -928,15 +929,18 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
             usleep(5_000)
         }
 
-        if restored {
-            appearanceLock.withLock {
-                if preRemoteAppearance == expected {
-                    preRemoteAppearance = nil
-                }
+        // This is an observation for diagnostics, not an ownership proof.
+        // Once the helper has removed its cursor rects, disabled background
+        // authority, exited, and CoreHID has physically unseized, macOS owns
+        // cursor selection again. The foreground/local UI is allowed to pick
+        // an appearance different from the pre-remote snapshot.
+        appearanceLock.withLock {
+            if preRemoteAppearance == expected {
+                preRemoteAppearance = nil
             }
         }
         Diagnostics.log(
-            "host cursor parent restore proof restored=\(restored) "
+            "host cursor parent local appearance observation restored=\(restored) "
                 + "phase=post-corehid-release"
         )
         return restored

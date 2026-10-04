@@ -11,10 +11,17 @@ import Delivery
 
 @main
 struct Ampersand: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
 
     init() {
+        // Helper modes are process entry points, not alternate UI states.
+        // Run them before constructing AppModel so a disposable ownership or
+        // cursor child cannot initialize the main control/session graph.
+        CoreHIDPointerOwnershipHelperMode.runIfRequested()
+        RemoteCursorHelperMode.runIfRequested()
+
         NSApplication.shared.setActivationPolicy(.accessory)
+        _model = State(initialValue: AppModel())
     }
 
     var body: some Scene {
@@ -117,8 +124,11 @@ final class AppModel: ObservableObject {
             hostPointerBackend: HostPointerOwnershipBackends.makeDefault(),
             useEventTapNoWarp: false
         )
-        // CoreHID remains the production host-ownership boundary because it is
-        // the only physically proven no-leak built-in-trackpad seizure path.
+        // CoreHID remains the production host-ownership boundary because its
+        // built-in-trackpad exclusivity is physically proven. Release safety is
+        // a separate proof obligation: the disposable ownership process must
+        // exit and an independent witness must observe deviceUnseized before
+        // Control may publish local ownership.
         // The consume-only event-tap path is retained as an experiment: it
         // preserves macOS semantics but has not proven local pointer isolation.
         // Normal DeX return requires an independent authoritative boundary
