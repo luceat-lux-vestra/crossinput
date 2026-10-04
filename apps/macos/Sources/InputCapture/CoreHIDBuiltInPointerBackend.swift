@@ -398,12 +398,12 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
 
     /// Non-blocking local-return boundary.
     ///
-    /// CrossInput stops admitting stream events, cancels monitoring, and drops
-    /// its explicit HIDDeviceClient reference synchronously. CoreHID owns the
-    /// final device-unseize timing: Apple's contract frees a seized device when
-    /// the owning client deinitializes, which may follow async monitor
-    /// retirement. Never wait for that retirement on the return caller because
-    /// normal return runs on MainActor and emergency return must remain live.
+    /// CrossInput stops admitting stream events and cancels monitoring
+    /// synchronously, then retires the seizing HIDDeviceClient off the caller.
+    /// CoreHID frees the device when that client deinitializes, so the return
+    /// caller must never execute potentially blocking client teardown while an
+    /// outstanding monitor call is retiring. MainActor and emergency recovery
+    /// remain live throughout release.
     func release() {
         let shouldRelease = releaseLock.withLock {
             guard !released else { return false }
@@ -416,27 +416,39 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         // enqueue remote work after return has started.
         _ = streamState.deactivateAndReset()
         monitorTask.cancel()
-        let clientDeinitializedImmediately = clientSlot.dropClient()
+
+        // Withdraw CrossInput ownership immediately, but do NOT drop the last
+        // HIDDeviceClient reference on this caller. CoreHID frees a seized
+        // device when that client deinitializes, and deinit can synchronize
+        // with an outstanding monitor call. Running that teardown inline can
+        // therefore stall MainActor and make the emergency-return path
+        // unreachable. Retire the monitor first, then deinitialize the client
+        // on a detached release worker.
         registry.release(generation)
         Diagnostics.log(
-            "corehid pointer release initiated generation=\(generation) "
-                + "clientDeinitializedImmediate="
-                + "\(clientDeinitializedImmediately)"
+            "corehid pointer release scheduled generation=\(generation)"
         )
 
-        // Observe retirement off the caller. This is diagnostic only and must
-        // never hold MainActor, the event-tap callback, or emergency recovery.
         let releaseGeneration = generation
         let monitorCompletion = monitorCompletion
         let clientSlot = clientSlot
         Task.detached(priority: .userInitiated) {
             let monitorStopped = monitorCompletion.wait(
-                timeout: .milliseconds(250)
+                timeout: .seconds(1)
             )
             Diagnostics.log(
-                "corehid pointer release observed generation=\(releaseGeneration) "
-                    + "monitorStopped=\(monitorStopped) "
-                    + "clientDeinitialized=\(clientSlot.isClientDeinitialized)"
+                "corehid pointer monitor retirement generation=\(releaseGeneration) "
+                    + "stopped=\(monitorStopped)"
+            )
+
+            // Even if monitor retirement exceeds the diagnostic bound, keep
+            // any potentially blocking HIDDeviceClient deinit off the return
+            // caller. Cancellation was already requested and stream admission
+            // is closed, so this worker is the sole teardown owner.
+            let deinitialized = clientSlot.dropClient()
+            Diagnostics.log(
+                "corehid pointer client release generation=\(releaseGeneration) "
+                    + "deinitialized=\(deinitialized)"
             )
         }
     }
