@@ -53,6 +53,28 @@ private final class CoreHIDMonitorCompletion: @unchecked Sendable {
     }
 }
 
+private final class CoreHIDMonitorTaskSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    init(_ task: Task<Void, Never>) {
+        self.task = task
+    }
+
+    func cancel() {
+        lock.withLock { task?.cancel() }
+    }
+
+    /// Releases the retained Task object only after monitor completion.
+    /// The Task closure captures the CoreHID notification stream; keeping the
+    /// completed Task alive can therefore keep the seized HIDDeviceClient alive
+    /// indirectly even after the explicit client slot is cleared.
+    func dropTask() {
+        lock.withLock { task = nil }
+    }
+}
+
+
 @available(macOS 15.0, *)
 private final class CoreHIDPointerReleaseResponsibility: @unchecked Sendable {
     private let lock = NSLock()
@@ -369,7 +391,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
     private let clientSlot: CoreHIDPointerClientSlot
     private let streamState: CoreHIDPointerStreamState
     private let releaseResponsibility: CoreHIDPointerReleaseResponsibility
-    private let monitorTask: Task<Void, Never>
+    private let monitorTaskSlot: CoreHIDMonitorTaskSlot
     private let monitorCompletion: CoreHIDMonitorCompletion
     private let releaseLock = NSLock()
     private var released = false
@@ -380,7 +402,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         clientSlot: CoreHIDPointerClientSlot,
         streamState: CoreHIDPointerStreamState,
         releaseResponsibility: CoreHIDPointerReleaseResponsibility,
-        monitorTask: Task<Void, Never>,
+        monitorTaskSlot: CoreHIDMonitorTaskSlot,
         monitorCompletion: CoreHIDMonitorCompletion
     ) {
         self.generation = generation
@@ -388,7 +410,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         self.clientSlot = clientSlot
         self.streamState = streamState
         self.releaseResponsibility = releaseResponsibility
-        self.monitorTask = monitorTask
+        self.monitorTaskSlot = monitorTaskSlot
         self.monitorCompletion = monitorCompletion
     }
 
@@ -415,7 +437,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         // Close semantic admission before cancellation so no late report can
         // enqueue remote work after return has started.
         _ = streamState.deactivateAndReset()
-        monitorTask.cancel()
+        monitorTaskSlot.cancel()
 
         // Withdraw CrossInput ownership immediately, but do NOT drop the last
         // HIDDeviceClient reference on this caller. CoreHID frees a seized
@@ -431,6 +453,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
 
         let releaseGeneration = generation
         let monitorCompletion = monitorCompletion
+        let monitorTaskSlot = monitorTaskSlot
         let clientSlot = clientSlot
         Task.detached(priority: .userInitiated) {
             let monitorStopped = monitorCompletion.wait(
@@ -441,10 +464,15 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
                     + "stopped=\(monitorStopped)"
             )
 
-            // Even if monitor retirement exceeds the diagnostic bound, keep
-            // any potentially blocking HIDDeviceClient deinit off the return
-            // caller. Cancellation was already requested and stream admission
-            // is closed, so this worker is the sole teardown owner.
+            // The completed Task itself retains its closure context, including
+            // the notification stream. Drop that owner before clearing the
+            // explicit HIDDeviceClient slot so CoreHID can actually deinitialize
+            // the seizing client deterministically.
+            monitorTaskSlot.dropTask()
+
+            // Keep potentially blocking HIDDeviceClient teardown off the return
+            // caller. At this point stream admission is closed, cancellation
+            // was requested, and the task/stream retention chain is severed.
             let deinitialized = clientSlot.dropClient()
             Diagnostics.log(
                 "corehid pointer client release generation=\(releaseGeneration) "
@@ -639,13 +667,14 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
                 }
             }
 
+            let monitorTaskSlot = CoreHIDMonitorTaskSlot(monitorTask)
             return CoreHIDPointerLease(
                 generation: generation,
                 registry: registry,
                 clientSlot: clientSlot,
                 streamState: streamState,
                 releaseResponsibility: releaseResponsibility,
-                monitorTask: monitorTask,
+                monitorTaskSlot: monitorTaskSlot,
                 monitorCompletion: monitorCompletion
             )
         } catch {
