@@ -112,7 +112,7 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
                 return
             }
 
-            let appWasActive = NSApp.isActive
+            let appWasActive = NSApp?.isActive ?? false
             let frontmostPIDBefore =
                 NSWorkspace.shared.frontmostApplication?.processIdentifier
             let status = self.bridge.set(themeCursor)
@@ -125,8 +125,7 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
                     + "edge=\(edge.rawValue) "
                     + "status=\(status.map(String.init) ?? "nil") "
                     + "appWasActive=\(appWasActive) "
-                    + "appActive=\(NSApp.isActive) "
-                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter)"
+                    + "appActive=\(NSApp?.isActive ?? false) "\n                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter)"
             )
 
             self.logSystemCursorVerdict(
