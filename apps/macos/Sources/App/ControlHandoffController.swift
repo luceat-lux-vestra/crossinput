@@ -250,6 +250,10 @@ final class ControlHandoffController: @unchecked Sendable {
     private var pendingBoundaryToken: UInt64?
     private var activeBoundaryWatch: PreparedBoundaryWatch?
     private var boundaryReturnIntentActive = false
+    /// Emergency return is a fail-safe escape, not an invitation to re-enter
+    /// the same remote edge from residual drag/movement. Keep handoff blocked
+    /// until a listening-mode move is observed back into the local display.
+    private var emergencyReentryBlocked = false
 
     @MainActor
     init(
@@ -293,7 +297,10 @@ final class ControlHandoffController: @unchecked Sendable {
             // watchdog fired (issue #50).
             guard let self,
                   self.isEdgeSwitchEnabled,
-                  self.sender.isHandoffReady else {
+                  self.sender.isHandoffReady,
+                  !self.lifecycleLock.withLock({
+                      self.emergencyReentryBlocked
+                  }) else {
                 return
             }
             self.switchMachine.pointerAtEdge(
@@ -302,10 +309,7 @@ final class ControlHandoffController: @unchecked Sendable {
             )
         }
         capture.onListeningPointerMove = { [weak self] dx, dy in
-            self?.cancelBoundaryPreparationIfMovingAway(
-                dx: dx,
-                dy: dy
-            )
+            self?.handleListeningPointerMove(dx: dx, dy: dy)
         }
         capture.onPointerEvent = { [weak self] event in
             self?.enqueue(event)
@@ -402,6 +406,7 @@ final class ControlHandoffController: @unchecked Sendable {
         lifecycleLock.withLock {
             lifecycleStarted = true
             edgeSwitchEnabled = true
+            emergencyReentryBlocked = false
         }
         switchMachine.activate()
         return .enabled
@@ -835,6 +840,32 @@ final class ControlHandoffController: @unchecked Sendable {
         }
     }
 
+    private func handleListeningPointerMove(
+        dx: Int32,
+        dy: Int32
+    ) {
+        let entryEdge = switchMachine.entryEdge
+        let directed = EdgeSwitchStateMachine.androidDirectedDelta(
+            entryEdge: entryEdge,
+            dx: CGFloat(dx),
+            dy: CGFloat(dy)
+        )
+        let releasedEmergencyLatch = lifecycleLock.withLock {
+            guard emergencyReentryBlocked, directed < 0 else {
+                return false
+            }
+            emergencyReentryBlocked = false
+            return true
+        }
+        if releasedEmergencyLatch {
+            Diagnostics.log(
+                "emergency reentry latch released reason=local-direction-move"
+            )
+        }
+
+        cancelBoundaryPreparationIfMovingAway(dx: dx, dy: dy)
+    }
+
     private func cancelBoundaryPreparationIfMovingAway(
         dx: Int32,
         dy: Int32
@@ -880,6 +911,15 @@ final class ControlHandoffController: @unchecked Sendable {
 
     func emergencyReturn() {
         Diagnostics.log("emergency return phase=controller-requested")
+        let state = switchMachine.state
+        if state == .edgeArmed || state == .remoteActive {
+            lifecycleLock.withLock {
+                emergencyReentryBlocked = true
+            }
+            Diagnostics.log(
+                "emergency reentry latch armed state=\(state.rawValue)"
+            )
+        }
         // Emergency return is fail-safe only; ordinary product return is the
         // authoritative remote-boundary path.
         retireBoundaryWatch()
@@ -904,6 +944,10 @@ final class ControlHandoffController: @unchecked Sendable {
         lifecycleLock.withLock {
             edgeSwitchEnabled || (!lifecycleStarted && switchMachine.state != .disabled)
         }
+    }
+
+    func isEmergencyReentryBlockedForTesting() -> Bool {
+        lifecycleLock.withLock { emergencyReentryBlocked }
     }
 
     func hasActiveHostPointerLeaseForTesting(
