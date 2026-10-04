@@ -125,7 +125,8 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
                     + "edge=\(edge.rawValue) "
                     + "status=\(status.map(String.init) ?? "nil") "
                     + "appWasActive=\(appWasActive) "
-                    + "appActive=\(NSApp?.isActive ?? false) "\n                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter)"
+                    + "appActive=\(NSApp?.isActive ?? false) "
+                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter)"
             )
 
             self.logSystemCursorVerdict(
