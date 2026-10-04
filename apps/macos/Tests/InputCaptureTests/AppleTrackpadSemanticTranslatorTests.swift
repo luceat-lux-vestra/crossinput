@@ -482,6 +482,90 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
+    @Test("raw primary transition can overlap an active three-finger drag")
+    func rawPrimaryOverlapsThreeFingerDrag() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 3, pointerY: -2, contactCount: 3)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.move(dx: 3, dy: -2)),
+            ]
+        )
+
+        // Real hardware can assert raw Button1 while the three-finger gesture
+        // already owns primary. It must co-own the same logical button, not
+        // throw or duplicate button-down.
+        #expect(
+            try translator.translate(
+                decode(buttons: 0b001, contactCount: 3)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(
+                    buttons: 0b001,
+                    pointerX: 2,
+                    pointerY: 1,
+                    contactCount: 3
+                )
+            ) == [
+                SemanticPointerEvent(.move(dx: 2, dy: 1))
+            ]
+        )
+
+        // Partial lift ends the three-finger owner, but raw Button1 still owns
+        // primary, so no button-up is emitted yet.
+        #expect(
+            try translator.translate(
+                decode(buttons: 0b001, contactCount: 2)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(buttons: 0, contactCount: 2)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        )
+    }
+
+    @Test("raw primary down during three-finger partial lift remains primary")
+    func rawPrimaryDuringThreeFingerPartialLiftDoesNotBecomeSecondary() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        _ = try translator.translate(
+            decode(pointerX: 2, contactCount: 3)
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 2)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        )
+
+        // The sequence is still active until silence/all-lift. A raw Button1
+        // transition during this 3 -> 2 phase belongs to the drag and must not
+        // be reclassified as a two-finger secondary click.
+        #expect(
+            try translator.translate(
+                decode(buttons: 0b001, contactCount: 2)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true))
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(buttons: 0, contactCount: 1)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        )
+    }
+
     @Test("three-contact touch without movement never clicks")
     func threeFingerTouchWithoutMovementIsSilent() throws {
         var translator = AppleTrackpadSemanticTranslator()
