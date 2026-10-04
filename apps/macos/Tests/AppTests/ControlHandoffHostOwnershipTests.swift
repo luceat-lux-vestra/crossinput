@@ -364,6 +364,44 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testEmergencyReturnBlocksResidualEdgeReentryUntilLocalMove() async {
+        let backend = FakeHostPointerBackend()
+        let context = makeController(backend: backend)
+
+        await enterRemote(context.machine)
+        XCTAssertTrue(await waitUntil { backend.hasStarted })
+
+        let lease = FakeHostPointerLease(generation: 890)
+        backend.succeed(with: lease)
+        XCTAssertTrue(await waitUntil {
+            context.controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            )
+        })
+
+        context.controller.emergencyReturn()
+
+        XCTAssertEqual(context.machine.state, .localActive)
+        XCTAssertTrue(
+            context.controller.isEmergencyReentryBlockedForTesting()
+        )
+
+        // Residual drag/movement back toward the remote side must not re-arm
+        // handoff after an emergency escape.
+        context.capture.onListeningPointerMove?(-8, 0)
+        XCTAssertTrue(
+            context.controller.isEmergencyReentryBlockedForTesting()
+        )
+
+        // Once the user moves back into the local display, a later deliberate
+        // edge approach may arm handoff again.
+        context.capture.onListeningPointerMove?(8, 0)
+        XCTAssertFalse(
+            context.controller.isEmergencyReentryBlockedForTesting()
+        )
+    }
+
+    @MainActor
     func testHeldHostInputBlocksAcquisitionAndReturnsLocal() async {
         let backend = FakeHostPointerBackend()
         let capture = InputCapture(pointerRestoreOverride: {})
