@@ -98,9 +98,18 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
             panel.orderFrontRegardless()
             panel.invalidateCursorRects(for: view)
 
+            // CoreHID has already seized the trackpad, so there may be no
+            // subsequent local mouse event to make WindowServer re-evaluate
+            // the cursor rect immediately. The overlay establishes ownership;
+            // this one-shot set publishes that already-owned native cursor
+            // now. Unlike the rejected set-only approach, the panel remains
+            // underneath the frozen pointer and keeps the cursor rect
+            // authoritative for the whole remote epoch.
+            cursor.set()
+
             self.presentationPanel = panel
             Diagnostics.log(
-                "host cursor presentation remote mode=cursor-rect "
+                "host cursor presentation remote mode=cursor-rect forced=true "
                     + "edge=\(edge.rawValue)"
             )
         }
