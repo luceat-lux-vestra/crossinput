@@ -117,28 +117,25 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             ]
         }
 
-        if clicked, let button = activeButton {
-            let expectedContactCount: Int
-            switch button {
-            case 0: expectedContactCount = 1
-            case 1: expectedContactCount = 2
-            default:
-                throw TranslationError.invalidState
-            }
-            guard report.contactCount == expectedContactCount else {
-                throw TranslationError.invalidState
-            }
-        }
-
         let dx = Int32(report.pointerX)
         let dy = Int32(report.pointerY)
 
-        // Physical Button1 already owns click identity. Never allow the same
-        // touch sequence to synthesize an additional tap on lift.
-        if activeButton != nil || suppressTapUntilLift {
-            if activeButton == 1, dx != 0 || dy != 0 {
-                throw TranslationError.invalidState
-            }
+        // Physical Button1 owns click identity from the down transition until
+        // the matching up. Contact count may legitimately change while the
+        // click is held (for example: one finger clicks/holds while a second
+        // finger performs the drag). Never reinterpret that held button or
+        // turn its movement into two-finger scroll.
+        if activeButton != nil {
+            guard dx != 0 || dy != 0 else { return [] }
+            return [
+                SemanticPointerEvent(.move(dx: dx, dy: dy))
+            ]
+        }
+
+        // After the physical button is released but contacts remain, suppress
+        // tap synthesis for the remainder of that touch sequence. Ordinary
+        // one-/two-contact movement semantics resume immediately.
+        if suppressTapUntilLift {
             guard dx != 0 || dy != 0 else { return [] }
             return try movementEvents(
                 contactCount: report.contactCount,
