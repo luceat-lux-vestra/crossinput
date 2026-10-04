@@ -158,10 +158,10 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
         #expect(
             try translator.translate(
-                decode(pointerX: 4, pointerY: -3, contactCount: 2),
+                decode(pointerX: 8, pointerY: -6, contactCount: 2),
                 nowNanos: 4_020_000_000
             ) == [
-                SemanticPointerEvent(.scroll(horizontal: 4, vertical: -3))
+                SemanticPointerEvent(.scroll(horizontal: 8, vertical: -6))
             ]
         )
         #expect(
