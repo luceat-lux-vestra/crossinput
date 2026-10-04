@@ -426,6 +426,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
 
         // Observe retirement off the caller. This is diagnostic only and must
         // never hold MainActor, the event-tap callback, or emergency recovery.
+        let releaseGeneration = generation
         let monitorCompletion = monitorCompletion
         let clientSlot = clientSlot
         Task.detached(priority: .userInitiated) {
@@ -433,7 +434,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
                 timeout: .milliseconds(250)
             )
             Diagnostics.log(
-                "corehid pointer release observed generation=\(generation) "
+                "corehid pointer release observed generation=\(releaseGeneration) "
                     + "monitorStopped=\(monitorStopped) "
                     + "clientDeinitialized=\(clientSlot.isClientDeinitialized)"
             )
