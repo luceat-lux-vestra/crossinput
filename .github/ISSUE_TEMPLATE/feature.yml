@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a new Ampersand feature
+title: "feat: "
+labels: type/feature
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: Explain why this capability is needed and which user problem it addresses.
+      placeholder: What problem should this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the desired behavior without broadening scope beyond the concrete need.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe alternatives or workarounds you considered. Write "None" if there are none.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: On-device verification plan
+      description: Describe how the change would be verified on real hardware, including the target display/path where relevant.
+      placeholder: Include the intended real-device verification procedure.
+    validations:
+      required: true
