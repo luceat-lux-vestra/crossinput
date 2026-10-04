@@ -4,25 +4,30 @@ import XCTest
 import EdgeSwitch
 
 final class RemoteCursorPresenterTests: XCTestCase {
-    @MainActor
-    func testRemoteCursorAuthorityPanelCanBecomeKeyWithoutActivationStyle() {
-        let panel = RemoteCursorAuthorityPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 48, height: 48),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
+    func testCarbonThemeCursorBridgeIsAvailableOnSupportedMacOS() {
+        XCTAssertTrue(
+            CarbonThemeCursorBridge.shared.isAvailable,
+            "SetThemeCursor must resolve before Carbon cursor presentation can ship"
         )
-        defer { panel.close() }
-
-        XCTAssertTrue(panel.canBecomeKey)
-        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
     }
 
-    @MainActor
-    func testRemoteCursorViewRequestsPanelKeyAuthority() {
-        let view = RemoteCursorRectView(cursor: .resizeLeftRight)
-        XCTAssertTrue(view.acceptsFirstResponder)
-        XCTAssertTrue(view.needsPanelToBecomeKey)
+    func testThemeCursorMappingUsesNativeAxisThemeCursor() {
+        XCTAssertEqual(
+            NativeRemoteCursorPresenter.themeCursor(for: .left),
+            NativeRemoteCursorPresenter.themeResizeLeftRightCursor
+        )
+        XCTAssertEqual(
+            NativeRemoteCursorPresenter.themeCursor(for: .right),
+            NativeRemoteCursorPresenter.themeResizeLeftRightCursor
+        )
+        XCTAssertEqual(
+            NativeRemoteCursorPresenter.themeCursor(for: .top),
+            NativeRemoteCursorPresenter.themeResizeUpDownCursor
+        )
+        XCTAssertEqual(
+            NativeRemoteCursorPresenter.themeCursor(for: .bottom),
+            NativeRemoteCursorPresenter.themeResizeUpDownCursor
+        )
     }
 
     func testDirectionalCursorMappingUsesNativeAxisCursor() {
@@ -58,25 +63,6 @@ final class RemoteCursorPresenterTests: XCTestCase {
                 .arrow,
                 .resizeLeftRight
             )
-        )
-    }
-
-    func testPresentationFrameClampsAroundScreenEdges() {
-        let screen = NSRect(x: 0, y: 0, width: 1000, height: 800)
-
-        XCTAssertEqual(
-            NativeRemoteCursorPresenter.presentationFrame(
-                around: NSPoint(x: 0, y: 400),
-                in: screen
-            ),
-            NSRect(x: 0, y: 376, width: 48, height: 48)
-        )
-        XCTAssertEqual(
-            NativeRemoteCursorPresenter.presentationFrame(
-                around: NSPoint(x: 1000, y: 400),
-                in: screen
-            ),
-            NSRect(x: 952, y: 376, width: 48, height: 48)
         )
     }
 }
