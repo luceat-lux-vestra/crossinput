@@ -6,70 +6,215 @@ import Diagnostics
 import CoreHID
 
 @available(macOS 15.0, *)
-private final class CoreHIDPointerClientSlot: @unchecked Sendable {
-    private let lock = NSLock()
-    private var client: HIDDeviceClient?
-    private weak var clientProbe: HIDDeviceClient?
-
-    init(_ client: HIDDeviceClient) {
-        self.client = client
-        self.clientProbe = client
-    }
-
-    @discardableResult
-    func dropClient() -> Bool {
-        lock.withLock {
-            client = nil
-            return clientProbe == nil
-        }
-    }
-
-    var isClientDeinitialized: Bool {
-        lock.withLock { clientProbe == nil }
+enum CoreHIDPhysicalReleaseEvidence {
+    static func isProven(
+        processExited: Bool,
+        deviceUnseized: Bool
+    ) -> Bool {
+        processExited && deviceUnseized
     }
 }
 
-private final class CoreHIDMonitorTaskSlot: @unchecked Sendable {
+@available(macOS 15.0, *)
+enum CoreHIDUnseizeWitnessState: Equatable, Sendable {
+    case monitoring
+    case seized
+    case unseized
+    case failed
+
+    /// A release notification is evidence only if this witness observed the
+    /// matching seizure first. CoreHID notification streams are asynchronous;
+    /// an initial/stale unseized notification must never satisfy a new
+    /// generation's physical-release proof.
+    mutating func observeSeized() -> Bool {
+        switch self {
+        case .monitoring, .seized:
+            self = .seized
+            return true
+        case .unseized, .failed:
+            return false
+        }
+    }
+
+    mutating func observeUnseized() -> Bool {
+        guard self == .seized else { return false }
+        self = .unseized
+        return true
+    }
+
+    mutating func fail() {
+        guard self != .unseized else { return }
+        self = .failed
+    }
+
+    var sawSeized: Bool {
+        self == .seized || self == .unseized
+    }
+
+    var isCurrentlySeized: Bool {
+        self == .seized
+    }
+
+    var releaseProven: Bool {
+        self == .unseized
+    }
+}
+
+@available(macOS 15.0, *)
+private final class CoreHIDUnseizeWitness: @unchecked Sendable {
+    private let generation: UInt64
     private let lock = NSLock()
+    private var state: CoreHIDUnseizeWitnessState = .monitoring
     private var task: Task<Void, Never>?
+    private var client: HIDDeviceClient?
 
-    init(_ task: Task<Void, Never>) {
-        self.task = task
+    init(
+        generation: UInt64,
+        client: HIDDeviceClient
+    ) {
+        self.generation = generation
+        self.client = client
     }
 
-    func cancel() {
-        lock.withLock { task?.cancel() }
+    func start(
+        stream: AsyncThrowingStream<HIDDeviceClient.Notification, any Error>
+    ) {
+        let task = Task { [weak self] in
+            do {
+                for try await notification in stream {
+                    guard let self else { return }
+                    if Task.isCancelled { return }
+
+                    switch notification {
+                    case .deviceSeized:
+                        let accepted = self.lock.withLock {
+                            self.state.observeSeized()
+                        }
+                        if accepted {
+                            Diagnostics.log(
+                                "corehid unseize witness generation=\(generation) event=device-seized"
+                            )
+                        }
+
+                    case .deviceUnseized:
+                        let accepted = self.lock.withLock {
+                            self.state.observeUnseized()
+                        }
+                        guard accepted else {
+                            Diagnostics.log(
+                                "corehid unseize witness generation=\(generation) "
+                                    + "event=device-unseized-ignored reason=seize-not-observed"
+                            )
+                            continue
+                        }
+                        Diagnostics.log(
+                            "corehid unseize witness generation=\(generation) event=device-unseized"
+                        )
+                        return
+
+                    case .deviceRemoved:
+                        self.lock.withLock {
+                            self.state.fail()
+                        }
+                        Diagnostics.log(
+                            "corehid unseize witness generation=\(generation) event=device-removed"
+                        )
+                        return
+
+                    case .inputReport, .elementUpdates:
+                        break
+
+                    @unknown default:
+                        self.lock.withLock {
+                            self.state.fail()
+                        }
+                        Diagnostics.log(
+                            "corehid unseize witness generation=\(generation) event=unknown"
+                        )
+                        return
+                    }
+                }
+
+                guard let self else { return }
+                self.lock.withLock {
+                    self.state.fail()
+                }
+            } catch is CancellationError {
+                // Expected when acquisition fails or the lease is torn down.
+            } catch {
+                guard let self else { return }
+                self.lock.withLock {
+                    self.state.fail()
+                }
+                Diagnostics.log(
+                    "corehid unseize witness generation=\(generation) event=stream-error"
+                )
+            }
+        }
+
+        lock.withLock {
+            self.task = task
+        }
     }
 
-    /// Takes sole ownership of the monitor task and awaits its actual return.
-    /// This is stronger than a flag signalled from inside the task's defer:
-    /// that signal can run while the closure stack and captured stream live.
-    func retire() async {
+    var sawSeized: Bool {
+        lock.withLock { state.sawSeized }
+    }
+
+    func awaitSeized(
+        maxChecks: Int = 100,
+        delay: Duration = .milliseconds(2)
+    ) async -> Bool {
+        for _ in 0..<maxChecks {
+            let snapshot = lock.withLock { state }
+            switch snapshot {
+            case .seized:
+                return true
+            case .unseized, .failed:
+                return false
+            case .monitoring:
+                break
+            }
+            try? await Task.sleep(for: delay)
+        }
+        return lock.withLock { state.isCurrentlySeized }
+    }
+
+    var isCurrentlySeized: Bool {
+        lock.withLock { state.isCurrentlySeized }
+    }
+
+    func awaitUnseized(
+        maxChecks: Int = 400,
+        delay: Duration = .milliseconds(2)
+    ) async -> Bool {
+        for _ in 0..<maxChecks {
+            let snapshot = lock.withLock { state }
+            switch snapshot {
+            case .unseized:
+                return true
+            case .failed:
+                return false
+            case .monitoring, .seized:
+                break
+            }
+            try? await Task.sleep(for: delay)
+        }
+        return lock.withLock { state.releaseProven }
+    }
+
+    func stop() {
         let task = lock.withLock {
             let task = self.task
             self.task = nil
+            client = nil
             return task
         }
-        guard let task else { return }
-        await task.value
-        // The task handle and closure captures are released on return.
-    }
-}
-
-
-@available(macOS 15.0, *)
-private final class CoreHIDPointerReleaseResponsibility: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lifecycleOwned = false
-
-    func transferToLifecycleOwner() {
-        lock.withLock {
-            lifecycleOwned = true
-        }
+        task?.cancel()
     }
 
-    var isLifecycleOwned: Bool {
-        lock.withLock { lifecycleOwned }
+    deinit {
+        stop()
     }
 }
 
@@ -123,7 +268,7 @@ struct CoreHIDTapSurfaceDiagnostics: Equatable, Sendable {
 }
 
 @available(macOS 15.0, *)
-private final class CoreHIDPointerStreamState: @unchecked Sendable {
+final class CoreHIDPointerStreamState: @unchecked Sendable {
     /// Physical evidence on the target MacBook shows the seized Report-ID-2
     /// stream carries continuous contact-present reports but no terminal
     /// zero-contact report. A short report-silence interval is therefore the
@@ -359,6 +504,10 @@ private final class CoreHIDPointerStreamState: @unchecked Sendable {
     var isActive: Bool {
         lock.withLock { active }
     }
+
+    var hasActiveContact: Bool {
+        lock.withLock { lastRawContactPresent }
+    }
 }
 
 @available(macOS 15.0, *)
@@ -366,94 +515,160 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
     let generation: UInt64
 
     var isActive: Bool {
-        streamState.isActive && registry.isCurrent(generation)
+        ownershipProcess.isRunning
+            && unseizeWitness.isCurrentlySeized
+            && registry.isCurrent(generation)
     }
 
     private let registry: CoreHIDPointerLeaseRegistry
-    private let clientSlot: CoreHIDPointerClientSlot
-    private let streamState: CoreHIDPointerStreamState
-    private let releaseResponsibility: CoreHIDPointerReleaseResponsibility
-    private let monitorTaskSlot: CoreHIDMonitorTaskSlot
-    private let releaseLock = NSLock()
-    private var released = false
+    private let ownershipProcess: CoreHIDPointerOwnershipProcess
+    private let unseizeWitness: CoreHIDUnseizeWitness
+
+    private enum PhysicalReleaseState {
+        case active
+        case releasing
+        case released
+        case failed
+    }
+
+    private let releaseCondition = NSCondition()
+    private var physicalReleaseState: PhysicalReleaseState = .active
 
     fileprivate init(
         generation: UInt64,
         registry: CoreHIDPointerLeaseRegistry,
-        clientSlot: CoreHIDPointerClientSlot,
-        streamState: CoreHIDPointerStreamState,
-        releaseResponsibility: CoreHIDPointerReleaseResponsibility,
-        monitorTaskSlot: CoreHIDMonitorTaskSlot
+        ownershipProcess: CoreHIDPointerOwnershipProcess,
+        unseizeWitness: CoreHIDUnseizeWitness
     ) {
         self.generation = generation
         self.registry = registry
-        self.clientSlot = clientSlot
-        self.streamState = streamState
-        self.releaseResponsibility = releaseResponsibility
-        self.monitorTaskSlot = monitorTaskSlot
+        self.ownershipProcess = ownershipProcess
+        self.unseizeWitness = unseizeWitness
     }
 
     func transferReleaseResponsibilityToLifecycleOwner() {
-        releaseResponsibility.transferToLifecycleOwner()
+        ownershipProcess.markPublished()
     }
 
-    /// Non-blocking local-return boundary.
+    private func completePhysicalRelease(
+        physicallyReleased: Bool
+    ) {
+        releaseCondition.lock()
+        physicalReleaseState =
+            physicallyReleased ? .released : .failed
+        releaseCondition.broadcast()
+        releaseCondition.unlock()
+    }
+
+    /// Physical local-return boundary.
     ///
-    /// CrossInput stops admitting stream events and cancels monitoring
-    /// synchronously, then retires the seizing HIDDeviceClient off the caller.
-    /// CoreHID frees the device when that client deinitializes, so the return
-    /// caller must never execute potentially blocking client teardown while an
-    /// outstanding monitor call is retiring. MainActor and emergency recovery
-    /// remain live throughout release.
-    func release() {
-        let shouldRelease = releaseLock.withLock {
-            guard !released else { return false }
-            released = true
+    /// The CoreHID seizing client exists only in a disposable child process.
+    /// A successful return therefore requires two independent facts:
+    /// 1. the owning child process is gone (graceful EOF or SIGKILL fallback);
+    /// 2. a non-seizing CoreHID witness observed deviceUnseized.
+    ///
+    /// The registry remains reserved until both facts are true, preventing a
+    /// new generation from stacking on an ownership state the OS has not
+    /// independently acknowledged as released.
+    @discardableResult
+    func release() -> Bool {
+        var shouldStartWorker = false
+
+        releaseCondition.lock()
+        switch physicalReleaseState {
+        case .released:
+            releaseCondition.unlock()
             return true
+        case .active:
+            physicalReleaseState = .releasing
+            shouldStartWorker = true
+        case .failed:
+            releaseCondition.unlock()
+            Diagnostics.log(
+                "corehid pointer release gate generation=\(generation) "
+                    + "completed=false terminal=true"
+            )
+            return false
+        case .releasing:
+            break
         }
-        guard shouldRelease else { return }
+        releaseCondition.unlock()
 
-        // Close semantic admission before cancellation so no late report can
-        // enqueue remote work after return has started.
-        _ = streamState.deactivateAndReset()
-        monitorTaskSlot.cancel()
+        if shouldStartWorker {
+            let releaseGeneration = generation
+            let ownershipProcess = ownershipProcess
+            let registry = registry
+            let unseizeWitness = unseizeWitness
 
-        // Withdraw CrossInput ownership immediately, but do NOT drop the last
-        // HIDDeviceClient reference on this caller. CoreHID frees a seized
-        // device when that client deinitializes, and deinit can synchronize
-        // with an outstanding monitor call. Running that teardown inline can
-        // therefore stall MainActor and make the emergency-return path
-        // unreachable. Retire the monitor first, then deinitialize the client
-        // on a detached release worker.
-        registry.release(generation)
+            Diagnostics.log(
+                "corehid pointer release scheduled generation=\(generation) "
+                    + "owner=process"
+            )
+
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let processEvidence = ownershipProcess.stopAndWait()
+                let unseized: Bool
+                if processEvidence.processExited {
+                    unseized = await unseizeWitness.awaitUnseized(
+                        maxChecks: 750,
+                        delay: .milliseconds(2)
+                    )
+                } else {
+                    unseized = false
+                }
+
+                Diagnostics.log(
+                    "corehid pointer process release generation=\(releaseGeneration) "
+                        + "processExited=\(processEvidence.processExited) "
+                        + "forced=\(processEvidence.forced) "
+                        + "status=\(processEvidence.status.map(String.init) ?? "none")"
+                )
+                Diagnostics.log(
+                    "corehid pointer os release generation=\(releaseGeneration) "
+                        + "deviceUnseized=\(unseized) "
+                        + "witnessSawSeized=\(unseizeWitness.sawSeized)"
+                )
+
+                let physicallyReleased =
+                    CoreHIDPhysicalReleaseEvidence.isProven(
+                        processExited: processEvidence.processExited,
+                        deviceUnseized: unseized
+                    )
+                if physicallyReleased {
+                    registry.release(releaseGeneration)
+                    unseizeWitness.stop()
+                }
+
+                self?.completePhysicalRelease(
+                    physicallyReleased: physicallyReleased
+                )
+            }
+        }
+
+        // The worker's bounded path is at most 1.25 s of process teardown plus
+        // 1.5 s of witness polling, before scheduling/logging overhead. Keep
+        // the caller deadline strictly wider than that internal budget so the
+        // controller cannot observe a synthetic timeout immediately before a
+        // successful worker completion.
+        let deadline = Date().addingTimeInterval(4.0)
+        releaseCondition.lock()
+        while physicalReleaseState == .releasing {
+            if !releaseCondition.wait(until: deadline) {
+                break
+            }
+        }
+        let released = physicalReleaseState == .released
+        releaseCondition.unlock()
+
         Diagnostics.log(
-            "corehid pointer release scheduled generation=\(generation)"
+            "corehid pointer release gate generation=\(generation) "
+                + "completed=\(released)"
         )
-
-        let releaseGeneration = generation
-        let monitorTaskSlot = monitorTaskSlot
-        let clientSlot = clientSlot
-        Task.detached(priority: .userInitiated) {
-            // Await the task itself, not an in-task completion signal. Only a
-            // returned task proves that its closure stack is gone and the
-            // captured CoreHID notification stream can be released.
-            await monitorTaskSlot.retire()
-            Diagnostics.log(
-                "corehid pointer monitor retired generation=\(releaseGeneration)"
-            )
-
-            // With the task/stream capture gone, clearing this explicit client
-            // slot must retire the seizing HIDDeviceClient.
-            let deinitialized = clientSlot.dropClient()
-            Diagnostics.log(
-                "corehid pointer client release generation=\(releaseGeneration) "
-                    + "deinitialized=\(deinitialized)"
-            )
-        }
+        return released
     }
 
     deinit {
-        release()
+        _ = release()
     }
 }
 
@@ -462,8 +677,12 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
     enum AcquisitionError: Error, Equatable, Sendable {
         case discoveryTimeout
         case clientCreation
-        case wrongDevice
-        case descriptorSemantics
+        case deviceIdentity
+        case helperStart
+        case helperPrepared
+        case helperActivation
+        case helperReady
+        case unseizeWitness
     }
 
     private let registry: CoreHIDPointerLeaseRegistry
@@ -489,207 +708,165 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
         onFailure: @escaping HostPointerFailureHandler
     ) async throws -> CoreHIDPointerLease {
         let generation = try registry.reserve()
+        var witness: CoreHIDUnseizeWitness?
+        var ownershipProcess: CoreHIDPointerOwnershipProcess?
 
         do {
             try Task.checkCancellation()
-            let reference = try await Self.discoverBuiltInTrackpadMouse(
-                timeout: discoveryTimeout
-            )
+
+            let reference: HIDDeviceClient.DeviceReference
+            do {
+                reference = try await CoreHIDPointerDeviceDiscovery
+                    .discoverBuiltInTrackpadMouse(timeout: discoveryTimeout)
+            } catch {
+                throw AcquisitionError.discoveryTimeout
+            }
             try Task.checkCancellation()
 
-            guard let client = HIDDeviceClient(deviceReference: reference) else {
+            guard let witnessClient = HIDDeviceClient(
+                deviceReference: reference
+            ) else {
                 throw AcquisitionError.clientCreation
             }
-
-            let primaryUsage = await client.primaryUsage
-            let isBuiltIn = await client.isBuiltIn
-            let product = await client.product
-            guard primaryUsage == .genericDesktop(.mouse),
-                  isBuiltIn,
-                  product == "Apple Internal Keyboard / Trackpad" else {
-                throw AcquisitionError.wrongDevice
+            guard let deviceIdentity = CoreHIDPointerDeviceIdentity(
+                vendorID: await witnessClient.vendorID,
+                productID: await witnessClient.productID,
+                uniqueID: await witnessClient.uniqueID,
+                locationID: await witnessClient.locationID
+            ) else {
+                // Cross-process ownership is allowed only when the witness and
+                // seizer can be bound to the same specific physical device.
+                throw AcquisitionError.deviceIdentity
             }
-            try Task.checkCancellation()
-
-            let descriptor = await client.descriptor
-            let xy = try HIDReportDescriptorSemantics.analyzePointerXY(
-                descriptor: descriptor
+            let witnessStream = await witnessClient.monitorNotifications(
+                reportIDsToMonitor: [HIDReportID.allReports],
+                elementsToMonitor: []
             )
-            guard xy.provesUnambiguousRelativeXY else {
-                throw AcquisitionError.descriptorSemantics
+            let releaseWitness = CoreHIDUnseizeWitness(
+                generation: generation,
+                client: witnessClient
+            )
+            witness = releaseWitness
+            releaseWitness.start(stream: witnessStream)
+            await Task.yield()
+            try Task.checkCancellation()
+
+            let helper = CoreHIDPointerOwnershipProcess(
+                generation: generation,
+                launchConfiguration: .production(
+                    generation: generation,
+                    identity: deviceIdentity
+                ),
+                onEvent: onEvent,
+                onFailure: onFailure
+            )
+            ownershipProcess = helper
+            do {
+                try helper.start()
+            } catch {
+                throw AcquisitionError.helperStart
             }
-            try AppleTrackpadReportDescriptorVerifier.verify(descriptor)
+
+            do {
+                try await helper.awaitPrepared(timeout: discoveryTimeout)
+            } catch {
+                throw AcquisitionError.helperPrepared
+            }
             try Task.checkCancellation()
 
-            let elements = await client.elements
+            do {
+                try helper.activateSeizure()
+            } catch {
+                throw AcquisitionError.helperActivation
+            }
             try Task.checkCancellation()
 
-            // CoreHID requires seizure before opening the monitor stream.
-            try await client.seizeDevice()
+            do {
+                try await helper.awaitReady(timeout: discoveryTimeout)
+            } catch {
+                throw AcquisitionError.helperReady
+            }
+
+            guard await releaseWitness.awaitSeized(
+                maxChecks: 500,
+                delay: .milliseconds(2)
+            ) else {
+                throw AcquisitionError.unseizeWitness
+            }
+
             Diagnostics.log(
-                "corehid pointer seized generation=\(generation)"
-            )
-            // A return can cancel acquisition while CoreHID is completing the
-            // seize. Throwing here drops the local client reference from this
-            // scope immediately instead of publishing late ownership.
-            try Task.checkCancellation()
-
-            guard let reportID = HIDReportID(rawValue: 2) else {
-                throw AcquisitionError.descriptorSemantics
-            }
-            let stream = await client.monitorNotifications(
-                reportIDsToMonitor: [reportID...reportID],
-                elementsToMonitor: elements
+                "corehid pointer seized generation=\(generation) "
+                    + "witness=true owner=process"
             )
             try Task.checkCancellation()
 
-            let clientSlot = CoreHIDPointerClientSlot(client)
-            let registry = self.registry
-            let streamState = CoreHIDPointerStreamState(
-                onDeferredEvent: { event in
-                    guard registry.isCurrent(generation) else { return }
-                    onEvent(event, generation)
-                }
-            )
-            let releaseResponsibility =
-                CoreHIDPointerReleaseResponsibility()
-
-            // Critical ownership shape: the task captures the stream and slot,
-            // never the seizing HIDDeviceClient directly. release() can drop
-            // the final explicit client reference without awaiting this task.
-            let monitorTask = Task {
-                func failClosed(_ reason: String) {
-                    guard streamState.fail() else { return }
-                    Diagnostics.log(
-                        "corehid pointer stream failed generation=\(generation) reason=\(reason)"
-                    )
-
-                    // A published lease is owned by Control. Dispatch the
-                    // lifecycle callback out of this monitor task so release()
-                    // can synchronously wait for monitor retirement without
-                    // ever self-waiting on the task that detected the failure.
-                    if releaseResponsibility.isLifecycleOwned {
-                        Task {
-                            onFailure(generation)
-                        }
-                    } else {
-                        onFailure(generation)
-                        if registry.isCurrent(generation) {
-                            _ = clientSlot.dropClient()
-                            registry.release(generation)
-                        }
-                    }
-                }
-
-                do {
-                    for try await notification in stream {
-                        if Task.isCancelled { break }
-
-                        switch notification {
-                        case .inputReport(_, let data, _):
-                            do {
-                                let events = try streamState.consume(data)
-                                for event in events {
-                                    // Registry check narrows the race; the
-                                    // generation tag remains the final stale
-                                    // event barrier at the Control owner.
-                                    guard registry.isCurrent(generation) else {
-                                        continue
-                                    }
-                                    onEvent(event, generation)
-                                }
-                            } catch {
-                                failClosed("semantic-decode")
-                                return
-                            }
-
-                        case .deviceRemoved:
-                            failClosed("device-removed")
-                            return
-
-                        case .deviceSeized:
-                            failClosed("device-seized")
-                            return
-
-                        case .deviceUnseized:
-                            failClosed("device-unseized")
-                            return
-
-                        case .elementUpdates:
-                            break
-
-                        @unknown default:
-                            failClosed("unknown-notification")
-                            return
-                        }
-                    }
-
-                    if !Task.isCancelled {
-                        failClosed("stream-ended")
-                    }
-                } catch is CancellationError {
-                    // Normal synchronous release cancels this task after
-                    // invalidating streamState and before dropping the client.
-                } catch {
-                    failClosed("stream-error")
-                }
-            }
-
-            let monitorTaskSlot = CoreHIDMonitorTaskSlot(monitorTask)
             return CoreHIDPointerLease(
                 generation: generation,
                 registry: registry,
-                clientSlot: clientSlot,
-                streamState: streamState,
-                releaseResponsibility: releaseResponsibility,
-                monitorTaskSlot: monitorTaskSlot
+                ownershipProcess: helper,
+                unseizeWitness: releaseWitness
             )
         } catch {
-            registry.release(generation)
+            await cleanupFailedAcquisition(
+                generation: generation,
+                ownershipProcess: ownershipProcess,
+                witness: witness
+            )
             throw error
         }
     }
 
-    private static func discoverBuiltInTrackpadMouse(
-        timeout: Duration
-    ) async throws -> HIDDeviceClient.DeviceReference {
-        try await withThrowingTaskGroup(
-            of: HIDDeviceClient.DeviceReference.self
-        ) { group in
-            group.addTask {
-                let manager = HIDDeviceManager()
-                let criteria = HIDDeviceManager.DeviceMatchingCriteria(
-                    primaryUsage: .genericDesktop(.mouse),
-                    product: "Apple Internal Keyboard / Trackpad",
-                    isBuiltIn: true
-                )
-
-                for try await notification in await manager.monitorNotifications(
-                    matchingCriteria: [criteria]
-                ) {
-                    switch notification {
-                    case .deviceMatched(let reference):
-                        return reference
-                    case .deviceRemoved:
-                        continue
-                    @unknown default:
-                        continue
-                    }
-                }
-                throw AcquisitionError.discoveryTimeout
-            }
-
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw AcquisitionError.discoveryTimeout
-            }
-
-            defer { group.cancelAll() }
-            guard let reference = try await group.next() else {
-                throw AcquisitionError.discoveryTimeout
-            }
-            return reference
+    private func cleanupFailedAcquisition(
+        generation: UInt64,
+        ownershipProcess: CoreHIDPointerOwnershipProcess?,
+        witness: CoreHIDUnseizeWitness?
+    ) async {
+        guard let ownershipProcess else {
+            witness?.stop()
+            registry.release(generation)
+            return
         }
+
+        // Before the explicit activation commit, the helper is provably
+        // non-seizing. After commit, cleanup conservatively requires
+        // independent deviceUnseized evidence even if cancellation or process
+        // death races the helper's ready acknowledgement.
+        let seizureWasPossible =
+            ownershipProcess.seizureMayHaveOccurred
+        let processEvidence = ownershipProcess.stopAndWait()
+
+        let unseized: Bool
+        if seizureWasPossible, let witness, processEvidence.processExited {
+            unseized = await witness.awaitUnseized(
+                maxChecks: 1000,
+                delay: .milliseconds(2)
+            )
+        } else {
+            unseized = !seizureWasPossible
+        }
+
+        let physicallyReleased =
+            processEvidence.processExited && unseized
+        Diagnostics.log(
+            "corehid acquisition cleanup generation=\(generation) "
+                + "processExited=\(processEvidence.processExited) "
+                + "deviceUnseized=\(unseized) "
+                + "seizureWasPossible=\(seizureWasPossible)"
+        )
+
+        guard physicallyReleased else {
+            // Fail closed. There is no seizing child left to retry; retaining
+            // the registry reservation prevents a second ownership generation
+            // from stacking on an OS state that lacks independent proof.
+            Diagnostics.log(
+                "corehid acquisition cleanup unresolved generation=\(generation)"
+            )
+            return
+        }
+
+        registry.release(generation)
+        witness?.stop()
     }
 }
+
 #endif
