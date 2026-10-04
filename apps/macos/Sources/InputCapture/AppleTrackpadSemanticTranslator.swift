@@ -169,6 +169,17 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         // finger performs the drag). Never reinterpret that held button or
         // turn its movement into two-finger scroll.
         if activeButton != nil {
+            // Raw Button1 may overlap a synthesized three-finger owner. Contact
+            // count changes still have to retire the three-finger owner even
+            // while the physical owner remains held; otherwise a later raw-up
+            // sees threeFingerDragActive and suppresses the only logical up.
+            if threeFingerSequenceActive,
+               report.contactCount < 3,
+               threeFingerDragActive {
+                threeFingerDragActive = false
+                // activeButton == 0 co-owns logical primary, so no up is
+                // emitted here. The matching raw Button1-up releases it.
+            }
             guard dx != 0 || dy != 0 else { return [] }
             return [
                 SemanticPointerEvent(.move(dx: dx, dy: dy))
