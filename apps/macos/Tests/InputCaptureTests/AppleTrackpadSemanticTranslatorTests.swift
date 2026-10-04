@@ -352,27 +352,6 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
-    @Test("motion while secondary click is held fails closed")
-    func secondaryHeldMotionIsUnproven() throws {
-        var translator = AppleTrackpadSemanticTranslator()
-        _ = try translator.translate(
-            decode(buttons: 0b001, contactCount: 2)
-        )
-
-        #expect(
-            throws: AppleTrackpadSemanticTranslator.TranslationError.invalidState
-        ) {
-            try translator.translate(
-                decode(
-                    buttons: 0b001,
-                    pointerX: 4,
-                    pointerY: -2,
-                    contactCount: 2
-                )
-            )
-        }
-    }
-
     @Test("reset releases held button exactly once")
     func resetReleasesHeldButton() throws {
         var translator = AppleTrackpadSemanticTranslator()
@@ -420,28 +399,87 @@ struct AppleTrackpadSemanticTranslatorTests {
         }
     }
 
-    @Test("three-contact gestures fail closed")
-    func rejectsThreeContactGesture() throws {
+    @Test("three-contact movement synthesizes one primary drag")
+    func threeFingerMovementDragsPrimary() throws {
         var translator = AppleTrackpadSemanticTranslator()
-        let report = try decode(pointerX: 1, contactCount: 3)
+
         #expect(
-            throws: AppleTrackpadSemanticTranslator.TranslationError
-                .unsupportedContactCount(3)
-        ) {
-            try translator.translate(report)
-        }
+            try translator.translate(
+                decode(contactCount: 3)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 3, pointerY: -2, contactCount: 3)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.move(dx: 3, dy: -2)),
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 4, pointerY: 1, contactCount: 3)
+            ) == [
+                SemanticPointerEvent(.move(dx: 4, dy: 1))
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 2)
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(pointerX: 5, contactCount: 1)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0)
+            ).isEmpty
+        )
     }
 
-    @Test("zero-delta three-contact reports still fail closed")
-    func rejectsSilentThreeContactGesture() throws {
+    @Test("three-contact touch without movement never clicks")
+    func threeFingerTouchWithoutMovementIsSilent() throws {
         var translator = AppleTrackpadSemanticTranslator()
-        let report = try decode(contactCount: 3)
+
         #expect(
-            throws: AppleTrackpadSemanticTranslator.TranslationError
-                .unsupportedContactCount(3)
-        ) {
-            try translator.translate(report)
-        }
+            try translator.translate(
+                decode(contactCount: 3)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 2)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 1)
+            ).isEmpty
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 0)
+            ).isEmpty
+        )
+    }
+
+    @Test("reset releases active three-finger drag exactly once")
+    func resetReleasesThreeFingerDrag() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        _ = try translator.translate(
+            decode(pointerX: 2, contactCount: 3)
+        )
+        #expect(
+            translator.reset()
+                == [SemanticPointerEvent(.button(button: 0, down: false))]
+        )
+        #expect(translator.reset().isEmpty)
     }
 
     @Test("Button2 or Button3 fail closed")
