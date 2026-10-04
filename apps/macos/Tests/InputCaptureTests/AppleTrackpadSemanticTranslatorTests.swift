@@ -442,6 +442,46 @@ struct AppleTrackpadSemanticTranslatorTests {
         )
     }
 
+    @Test("report silence retires three-finger drag and restores later input")
+    func reportSilenceRetiresThreeFingerDrag() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 3, pointerY: -2, contactCount: 3),
+                nowNanos: 6_000_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: true)),
+                SemanticPointerEvent(.move(dx: 3, dy: -2)),
+            ]
+        )
+        #expect(
+            try translator.translate(
+                decode(contactCount: 2),
+                nowNanos: 6_010_000_000
+            ) == [
+                SemanticPointerEvent(.button(button: 0, down: false))
+            ]
+        )
+
+        // Physical evidence shows no terminal zero-contact report. Silence is
+        // the real end-of-contact signal and must clear the sequence latch.
+        #expect(
+            try translator.finishContact(
+                nowNanos: 6_070_000_000
+            ).isEmpty
+        )
+
+        #expect(
+            try translator.translate(
+                decode(pointerX: 5, pointerY: 1, contactCount: 1),
+                nowNanos: 6_100_000_000
+            ) == [
+                SemanticPointerEvent(.move(dx: 5, dy: 1))
+            ]
+        )
+    }
+
     @Test("three-contact touch without movement never clicks")
     func threeFingerTouchWithoutMovementIsSilent() throws {
         var translator = AppleTrackpadSemanticTranslator()
