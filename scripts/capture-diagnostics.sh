@@ -195,7 +195,7 @@ stop_capture() {
         echo "Artifacts: $out"
         echo
         echo "## Ampersand relevant diagnostics"
-        grep -Ea 'candidate|connect failed|helper:|helper log:|fatal|session|target|display|handoff|corehid|cursor|edge|capture|permission|unavailable|failed|error'             "$out/ampersand-diag.log" 2>/dev/null | tail -n 250 || true
+        grep -Ea 'candidate|connect failed|helper:|helper log:|fatal|session|target|display|handoff|corehid|cursor|edge|capture|emergency|host return phase|reentry latch|permission|unavailable|failed|error'             "$out/ampersand-diag.log" 2>/dev/null | tail -n 250 || true
         echo
         echo "## Android relevant logcat"
         tail -n 250 "$out/android-logcat.txt" 2>/dev/null || true
