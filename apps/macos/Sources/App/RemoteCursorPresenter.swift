@@ -96,7 +96,10 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
             ]
             panel.contentView = view
             panel.orderFrontRegardless()
-            panel.invalidateCursorRects(for: view)
+            // This panel is intentionally non-activating and therefore may
+            // never become key. Rebuild its cursor rectangles synchronously
+            // instead of relying on key-window invalidation processing.
+            panel.resetCursorRects()
 
             // CoreHID has already seized the trackpad, so there may be no
             // subsequent local mouse event to make WindowServer re-evaluate
