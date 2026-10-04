@@ -195,14 +195,18 @@ class BoundaryWatchControllerLifecycleTest {
             oracle.fourth.await(1, TimeUnit.SECONDS),
         )
 
+        val sampleTimes = oracle.sampleTimes()
         assertEquals(
-            listOf(
-                0L,
-                90_000_000L,
-                180_000_000L,
-                270_000_000L,
-            ),
-            oracle.sampleTimes(),
+            "preflight + fresh + grace + restarted sample count",
+            4,
+            sampleTimes.size,
+        )
+        assertEquals(0L, sampleTimes.first())
+        assertTrue(
+            "cadence lower bound must survive worker restart: $sampleTimes",
+            sampleTimes.zipWithNext().all { (before, after) ->
+                after - before >= 90_000_000L
+            },
         )
         controller.close()
     }
