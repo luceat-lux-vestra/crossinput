@@ -11,9 +11,14 @@ import IOKit.hid
 ///
 /// Safety contract: this provider never guesses. The caller must supply the
 /// CoreHID-verified physical identity, including a location ID that can be
-/// independently matched in IOKit. Zero or multiple matches, a non-built-in
-/// device, or a missing descriptor all fail closed before seizure.
+/// independently matched in IOKit. The IOKit side must also describe the
+/// Generic Desktop / Mouse application usage selected by CoreHID; Apple's
+/// built-in keyboard/trackpad commonly exposes sibling HID services with the
+/// same product/location identity. Zero or multiple matching mouse services,
+/// a non-built-in device, or a missing descriptor all fail closed before seizure.
 enum IOKitHIDReportDescriptorProvider {
+    private static let genericDesktopUsagePage: UInt32 = 0x01
+    private static let mouseUsage: UInt32 = 0x02
     enum ProviderError: Error, Equatable, Sendable {
         case missingLocationID
         case managerOpen
@@ -29,6 +34,7 @@ enum IOKitHIDReportDescriptorProvider {
         let product: String?
         let locationID: UInt64?
         let isBuiltIn: Bool?
+        let isMouse: Bool
         let descriptor: Data?
 
         func matches(_ identity: CoreHIDPointerDeviceIdentity) -> Bool {
@@ -40,6 +46,7 @@ enum IOKitHIDReportDescriptorProvider {
                 && product == "Apple Internal Keyboard / Trackpad"
                 && locationID == expectedLocationID
                 && isBuiltIn == true
+                && isMouse
         }
     }
 
@@ -82,6 +89,8 @@ enum IOKitHIDReportDescriptorProvider {
             kIOHIDProductKey: "Apple Internal Keyboard / Trackpad",
             kIOHIDLocationIDKey: NSNumber(value: locationID),
             kIOHIDBuiltInKey: true,
+            kIOHIDDeviceUsagePageKey: NSNumber(value: genericDesktopUsagePage),
+            kIOHIDDeviceUsageKey: NSNumber(value: mouseUsage),
         ]
         IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
 
@@ -109,6 +118,11 @@ enum IOKitHIDReportDescriptorProvider {
                     product: stringProperty(device, key: kIOHIDProductKey),
                     locationID: uint64Property(device, key: kIOHIDLocationIDKey),
                     isBuiltIn: boolProperty(device, key: kIOHIDBuiltInKey),
+                    isMouse: IOHIDDeviceConformsTo(
+                        device,
+                        genericDesktopUsagePage,
+                        mouseUsage
+                    ),
                     descriptor: dataProperty(device, key: kIOHIDReportDescriptorKey)
                 )
             )

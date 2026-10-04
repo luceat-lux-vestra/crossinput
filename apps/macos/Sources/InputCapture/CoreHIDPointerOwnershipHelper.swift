@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import Dispatch
 import InputDomain
+import Diagnostics
 
 #if canImport(CoreHID)
 import CoreHID
@@ -172,7 +173,18 @@ private enum CoreHIDPointerOwnershipHelperRuntime {
                 return 73
             }
             try AppleTrackpadReportDescriptorVerifier.verify(descriptor)
+        } catch let error as IOKitHIDReportDescriptorProvider.ProviderError {
+            Diagnostics.log(
+                "corehid descriptor bridge failed generation=\(generation) "
+                    + "reason=\(String(describing: error))"
+            )
+            _ = writer.fail(.descriptorSemantics)
+            return 73
         } catch {
+            Diagnostics.log(
+                "corehid descriptor validation failed generation=\(generation) "
+                    + "errorType=\(String(reflecting: type(of: error)))"
+            )
             _ = writer.fail(.descriptorSemantics)
             return 73
         }

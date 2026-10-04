@@ -51,6 +51,39 @@ final class IOKitHIDReportDescriptorProviderTests: XCTestCase {
         }
     }
 
+    func testSiblingNonMouseServiceDoesNotMakeMouseMatchAmbiguous() throws {
+        let identity = try exactIdentity()
+        let keyboardSibling = snapshot(
+            locationID: 456,
+            isMouse: false,
+            descriptor: Data([0x05, 0x01, 0x09, 0x06])
+        )
+
+        XCTAssertEqual(
+            try IOKitHIDReportDescriptorProvider.selectDescriptor(
+                from: [keyboardSibling, snapshot(locationID: 456)],
+                matching: identity
+            ),
+            descriptor
+        )
+    }
+
+    func testNonMouseServiceCannotSatisfyDescriptorBinding() throws {
+        let identity = try exactIdentity()
+
+        XCTAssertThrowsError(
+            try IOKitHIDReportDescriptorProvider.selectDescriptor(
+                from: [snapshot(locationID: 456, isMouse: false)],
+                matching: identity
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? IOKitHIDReportDescriptorProvider.ProviderError,
+                .noExactMatch
+            )
+        }
+    }
+
     func testAmbiguousExactMatchesFailClosed() throws {
         let identity = try exactIdentity()
 
@@ -91,6 +124,7 @@ final class IOKitHIDReportDescriptorProviderTests: XCTestCase {
             product: "Other Trackpad",
             locationID: 456,
             isBuiltIn: true,
+            isMouse: true,
             descriptor: descriptor
         )
         let external = IOKitHIDReportDescriptorProvider.DeviceSnapshot(
@@ -99,6 +133,7 @@ final class IOKitHIDReportDescriptorProviderTests: XCTestCase {
             product: "Apple Internal Keyboard / Trackpad",
             locationID: 456,
             isBuiltIn: false,
+            isMouse: true,
             descriptor: descriptor
         )
 
@@ -128,6 +163,7 @@ final class IOKitHIDReportDescriptorProviderTests: XCTestCase {
 
     private func snapshot(
         locationID: UInt64,
+        isMouse: Bool = true,
         descriptor: Data? = Data([0x05, 0x01, 0x09, 0x02])
     ) -> IOKitHIDReportDescriptorProvider.DeviceSnapshot {
         IOKitHIDReportDescriptorProvider.DeviceSnapshot(
@@ -136,6 +172,7 @@ final class IOKitHIDReportDescriptorProviderTests: XCTestCase {
             product: "Apple Internal Keyboard / Trackpad",
             locationID: locationID,
             isBuiltIn: true,
+            isMouse: isMouse,
             descriptor: descriptor
         )
     }
