@@ -31,11 +31,11 @@ The user-facing product and macOS application are **Ampersand**. This repository
 
 ## Current release
 
-`Ampersand-0.1.1.dmg` is the current ad-hoc-signed macOS field-use maintenance release. It snapshots the reviewed production line before Architecture Leap implementation; it does **not** claim ADR-0012 Level-3 release-stability completion. See the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases), [CHANGELOG.md](CHANGELOG.md), and the evidence policy in [docs/testing.md](docs/testing.md).
+`Ampersand-0.1.2.dmg` is the current ad-hoc-signed macOS field-use maintenance release. It includes the current Architecture-Leap CoreHID host-ownership and isolated native cursor-presentation path without claiming the open Leap tracks complete; it does **not** claim ADR-0012 Level-3 release-stability completion, and #99 remains the explicit 0.2.0 permission/onboarding blocker. See the [latest release](https://github.com/luceat-lux-vestra/crossinput/releases), [CHANGELOG.md](CHANGELOG.md), and the evidence policy in [docs/testing.md](docs/testing.md).
 
 ## Installation
 
-1. Download `Ampersand-0.1.1.dmg` from the latest release.
+1. Download `Ampersand-0.1.2.dmg` from the latest release.
 2. Open the DMG and drag `Ampersand.app` into Applications.
 3. Because the build is ad-hoc signed rather than Developer-ID notarized, first launch may require Finder → right-click/Control-click → **Open** → **Open**.
 4. Install `adb` 37+ with mDNS wireless-debugging support, for example through Homebrew (`brew install android-platform-tools`) or the Android SDK.
@@ -43,7 +43,7 @@ The user-facing product and macOS application are **Ampersand**. This repository
 
 ### Current helper packaging limitation
 
-The v0.1.1 release is **not yet fully self-contained**: a matching helper artifact must currently be deployed to `/data/local/tmp/crossinput-helper.apk`. During development this is handled by:
+The v0.1.2 release is **not yet fully self-contained**: a matching helper artifact must currently be deployed to `/data/local/tmp/crossinput-helper.apk`. During development this is handled by:
 
 ```sh
 ./scripts/deploy-helper.sh
