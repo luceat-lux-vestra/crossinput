@@ -23,6 +23,10 @@ private final class CoreHIDPointerClientSlot: @unchecked Sendable {
             return clientProbe == nil
         }
     }
+
+    var isClientDeinitialized: Bool {
+        lock.withLock { clientProbe == nil }
+    }
 }
 
 private final class CoreHIDMonitorCompletion: @unchecked Sendable {
@@ -392,12 +396,14 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         releaseResponsibility.transferToLifecycleOwner()
     }
 
-    /// Synchronous local-return boundary.
+    /// Non-blocking local-return boundary.
     ///
-    /// Cancellation is requested, then the final explicit HIDDeviceClient
-    /// reference is dropped before this method returns. Stream retirement is
-    /// intentionally not awaited. Returned events are remote cleanup only and
-    /// must not delay local ownership restoration.
+    /// CrossInput stops admitting stream events, cancels monitoring, and drops
+    /// its explicit HIDDeviceClient reference synchronously. CoreHID owns the
+    /// final device-unseize timing: Apple's contract frees a seized device when
+    /// the owning client deinitializes, which may follow async monitor
+    /// retirement. Never wait for that retirement on the return caller because
+    /// normal return runs on MainActor and emergency return must remain live.
     func release() {
         let shouldRelease = releaseLock.withLock {
             guard !released else { return false }
@@ -406,22 +412,32 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         }
         guard shouldRelease else { return }
 
+        // Close semantic admission before cancellation so no late report can
+        // enqueue remote work after return has started.
+        _ = streamState.deactivateAndReset()
         monitorTask.cancel()
-        let monitorStopped = monitorCompletion.wait(
-            timeout: .milliseconds(100)
-        )
-        let clientDeinitialized = clientSlot.dropClient()
+        let clientDeinitializedImmediately = clientSlot.dropClient()
         registry.release(generation)
         Diagnostics.log(
-            "corehid pointer ownership released generation=\(generation) "
-                + "monitorStopped=\(monitorStopped) "
-                + "clientDeinitialized=\(clientDeinitialized)"
+            "corehid pointer release initiated generation=\(generation) "
+                + "clientDeinitializedImmediate="
+                + "\(clientDeinitializedImmediately)"
         )
 
-        // Remote cleanup is intentionally after local ownership restoration.
-        // Even if this bounded translator lock briefly contends with an
-        // in-flight decode, native pointer control is already local again.
-        _ = streamState.deactivateAndReset()
+        // Observe retirement off the caller. This is diagnostic only and must
+        // never hold MainActor, the event-tap callback, or emergency recovery.
+        let monitorCompletion = monitorCompletion
+        let clientSlot = clientSlot
+        Task.detached(priority: .userInitiated) {
+            let monitorStopped = monitorCompletion.wait(
+                timeout: .milliseconds(250)
+            )
+            Diagnostics.log(
+                "corehid pointer release observed generation=\(generation) "
+                    + "monitorStopped=\(monitorStopped) "
+                    + "clientDeinitialized=\(clientSlot.isClientDeinitialized)"
+            )
+        }
     }
 
     deinit {
