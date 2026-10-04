@@ -22,6 +22,19 @@ private final class BoolObservation: @unchecked Sendable {
     }
 }
 
+private final class IntObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() {
+        lock.withLock { storage += 1 }
+    }
+
+    var value: Int {
+        lock.withLock { storage }
+    }
+}
+
 private final class FakeHostPointerLease: HostPointerOwnershipLease, @unchecked Sendable {
     let generation: UInt64
 
@@ -30,6 +43,7 @@ private final class FakeHostPointerLease: HostPointerOwnershipLease, @unchecked 
     private var released = false
     private var releaseCountStorage = 0
     private var lifecycleOwnsReleaseStorage = false
+    private var releaseSucceedsStorage = true
     private let onRelease: (@Sendable () -> Void)?
 
     init(
@@ -52,6 +66,12 @@ private final class FakeHostPointerLease: HostPointerOwnershipLease, @unchecked 
         lock.withLock { lifecycleOwnsReleaseStorage }
     }
 
+    func setReleaseSucceeds(_ value: Bool) {
+        lock.withLock {
+            releaseSucceedsStorage = value
+        }
+    }
+
     func transferReleaseResponsibilityToLifecycleOwner() {
         lock.withLock {
             lifecycleOwnsReleaseStorage = true
@@ -62,17 +82,24 @@ private final class FakeHostPointerLease: HostPointerOwnershipLease, @unchecked 
         lock.withLock { active = false }
     }
 
-    func release() {
-        let shouldNotify = lock.withLock {
-            guard !released else { return false }
+    @discardableResult
+    func release() -> Bool {
+        let result = lock.withLock { () -> (success: Bool, notify: Bool) in
+            if released {
+                return (true, false)
+            }
+            releaseCountStorage += 1
+            guard releaseSucceedsStorage else {
+                return (false, false)
+            }
             released = true
             active = false
-            releaseCountStorage += 1
-            return true
+            return (true, true)
         }
-        if shouldNotify {
+        if result.notify {
             onRelease?()
         }
+        return result.success
     }
 }
 
@@ -83,6 +110,12 @@ private final class FakeRemoteCursorPresenter:
     private var presentedEdgesStorage: [ScreenEdge] = []
     private var effectiveRestoreCountStorage = 0
     private var presented = false
+    private var presentResultStorage = true
+    private var presentationAllowedStorage = true
+    private var failureHandler: (@Sendable () -> Void)?
+    private var restoreGateStorage: DispatchSemaphore?
+    private var restoreStartedStorage = 0
+    private var localAppearanceObservationResultStorage = true
 
     var presentedEdges: [ScreenEdge] {
         lock.withLock { presentedEdgesStorage }
@@ -92,19 +125,79 @@ private final class FakeRemoteCursorPresenter:
         lock.withLock { effectiveRestoreCountStorage }
     }
 
-    func presentRemote(edge: ScreenEdge) {
+    var restoreStartedCount: Int {
+        lock.withLock { restoreStartedStorage }
+    }
+
+    func setRestoreGate(_ gate: DispatchSemaphore?) {
         lock.withLock {
-            presented = true
-            presentedEdgesStorage.append(edge)
+            restoreGateStorage = gate
         }
     }
 
-    func restoreLocal() {
+    func setLocalAppearanceObservationResult(_ result: Bool) {
         lock.withLock {
-            guard presented else { return }
+            localAppearanceObservationResultStorage = result
+        }
+    }
+
+    func setPresentResult(_ result: Bool) {
+        lock.withLock {
+            presentResultStorage = result
+        }
+    }
+
+    func setPresentationAllowed(_ allowed: Bool) {
+        lock.withLock {
+            presentationAllowedStorage = allowed
+        }
+    }
+
+    func failPresentation() {
+        let handler = lock.withLock { failureHandler }
+        handler?()
+    }
+
+    @discardableResult
+    func presentRemote(
+        edge: ScreenEdge,
+        onFailure: @escaping @Sendable () -> Void
+    ) async -> Bool {
+        lock.withLock {
+            presentedEdgesStorage.append(edge)
+            failureHandler = onFailure
+        }
+
+        while !lock.withLock({ presentationAllowedStorage }) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        return lock.withLock {
+            guard presentResultStorage else {
+                presented = false
+                return false
+            }
+            presented = true
+            return true
+        }
+    }
+
+    @discardableResult
+    func restoreLocal() -> Bool {
+        let gate = lock.withLock { () -> DispatchSemaphore? in
+            failureHandler = nil
+            guard presented else { return nil }
             presented = false
             effectiveRestoreCountStorage += 1
+            restoreStartedStorage += 1
+            return restoreGateStorage
         }
+        gate?.wait()
+        return true
+    }
+
+    func observeLocalAppearanceRestored() -> Bool {
+        lock.withLock { localAppearanceObservationResultStorage }
     }
 }
 
@@ -270,6 +363,157 @@ final class HostPointerLeaseSlotTests: XCTestCase {
     }
 }
 
+final class HostPhysicalReleaseAttemptCoordinatorTests: XCTestCase {
+    func testSameGenerationConcurrentCallersShareOneReleaseOperation() {
+        let coordinator = HostPhysicalReleaseAttemptCoordinator()
+        let releaseEntered = expectation(description: "release entered")
+        let secondReturned = expectation(description: "second returned")
+        let firstReturned = expectation(description: "first returned")
+        let allowReleaseToFinish = DispatchSemaphore(value: 0)
+        let releaseCount = IntObservation()
+        let firstResult = BoolObservation()
+        let secondResult = BoolObservation()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            firstResult.set(
+                coordinator.perform(generation: 701) {
+                    releaseCount.increment()
+                    releaseEntered.fulfill()
+                    allowReleaseToFinish.wait()
+                    return true
+                }
+            )
+            firstReturned.fulfill()
+        }
+
+        wait(for: [releaseEntered], timeout: 1)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            secondResult.set(
+                coordinator.perform(generation: 701) {
+                    releaseCount.increment()
+                    return true
+                }
+            )
+            secondReturned.fulfill()
+        }
+
+        // The first operation remains blocked, so a concurrent second caller
+        // must join it rather than execute a second physical release closure.
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(releaseCount.value, 1)
+
+        allowReleaseToFinish.signal()
+        wait(for: [firstReturned, secondReturned], timeout: 1)
+
+        XCTAssertEqual(releaseCount.value, 1)
+        XCTAssertTrue(firstResult.value)
+        XCTAssertTrue(secondResult.value)
+    }
+
+    func testDifferentGenerationCannotJoinInFlightRelease() {
+        let coordinator = HostPhysicalReleaseAttemptCoordinator()
+        let releaseEntered = expectation(description: "release entered")
+        let firstReturned = expectation(description: "first returned")
+        let allowReleaseToFinish = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = coordinator.perform(generation: 801) {
+                releaseEntered.fulfill()
+                allowReleaseToFinish.wait()
+                return true
+            }
+            firstReturned.fulfill()
+        }
+
+        wait(for: [releaseEntered], timeout: 1)
+        let staleResult = coordinator.perform(generation: 802) {
+            XCTFail("different generation must not execute while another owns release")
+            return true
+        }
+        XCTAssertFalse(staleResult)
+
+        allowReleaseToFinish.signal()
+        wait(for: [firstReturned], timeout: 1)
+    }
+}
+
+final class HostReturnAttemptCoordinatorTests: XCTestCase {
+    func testDifferentCaptureGenerationCannotJoinInFlightReturn() {
+        let coordinator = HostReturnAttemptCoordinator()
+        let returnEntered = expectation(description: "return entered")
+        let ownerReturned = expectation(description: "owner returned")
+        let allowReturnToFinish = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = coordinator.perform(captureGeneration: 901) {
+                returnEntered.fulfill()
+                allowReturnToFinish.wait()
+                return true
+            }
+            ownerReturned.fulfill()
+        }
+
+        wait(for: [returnEntered], timeout: 1)
+        let staleResult = coordinator.perform(captureGeneration: 902) {
+            XCTFail(
+                "different capture generation must not join or execute "
+                    + "while another return owns the lifecycle"
+            )
+            return true
+        }
+        XCTAssertFalse(staleResult)
+
+        allowReturnToFinish.signal()
+        wait(for: [ownerReturned], timeout: 1)
+    }
+
+    func testNilGenerationJoinsInFlightReturnAfterGenerationAnchorClears() {
+        let coordinator = HostReturnAttemptCoordinator()
+        let returnEntered = expectation(description: "return entered")
+        let firstReturned = expectation(description: "first returned")
+        let secondReturned = expectation(description: "second returned")
+        let allowReturnToFinish = DispatchSemaphore(value: 0)
+        let operationCount = IntObservation()
+        let secondResult = BoolObservation()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = coordinator.perform(captureGeneration: 903) {
+                operationCount.increment()
+                returnEntered.fulfill()
+                allowReturnToFinish.wait()
+                return true
+            }
+            firstReturned.fulfill()
+        }
+
+        wait(for: [returnEntered], timeout: 1)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            secondResult.set(
+                coordinator.perform(captureGeneration: nil) {
+                    operationCount.increment()
+                    return true
+                }
+            )
+            secondReturned.fulfill()
+        }
+
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(
+            operationCount.value,
+            1,
+            "generation-less duplicate must join the active return"
+        )
+
+        allowReturnToFinish.signal()
+        wait(for: [firstReturned, secondReturned], timeout: 1)
+
+        XCTAssertEqual(operationCount.value, 1)
+        XCTAssertTrue(secondResult.value)
+    }
+}
+
 final class ControlHandoffHostOwnershipTests: XCTestCase {
     @MainActor
     private func makeController(
@@ -286,7 +530,8 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
             sender: sender,
             capture: capture,
             switchMachine: machine,
-            hostPointerBackend: backend
+            hostPointerBackend: backend,
+            remoteCursorPresenter: FakeRemoteCursorPresenter()
         )
         return (controller, capture, machine)
     }
@@ -365,6 +610,137 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteInputAdmissionWaitsForCursorReady() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        presenter.setPresentationAllowed(false)
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        let backendStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(backendStarted)
+
+        let generation = try! XCTUnwrap(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+        let lease = FakeHostPointerLease(generation: 8900)
+        backend.succeed(with: lease)
+
+        let cursorPending = await waitUntil {
+            presenter.presentedEdges == [.left]
+                && controller.hasPublishedHostPointerLeaseForTesting(
+                    generation: lease.generation
+                )
+        }
+        XCTAssertTrue(cursorPending)
+        XCTAssertFalse(
+            capture.isExternalPointerOwnerActive(generation: generation),
+            "remote input must remain inadmissible until cursor READY"
+        )
+
+        presenter.setPresentationAllowed(true)
+
+        let committed = await waitUntil {
+            capture.isExternalPointerOwnerActive(generation: generation)
+        }
+        XCTAssertTrue(committed)
+
+        controller.emergencyReturn()
+        XCTAssertEqual(lease.releaseCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    @MainActor
+    func testCursorAdmissionFailureReturnsLocalAndReleasesCoreHID() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        presenter.setPresentResult(false)
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        let backendStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(backendStarted)
+
+        let lease = FakeHostPointerLease(generation: 8901)
+        backend.succeed(with: lease)
+
+        let returned = await waitUntil {
+            machine.state == .localActive
+                && lease.releaseCount == 1
+                && !capture.isSuppressed
+        }
+        XCTAssertTrue(returned)
+        XCTAssertFalse(
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            )
+        )
+    }
+
+    @MainActor
+    func testCursorHelperFailureDuringRemoteEpochFailsLocal() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        let backendStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(backendStarted)
+
+        let generation = try! XCTUnwrap(
+            controller.controlAdmissionStateForTesting().captureGeneration
+        )
+        let lease = FakeHostPointerLease(generation: 8902)
+        backend.succeed(with: lease)
+
+        let ownershipReady = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            ) && capture.isExternalPointerOwnerActive(
+                generation: generation
+            )
+        }
+        XCTAssertTrue(ownershipReady)
+
+        presenter.failPresentation()
+
+        let returned = await waitUntil {
+            machine.state == .localActive
+                && lease.releaseCount == 1
+                && !capture.isSuppressed
+        }
+        XCTAssertTrue(returned)
+    }
+
+    @MainActor
     func testEmergencyReturnBlocksResidualEdgeReentryUntilLocalMove() async {
         let backend = FakeHostPointerBackend()
         let context = makeController(backend: backend)
@@ -402,6 +778,198 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
         XCTAssertFalse(
             context.controller.isEmergencyReentryBlockedForTesting()
         )
+    }
+
+    @MainActor
+    func testConcurrentEmergencyReturnsJoinWholeHostReturnBeforeCoreHIDRelease() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        let acquisitionStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(acquisitionStarted)
+
+        let lease = FakeHostPointerLease(generation: 8903)
+        backend.succeed(with: lease)
+        let leaseActivated = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            )
+        }
+        XCTAssertTrue(leaseActivated)
+
+        let restoreGate = DispatchSemaphore(value: 0)
+        presenter.setRestoreGate(restoreGate)
+        let firstReturned = BoolObservation()
+        let secondReturned = BoolObservation()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            controller.emergencyReturn()
+            firstReturned.set(true)
+        }
+
+        let restoreStarted = await waitUntil {
+            presenter.restoreStartedCount == 1
+        }
+        XCTAssertTrue(restoreStarted)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            controller.emergencyReturn()
+            secondReturned.set(true)
+        }
+
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(
+            lease.releaseCount,
+            0,
+            "a duplicate return must not pass the owner's blocked cursor cleanup"
+        )
+        XCTAssertFalse(
+            secondReturned.value,
+            "same-generation duplicate caller must join the in-flight return"
+        )
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        restoreGate.signal()
+
+        let bothReturned = await waitUntil {
+            firstReturned.value && secondReturned.value
+        }
+        XCTAssertTrue(bothReturned)
+        XCTAssertEqual(presenter.effectiveRestoreCount, 1)
+        XCTAssertEqual(lease.releaseCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    @MainActor
+    func testCursorAppearanceMismatchOnNormalReturnDoesNotPoisonNextRemoteGeneration() async {
+        let backend = FakeHostPointerBackend()
+        let presenter = FakeRemoteCursorPresenter()
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
+
+        await enterRemote(machine)
+        let acquisitionStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(acquisitionStarted)
+
+        let firstLease = FakeHostPointerLease(generation: 8904)
+        backend.succeed(with: firstLease)
+        let firstActivated = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: firstLease.generation
+            )
+        }
+        XCTAssertTrue(firstActivated)
+
+        // NSCursor.currentSystem is a post-release observation, not a local
+        // ownership oracle. A local application may legitimately choose an
+        // appearance different from the pre-remote snapshot.
+        presenter.setLocalAppearanceObservationResult(false)
+        capture.release(reason: .normalReturn)
+
+        let firstReturnedLocal = await waitUntil {
+            machine.state == .localActive
+        }
+        XCTAssertTrue(firstReturnedLocal)
+        XCTAssertEqual(firstLease.releaseCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertNil(
+            controller
+                .controlAdmissionStateForTesting()
+                .captureGeneration
+        )
+
+        // Regression for the physical failure: a false appearance observation
+        // after successful helper/CoreHID cleanup must not pin the old
+        // generation and block the next DeX handoff.
+        machine.pointerAtEdge(.left)
+        machine.flushCallbacks()
+
+        let secondPending = await waitUntil {
+            backend.hasPendingAcquisition
+        }
+        XCTAssertTrue(
+            secondPending,
+            "post-return appearance mismatch must not poison re-entry"
+        )
+
+        let secondLease = FakeHostPointerLease(generation: 8905)
+        backend.succeed(with: secondLease)
+        let secondActivated = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: secondLease.generation
+            )
+        }
+        XCTAssertTrue(secondActivated)
+        XCTAssertTrue(capture.isSuppressed)
+
+        presenter.setLocalAppearanceObservationResult(true)
+        controller.emergencyReturn()
+        XCTAssertEqual(secondLease.releaseCount, 1)
+        XCTAssertFalse(capture.isSuppressed)
+        XCTAssertEqual(machine.state, .localActive)
+    }
+
+    @MainActor
+    func testEmergencyReturnRetainsOwnershipUntilPhysicalReleaseSucceeds() async {
+        let backend = FakeHostPointerBackend()
+        let context = makeController(backend: backend)
+
+        await enterRemote(context.machine)
+        let acquisitionStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(acquisitionStarted)
+
+        let lease = FakeHostPointerLease(generation: 891)
+        backend.succeed(with: lease)
+        let leasePublished = await waitUntil {
+            context.controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            )
+        }
+        XCTAssertTrue(leasePublished)
+
+        lease.setReleaseSucceeds(false)
+        context.controller.emergencyReturn()
+
+        XCTAssertEqual(
+            context.machine.state,
+            .remoteActive,
+            "physical release failure must not publish .returning or .localActive"
+        )
+        XCTAssertTrue(
+            context.capture.isSuppressed,
+            "capture generation must remain available for an emergency retry"
+        )
+        XCTAssertEqual(lease.releaseCount, 1)
+
+        lease.setReleaseSucceeds(true)
+        context.controller.emergencyReturn()
+
+        let returnedLocal = await waitUntil {
+            context.machine.state == .localActive
+        }
+        XCTAssertTrue(returnedLocal)
+        XCTAssertFalse(context.capture.isSuppressed)
+        XCTAssertEqual(lease.releaseCount, 2)
     }
 
     @MainActor
@@ -863,6 +1431,44 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testLateAcquisitionFailedPhysicalReleaseDoesNotRetryInBackground() async {
+        let backend = FakeHostPointerBackend()
+        let context = makeController(backend: backend)
+
+        await enterRemote(context.machine)
+        let started = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(started)
+
+        context.controller.emergencyReturn()
+        XCTAssertEqual(context.machine.state, .localActive)
+        XCTAssertFalse(context.capture.isSuppressed)
+
+        let lateLease = FakeHostPointerLease(generation: 109)
+        lateLease.setReleaseSucceeds(false)
+        backend.succeed(with: lateLease)
+
+        let releaseAttempted = await waitUntil {
+            lateLease.releaseCount == 1
+        }
+        XCTAssertTrue(releaseAttempted)
+        XCTAssertTrue(
+            lateLease.isActive,
+            "failed unpublished release remains fail-closed"
+        )
+
+        // The production CoreHID lease makes a failed physical proof terminal
+        // for this process generation. Changing the fake result later must not
+        // cause an unowned background retry loop.
+        lateLease.setReleaseSucceeds(true)
+        try? await Task.sleep(for: .milliseconds(650))
+
+        XCTAssertEqual(lateLease.releaseCount, 1)
+        XCTAssertTrue(lateLease.isActive)
+        XCTAssertFalse(context.capture.isSuppressed)
+        XCTAssertEqual(context.machine.state, .localActive)
+    }
+
+    @MainActor
     func testStaleFailureAfterReplacementLeaseCannotBreakSecondCycle() async {
         let backend = FakeHostPointerBackend()
         let context = makeController(backend: backend)
@@ -1079,43 +1685,81 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
     }
 
     @MainActor
-    func testBackendFailureReleasesCaptureAndReturnsLocal() async {
+    func testBackendFailureJoinsOrderedHostReturnBeforeCoreHIDRelease() async {
         let backend = FakeHostPointerBackend()
-        let context = makeController(backend: backend)
+        let presenter = FakeRemoteCursorPresenter()
+        let capture = InputCapture()
+        let machine = EdgeSwitchStateMachine()
+        let sender = InputSender(session: SessionReference())
+        let controller = ControlHandoffController(
+            sender: sender,
+            capture: capture,
+            switchMachine: machine,
+            hostPointerBackend: backend,
+            remoteCursorPresenter: presenter
+        )
 
-        await enterRemote(context.machine)
+        await enterRemote(machine)
         let started = await waitUntil { backend.hasStarted }
         XCTAssertTrue(started)
 
         let generation = try! XCTUnwrap(
-            context.controller.controlAdmissionStateForTesting().captureGeneration
+            controller.controlAdmissionStateForTesting().captureGeneration
         )
-        let capture = context.capture
         let keyboardWasLocalAtLeaseRelease = BoolObservation()
         let lease = FakeHostPointerLease(
             generation: 102,
             onRelease: {
                 keyboardWasLocalAtLeaseRelease.set(
-                    !capture.isExternalPointerOwnerActive(generation: generation)
+                    !capture.isExternalPointerOwnerActive(
+                        generation: generation
+                    )
                 )
             }
         )
         backend.succeed(with: lease)
-        let published = await waitUntil {
-            context.controller.hasActiveHostPointerLeaseForTesting(
-                generation: lease.generation
-            )
-        }
-        XCTAssertTrue(published)
-        XCTAssertTrue(context.capture.isSuppressed)
 
-        backend.failActiveLease()
+        let admitted = await waitUntil {
+            controller.hasActiveHostPointerLeaseForTesting(
+                generation: lease.generation
+            ) && presenter.presentedEdges == [.left]
+        }
+        XCTAssertTrue(admitted)
+        XCTAssertTrue(capture.isSuppressed)
+
+        let restoreGate = DispatchSemaphore(value: 0)
+        presenter.setRestoreGate(restoreGate)
+        let failureReturned = BoolObservation()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            backend.failActiveLease()
+            failureReturned.set(true)
+        }
+
+        let restoreStarted = await waitUntil {
+            presenter.restoreStartedCount == 1
+        }
+        XCTAssertTrue(restoreStarted)
+        XCTAssertEqual(
+            lease.releaseCount,
+            0,
+            "backend failure must not release CoreHID before cursor cleanup"
+        )
+        XCTAssertFalse(
+            failureReturned.value,
+            "backend failure caller must remain inside the shared return transaction"
+        )
+        XCTAssertEqual(machine.state, .remoteActive)
+
+        restoreGate.signal()
 
         let returnedLocal = await waitUntil {
-            context.machine.state == .localActive
-                && !context.capture.isSuppressed
+            machine.state == .localActive
+                && !capture.isSuppressed
+                && failureReturned.value
         }
         XCTAssertTrue(returnedLocal)
+        XCTAssertEqual(presenter.effectiveRestoreCount, 1)
         XCTAssertEqual(lease.releaseCount, 1)
         XCTAssertTrue(keyboardWasLocalAtLeaseRelease.value)
     }

@@ -112,6 +112,12 @@ collect_snapshot() {
     "$ADB" -s "$device" shell dumpsys input         > "$out/dumpsys-input-$suffix.txt" 2>&1 || true
     "$ADB" -s "$device" shell dumpsys display         > "$out/dumpsys-display-$suffix.txt" 2>&1 || true
     "$ADB" -s "$device" shell "ps -A -o PID,ARGS | grep -E 'crossinput-[h]elper|app_process' || true"         > "$out/helper-processes-$suffix.txt" 2>&1 || true
+    ps -axo pid=,ppid=,command= 2>/dev/null \
+        | grep -E '[A]mpersand .*--crossinput-corehid-pointer-helper' \
+        > "$out/corehid-helper-processes-$suffix.txt" || true
+    ps -axo pid=,ppid=,command= 2>/dev/null \
+        | grep -E '[A]mpersand .*--crossinput-cursor-helper' \
+        > "$out/cursor-helper-processes-$suffix.txt" || true
 }
 
 start_capture() {
@@ -194,8 +200,27 @@ stop_capture() {
         echo
         echo "Artifacts: $out"
         echo
+        echo "## Host ownership lifecycle"
+        grep -Ea 'handoff transition|host return phase|host pointer ownership ready|corehid ownership helper (launched|prepared|activation committed|ready|kill|exited)|corehid unseize witness|corehid acquisition cleanup|corehid pointer (seized|release scheduled|process release|os release|release gate)|host cursor helper (launched|kill|exited)|emergency (shortcut|hotkey|return)' \
+            "$out/ampersand-diag.log" 2>/dev/null | tail -n 1000 || true
+        echo
         echo "## Ampersand relevant diagnostics"
-        grep -Ea 'candidate|connect failed|helper:|helper log:|fatal|session|target|display|handoff|corehid|cursor|edge|capture|emergency|host return phase|reentry latch|permission|unavailable|failed|error'             "$out/ampersand-diag.log" 2>/dev/null | tail -n 250 || true
+        grep -Ea 'candidate|connect failed|helper:|helper log:|fatal|session|target|display|handoff|corehid|cursor|edge|capture|emergency|host return phase|reentry latch|permission|unavailable|failed|error' \
+            "$out/ampersand-diag.log" 2>/dev/null | tail -n 250 || true
+        echo
+        echo "## macOS CoreHID ownership helpers after capture"
+        if [[ -s "$out/corehid-helper-processes-final.txt" ]]; then
+            cat "$out/corehid-helper-processes-final.txt"
+        else
+            echo "none"
+        fi
+        echo
+        echo "## macOS cursor presentation helpers after capture"
+        if [[ -s "$out/cursor-helper-processes-final.txt" ]]; then
+            cat "$out/cursor-helper-processes-final.txt"
+        else
+            echo "none"
+        fi
         echo
         echo "## Android relevant logcat"
         tail -n 250 "$out/android-logcat.txt" 2>/dev/null || true
