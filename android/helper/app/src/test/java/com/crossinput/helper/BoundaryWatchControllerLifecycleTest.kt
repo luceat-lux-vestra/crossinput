@@ -170,21 +170,29 @@ class BoundaryWatchControllerLifecycleTest {
             PointerBoundaryAuthority.COMPOSITOR,
         )
         assertTrue(
-            "first return-intent sample missing",
+            "fresh return-intent sample missing",
             oracle.second.await(1, TimeUnit.SECONDS),
         )
+        assertTrue(
+            "single cadence grace sample missing",
+            oracle.third.await(1, TimeUnit.SECONDS),
+        )
+        assertFalse(
+            "worker must retire after the one grace sample",
+            oracle.fourth.await(100, TimeUnit.MILLISECONDS),
+        )
 
-        // The first worker has no further fresh intent and retires. A new
-        // pointer move starts another worker; it must still honor the previous
-        // worker's global sample timestamp.
+        // The first worker has now retired. A new pointer move starts another
+        // worker; it must still honor the previous worker's global sample
+        // timestamp instead of sampling immediately.
         controller.onPointerMove(
             10,
             0,
             PointerBoundaryAuthority.COMPOSITOR,
         )
         assertTrue(
-            "second return-intent sample missing",
-            oracle.third.await(1, TimeUnit.SECONDS),
+            "restarted worker sample missing",
+            oracle.fourth.await(1, TimeUnit.SECONDS),
         )
 
         assertEquals(
@@ -192,6 +200,7 @@ class BoundaryWatchControllerLifecycleTest {
                 0L,
                 90_000_000L,
                 180_000_000L,
+                270_000_000L,
             ),
             oracle.sampleTimes(),
         )
@@ -316,6 +325,7 @@ class BoundaryWatchControllerLifecycleTest {
     ) : BoundarySpriteOracle {
         val second = CountDownLatch(1)
         val third = CountDownLatch(1)
+        val fourth = CountDownLatch(1)
         private val lock = Any()
         private val samples = mutableListOf<Long>()
 
@@ -328,6 +338,7 @@ class BoundaryWatchControllerLifecycleTest {
             }
             if (count == 2) second.countDown()
             if (count == 3) third.countDown()
+            if (count == 4) fourth.countDown()
             return SurfaceFlingerSpritePosition(
                 name = "Sprite#0",
                 layerStack = layerStack,
