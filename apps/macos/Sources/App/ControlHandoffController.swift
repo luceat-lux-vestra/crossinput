@@ -486,12 +486,21 @@ final class ControlHandoffController: @unchecked Sendable {
     private func releaseHostOwnershipAndCapture(
         reason: SuppressionReleaseReason
     ) {
+        Diagnostics.log(
+            "host return phase=requested reason=\(String(describing: reason))"
+        )
+
         // Remote cursor shape belongs to the same ownership epoch. Withdraw it
         // at the synchronous local-return gate before releasing CoreHID.
         remoteCursorPresenter.restoreLocal()
 
         let lifecycleGeneration = invalidateControlAdmissionsGeneration()
+        Diagnostics.log(
+            "host return phase=admissions-invalidated captureGeneration="
+                + (lifecycleGeneration.map(String.init) ?? "none")
+        )
         hostPointerAcquisitionTaskSlot.cancelCurrent()
+        Diagnostics.log("host return phase=acquisition-cancelled")
 
         // Remove publication first, but do not unseize yet. If lifecycle state
         // was already lost, the slot still carries the capture generation.
@@ -501,14 +510,38 @@ final class ControlHandoffController: @unchecked Sendable {
 
         // Keyboard must be local before the seizing CoreHID client is dropped.
         if let captureGeneration {
-            _ = capture.deactivateExternalPointerOwner(
+            Diagnostics.log(
+                "host return phase=keyboard-local-requested captureGeneration=\(captureGeneration)"
+            )
+            let deactivated = capture.deactivateExternalPointerOwner(
                 generation: captureGeneration
             )
+            Diagnostics.log(
+                "host return phase=keyboard-local-completed captureGeneration=\(captureGeneration) "
+                    + "accepted=\(deactivated)"
+            )
         }
-        ownership?.lease?.release()
+
+        if let lease = ownership?.lease {
+            Diagnostics.log(
+                "host return phase=corehid-release-requested hostGeneration=\(lease.generation)"
+            )
+            lease.release()
+            Diagnostics.log(
+                "host return phase=corehid-release-completed hostGeneration=\(lease.generation)"
+            )
+        } else {
+            Diagnostics.log("host return phase=corehid-release-skipped reason=no-active-lease")
+        }
 
         if let captureGeneration {
+            Diagnostics.log(
+                "host return phase=capture-release-requested captureGeneration=\(captureGeneration)"
+            )
             capture.release(reason: reason, generation: captureGeneration)
+            Diagnostics.log(
+                "host return phase=capture-release-completed captureGeneration=\(captureGeneration)"
+            )
 
             // Schedule remote persistent-state cleanup immediately after the
             // synchronous host return. Do not depend on the asynchronous
@@ -846,11 +879,13 @@ final class ControlHandoffController: @unchecked Sendable {
     }
 
     func emergencyReturn() {
+        Diagnostics.log("emergency return phase=controller-requested")
         // Emergency return is fail-safe only; ordinary product return is the
         // authoritative remote-boundary path.
         retireBoundaryWatch()
         releaseHostOwnershipAndCapture(reason: .emergencyHotkey)
         sender.cancelPendingPointerEvents()
+        Diagnostics.log("emergency return phase=state-return-requested")
         switchMachine.forceReturn()
     }
 
