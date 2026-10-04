@@ -36,6 +36,7 @@ public enum ScreenEdge: String, Sendable, Equatable, CaseIterable {
 public enum TransitionReason: String, Sendable {
     case activation
     case edgeEntered
+    case edgeExited
     case boundaryCrossed
     case emergencyReturn
     case watchdogTimeout
@@ -43,6 +44,15 @@ public enum TransitionReason: String, Sendable {
     case externalControlTakeover
     case remoteUnavailable
     case deactivated
+}
+
+public enum AutomaticReturnAuthority: Sendable, Equatable {
+    /// Transitional legacy policy for targets whose delivery model is still
+    /// intentionally using relative movement accounting for normal return.
+    case relativeMovement
+    /// No screen-boundary claim can be derived from relative movement.
+    /// Normal return must come from an explicit/authoritative control signal.
+    case none
 }
 
 /// A concrete state transition with a monotonically increasing sequence.
@@ -129,6 +139,8 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// 0 = entry boundary, positive = inside the remote target, negative = beyond the
     /// boundary toward macOS. Return fires only when position <= -returnHysteresis.
     private var virtualAxisPosition: CGFloat = 0
+    private var automaticReturnAuthority: AutomaticReturnAuthority = .relativeMovement
+    private var preparationRequiredStorage = false
 
     /// False until the first movement event after entering is accumulated.
     /// The first event never triggers a return (issue #37).
@@ -169,6 +181,21 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         queue.sync { sequenceCounter }
     }
 
+    public var requiresRemotePreparation: Bool {
+        queue.sync { preparationRequiredStorage }
+    }
+
+    public func setAutomaticReturnAuthority(_ authority: AutomaticReturnAuthority) {
+        run {
+            guard automaticReturnAuthority != authority else { return }
+            automaticReturnAuthority = authority
+            // Movement accumulated under one authority must never become a
+            // boundary decision after the authority changes.
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+        }
+    }
+
     // MARK: - Transition handler
     //
     // Registration is intended to happen before concurrent use begins
@@ -193,27 +220,73 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
         run {
             virtualAxisPosition = 0
             hasReceivedFirstMove = false
+            preparationRequiredStorage = false
             deactivation = transition(to: .disabled, reason: .deactivated)
         }
         return deactivation
     }
 
     /// Pointer reached a screen edge while macOS is active.
-    public func pointerAtEdge(_ edge: ScreenEdge) {
+    ///
+    /// When remote boundary authority must be prepared, acquisition stops in
+    /// `.edgeArmed` until `remotePrepared()` succeeds. No host suppression
+    /// begins before the remote boundary owner is ready.
+    public func pointerAtEdge(
+        _ edge: ScreenEdge,
+        requiresPreparation: Bool = false
+    ) {
         run {
             switch stateStorage {
             case .localActive:
+                entryEdgeStorage = edge
+                virtualAxisPosition = 0
+                hasReceivedFirstMove = false
+                preparationRequiredStorage = requiresPreparation
                 transition(to: .edgeArmed, reason: .edgeEntered)
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
-                transition(to: .remoteActive, reason: .edgeEntered)
+                if !requiresPreparation {
+                    transition(to: .remoteActive, reason: .edgeEntered)
+                }
             case .edgeArmed:
-                entryEdgeStorage = edge
-                virtualAxisPosition = 0
-                hasReceivedFirstMove = false
-            default: break
+                break
+            default:
+                break
             }
+        }
+    }
+
+    @discardableResult
+    public func remotePrepared() -> Bool {
+        var activated = false
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            activated =
+                transition(to: .remoteActive, reason: .edgeEntered) != nil
+        }
+        return activated
+    }
+
+    public func cancelEdgePreparation() {
+        run {
+            guard stateStorage == .edgeArmed else { return }
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            preparationRequiredStorage = false
+            transition(to: .localActive, reason: .edgeExited)
+        }
+    }
+
+    /// Starts an authoritative remote-boundary return without publishing
+    /// localActive. The lifecycle owner must release native host ownership
+    /// first, then call completeReturn(reason:).
+    @discardableResult
+    public func beginAuthoritativeBoundaryReturn() -> Bool {
+        run {
+            guard stateStorage == .remoteActive else { return false }
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            preparationRequiredStorage = false
+            transition(to: .returning, reason: .boundaryCrossed)
+            return true
         }
     }
 
@@ -255,14 +328,49 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// virtual position, state, or transition callbacks.
     public func pointerMoved(requestedDx: CGFloat, requestedDy: CGFloat,
                              deliveredDx: CGFloat, deliveredDy: CGFloat) {
+        if beginBoundaryReturnIfNeeded(
+            requestedDx: requestedDx,
+            requestedDy: requestedDy,
+            deliveredDx: deliveredDx,
+            deliveredDy: deliveredDy
+        ) {
+            completeReturn(reason: .boundaryCrossed)
+        }
+    }
+
+    /// Accounts one remote movement and, when the legacy movement authority
+    /// crosses its threshold, transitions only to `.returning`.
+    ///
+    /// The lifecycle owner uses this coordinated form so native host-pointer
+    /// ownership can be restored synchronously before `.localActive` is
+    /// published. The compatibility `pointerMoved` wrapper above completes
+    /// immediately for state-machine-only callers.
+    @discardableResult
+    public func beginBoundaryReturnIfNeeded(
+        requestedDx: CGFloat,
+        requestedDy: CGFloat,
+        deliveredDx: CGFloat,
+        deliveredDy: CGFloat
+    ) -> Bool {
         run {
-            guard stateStorage == .remoteActive else { return }
+            guard stateStorage == .remoteActive else { return false }
+            guard automaticReturnAuthority == .relativeMovement else { return false }
             // Zero delivery is not a movement: must not consume the first-event
             // exemption (a failed/empty send should leave the machine untouched).
-            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else { return }
+            guard requestedDx != 0 || requestedDy != 0 || deliveredDx != 0 || deliveredDy != 0 else {
+                return false
+            }
             let edge = entryEdgeStorage
-            let requestedDelta = Self.androidDirectedDelta(entryEdge: edge, dx: requestedDx, dy: requestedDy)
-            let deliveredDelta = Self.androidDirectedDelta(entryEdge: edge, dx: deliveredDx, dy: deliveredDy)
+            let requestedDelta = Self.androidDirectedDelta(
+                entryEdge: edge,
+                dx: requestedDx,
+                dy: requestedDy
+            )
+            let deliveredDelta = Self.androidDirectedDelta(
+                entryEdge: edge,
+                dx: deliveredDx,
+                dy: deliveredDy
+            )
             // Issue #45: return-direction intent is credited in full even when
             // the helper's display-bound clamp absorbed all of it; inward
             // movement only ever advances by what was accepted.
@@ -284,14 +392,23 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
                     "edge pointerMoved entry=\(edge.rawValue) state=\(stateStorage.rawValue) "
                         + "movement=received first=\(first) "
                         + "boundaryClamped=\(requestedDelta < 0 && deliveredDelta != requestedDelta)"
-                    )
+                )
             }
             // The first event after entering never returns (issue #37); leftover
             // warp/synthetic deltas must not bounce the user out of the remote target.
-            guard !first else { return }
-            if position <= -returnHysteresis {
-                returnToMacOS(reason: .boundaryCrossed)
-            }
+            guard !first, position <= -returnHysteresis else { return false }
+
+            virtualAxisPosition = 0
+            hasReceivedFirstMove = false
+            transition(to: .returning, reason: .boundaryCrossed)
+            return true
+        }
+    }
+
+    public func completeReturn(reason: TransitionReason) {
+        run {
+            guard stateStorage == .returning else { return }
+            transition(to: .localActive, reason: reason)
         }
     }
 
@@ -324,21 +441,22 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     /// mutations originate from different threads: transitions are stamped on
     /// the state queue, so their callback order on the FIFO callback queue
     /// matches the sequence numbers.
-    private func run(_ body: () -> Void) {
+    private func run<T>(_ body: () -> T) -> T {
         queue.sync {
-            body()
+            let result = body()
             let transitions = pendingTransitions
             pendingTransitions = []
 
-            guard !transitions.isEmpty else { return }
-
-            // Enqueue while the state queue is still held.
-            // This guarantees callback enqueue order matches sequence order.
-            callbackQueue.async { [self] in
-                for transition in transitions {
-                    onStateChange?(transition)
+            if !transitions.isEmpty {
+                // Enqueue while the state queue is still held.
+                // This guarantees callback enqueue order matches sequence order.
+                callbackQueue.async { [self] in
+                    for transition in transitions {
+                        onStateChange?(transition)
+                    }
                 }
             }
+            return result
         }
     }
 
@@ -353,6 +471,7 @@ public final class EdgeSwitchStateMachine: @unchecked Sendable {
     private func returnToMacOS(reason: TransitionReason) {
         virtualAxisPosition = 0
         hasReceivedFirstMove = false
+        preparationRequiredStorage = false
         transition(to: .returning, reason: reason)
         transition(to: .localActive, reason: reason)
     }

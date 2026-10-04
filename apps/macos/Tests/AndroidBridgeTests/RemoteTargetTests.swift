@@ -24,6 +24,7 @@ final class RemoteTargetTests: XCTestCase {
         XCTAssertEqual(target.kind, .external)
         XCTAssertEqual(target.availability, .available)
         XCTAssertEqual(target.width, 1920)
+        XCTAssertTrue(target.prefersSystemRoutedPointer)
     }
 
     func testAndroid12VirtualDesktopRecordIsRecognizedWithoutDesktopFlag() {
@@ -42,7 +43,50 @@ final class RemoteTargetTests: XCTestCase {
         )
 
         XCTAssertTrue(display.isDesktop)
-        XCTAssertEqual(RemoteTargetCatalog.normalize(display).kind, .external)
+        let target = RemoteTargetCatalog.normalize(display)
+        XCTAssertEqual(target.kind, .external)
+        XCTAssertTrue(target.prefersSystemRoutedPointer)
+    }
+
+    func testHdmiExternalDoesNotClaimSystemRoutedPointerPreference() {
+        let display = DisplayInfo(
+            displayId: 16,
+            type: 2,
+            flags: 139,
+            state: 2,
+            width: 1920,
+            height: 1080,
+            densityDpi: 213,
+            rotation: 0,
+            name: "HDMI Screen",
+            uniqueId: "local:1",
+            layerStack: 16
+        )
+
+        let target = RemoteTargetCatalog.normalize(display)
+
+        XCTAssertEqual(target.kind, .external)
+        XCTAssertFalse(target.prefersSystemRoutedPointer)
+    }
+
+    func testDesktopNameAloneDoesNotClaimSystemRouting() {
+        let display = DisplayInfo(
+            displayId: 9,
+            type: 5,
+            flags: 0,
+            state: 2,
+            width: 1920,
+            height: 1080,
+            densityDpi: 160,
+            rotation: 0,
+            name: "Desktop",
+            uniqueId: "virtual:app-owned,Desktop,0",
+            layerStack: 9
+        )
+
+        XCTAssertFalse(
+            RemoteTargetCatalog.normalize(display).prefersSystemRoutedPointer
+        )
     }
 
     func testSelectionPreservesOverrideThenExternalThenFirstPolicy() {

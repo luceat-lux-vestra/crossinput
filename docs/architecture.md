@@ -175,17 +175,44 @@ delivery, or remote-close state. `AppModel` is not a compatibility requirement.
 
 ## Runtime data path
 
+Production built-in-trackpad ownership deliberately separates pointer
+observation, pointer ownership, and keyboard suppression:
+
 ```text
-CGEventTap
-  -> MacEventTap
-  -> MacInputTranslator
+local pointer / edge observation
+  -> listen-only pointer CGEventTap
+  -> EdgeDetector / ownership-anomaly observation
+
+remote pointer
+  -> CoreHID built-in-trackpad seizure
+  -> raw report decoder / semantic translator
   -> current active ControlLease.InputIngress
   -> DeliveryWorker
   -> RemoteCommandLane
   -> CXI v1 adapter
   -> Android helper
   -> backend/system routing
+
+keyboard
+  -> modifying keyboard-only CGEventTap
+  -> MacInputTranslator
+  -> current active ControlLease.InputIngress
+  -> DeliveryWorker
+  -> RemoteCommandLane
+  -> CXI v1 adapter
 ```
+
+Pointer event types are not registered on the long-lived modifying tap in the
+CoreHID production topology. CoreHID is the sole remote pointer owner.
+
+Physical target evidence shows ordinary tap-to-click does not end with a
+zero-contact Report-ID-2 frame: contact-present reports stop instead. The
+production translator therefore treats **50 ms of unchanged report silence** as
+a bounded end-of-contact oracle. Every newer report invalidates the pending
+silence token, a real zero-contact report remains authoritative if one appears,
+and Control generation checks reject any deferred semantic event after return.
+Movement/scroll remains immediate and is never buffered behind tap
+classification.
 
 The event callback never waits for a remote result.
 
@@ -311,13 +338,41 @@ synchronously for the fence.
 
 ## Host suppression and #96
 
-Only HostSuppressionController may consume host input or perform accepted P0
-cursor confinement.
+#96 is an open remote-ownership presentation blocker. It is not an accepted
+visual limitation.
 
-#96 remains authoritative: retain P0 confinement, keep the native macOS cursor
-visible, accept the cursor-presentation limitation, and do not introduce private
-SkyLight/CGS, synthetic click/focus stealing, pointer-jump/custom-cursor
-workarounds, or equivalent experiments without materially new evidence.
+The production built-in-trackpad topology separates three host planes:
+
+- listen-only pointer observation for local edge/anomaly facts;
+- modifying keyboard-only suppression for remote keyboard ownership;
+- CoreHID seizure as the sole remote pointer isolation/semantic owner.
+
+Emergency Return to Mac has an additional independent listen-only keyDown tap
+with its own run loop. Its receipt does not depend on the modifying keyboard
+tap, Carbon event dispatch, or Android progress.
+
+Cursor presentation is a fourth, presentation-only owner tied to the same
+Control epoch:
+
+- it is published only after the CoreHID lease is published and matching
+  keyboard admission becomes ready;
+- a small transparent non-activating AppKit panel is placed under the frozen
+  host-edge pointer and owns a normal cursor rectangle;
+- left/right ownership uses native `NSCursor.resizeLeftRight`;
+- top/bottom ownership uses native `NSCursor.resizeUpDown`;
+- this deliberately avoids one-shot `NSCursor.set()`, whose application cursor
+  need not be the visible system cursor while another app is active;
+- the panel is withdrawn at the synchronous local-return gate before CoreHID
+  release;
+- stale main-thread presentation work is generation-rejected.
+
+The directional cursor does not provide isolation and is not a recovery hack.
+Do not reintroduce hide/show, `CGAssociate`, synthetic click/focus/movement,
+Quartz hold/restore warps, custom cursor masking, or private SkyLight/CGS
+presentation-reset permutations already rejected by #96 evidence.
+
+Exact-head physical proof must show the directional cursor during real
+`remoteActive` ownership and normal local cursor behavior after return.
 
 ## HandoffPolicy
 
@@ -325,12 +380,16 @@ Handoff becomes pure policy: facts in, acquire/remain/return decisions out.
 ControlCoordinator serializes it. HandoffPolicy owns no task, queue, lock,
 transport, event tap, diagnostics, or callback sequencing.
 
-Validated #45/#37 behavior remains unless separately superseded:
+Validated #45/#37 behavior remains only where the selected pointer-routing path has authority to interpret relative movement as boundary progress:
 
 - requested-intent return credit when Android clamps at the boundary;
 - accepted inward movement credit;
 - first post-entry movement guard; and
 - hysteresis against edge wobble.
+
+System-routed UHID desktop targets do **not** get boundary authority from relative movement: Android InputReader may accelerate/clamp relative reports and semantic delivery is not a screen-coordinate observation. For DeX, Android-owned compositor observation supplies the authoritative remote boundary. Relative deltas express return intent only; a matching compositor boundary confirmation starts the two-phase return, and CoreHID ownership is released before `localActive` is published. The emergency shortcut remains an independent fail-safe.
+
+The same compositor authority also permits a low-latency movement lane. DeX/UHID movement is written in pointer-queue order with requestId `0` and does not wait for one `POINTER_RESULT` round trip per trackpad batch. This preserves physical report cadence and Android's native mouse acceleration. Stateful pointer transitions and explicit-display movement remain correlated/acknowledged barriers.
 
 An `acquire` decision remains subject to host readiness, clean Session/Target
 context, `prepared -> active` linearization, and predecessor remote-close

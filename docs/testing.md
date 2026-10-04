@@ -189,7 +189,7 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
 5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; current pre-Leap macOS selection publishes only after this response. The Leap retains the confirmation/barrier requirement through TargetLease rather than preserving that controller type.
-6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames — the helper returns `POINTER_RESULT` with status/accepted movement, without logging payloads. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the current dispatcher degrades to InputManager until the next `SELECT_DISPLAY`.
+6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames. Correlated pointer frames return `POINTER_RESULT` with status/accepted movement, without logging payloads. In the production DeX compositor-authority path, high-rate movement uses requestId `0` as a one-way lane so movement is not serialized on response RTT; buttons/scroll remain correlated ordering barriers. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the current dispatcher degrades to InputManager until the next `SELECT_DISPLAY`, which invalidates compositor authority and must fail local.
 7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
 9. `scripts/deploy-helper.sh stop` — SHUTDOWN frame; helper must destroy pointer and keyboard UHID devices and exit cleanly (B-07).
@@ -409,7 +409,7 @@ ADR-0016/ADR-0012 obligations.
 
 | Area | Required checks | Evidence status |
 |---|---|---|
-| DeX pointer | selected DeX target, edge handoff, visible pointer, relative move, left/right/middle click, scroll, return to macOS | helper routing recorded; target-screen visibility and fresh app path pending |
+| DeX pointer | selected DeX target, edge handoff, visible natural-feeling pointer movement, one-finger tap-to-click, secondary click, vertical/horizontal scroll, pull-back at the actual DeX boundary for normal return; Emergency Return to Mac (⇧⌘X) only as fail-safe | helper routing/compositor authority implemented; exact-head physical product validation pending |
 | Phone target | phone display selection and pointer routing | pending; requires screen confirmation |
 | Keyboard | key down/up, modifiers, no repeat/stuck key, Korean 2-set, Mac shortcut suppression | pending fresh regression |
 | Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |

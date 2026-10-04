@@ -1,0 +1,7 @@
+{
+  "type": "BOUNDARY_WATCH_START",
+  "requestId": 10,
+  "controlToken": "42",
+  "displayId": 2,
+  "edge": "RIGHT"
+}
