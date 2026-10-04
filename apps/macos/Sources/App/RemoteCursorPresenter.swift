@@ -113,7 +113,10 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
             self.presentationPanel = panel
             Diagnostics.log(
                 "host cursor presentation remote mode=cursor-rect forced=true "
-                    + "edge=\(edge.rawValue)"
+                    + "edge=\(edge.rawValue) "
+                    + "appActive=\(NSApp.isActive) "
+                    + "panelKey=\(panel.isKeyWindow) "
+                    + "cursorRectsEnabled=\(panel.areCursorRectsEnabled)"
             )
         }
     }
