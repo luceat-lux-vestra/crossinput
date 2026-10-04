@@ -1,8 +1,7 @@
 name: Feature request
 description: Propose a new Ampersand feature
 title: "feat: "
-labels:
-  - type/feature
+labels: type/feature
 body:
   - type: textarea
     id: background
