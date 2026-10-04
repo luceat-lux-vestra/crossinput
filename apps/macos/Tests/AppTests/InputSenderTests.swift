@@ -287,15 +287,21 @@ final class InputSenderTests: XCTestCase {
         let fixture = makeFixture()
         let capture = InputCapture(pointerRestoreOverride: {})
         let machine = EdgeSwitchStateMachine()
+        let capabilityController = InputCapabilityController(
+            system: GrantedInputCapabilitySystem()
+        )
         let controller = ControlHandoffController(
             sender: fixture.sender,
             boundaryWatch: ImmediateBoundaryWatchService(),
             capture: capture,
-            switchMachine: machine
+            switchMachine: machine,
+            capabilityController: capabilityController,
+            captureStart: { true },
+            captureStop: {}
         )
         controller.updateRemoteTarget(2)
 
-        machine.activate()
+        XCTAssertEqual(controller.enable(), .enabled)
         machine.flushCallbacks()
         await settleMainActor()
         XCTAssertEqual(machine.state, .localActive)
