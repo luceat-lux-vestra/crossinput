@@ -59,11 +59,11 @@ echo "    root: $ROOT"
 case "$CONFIG" in
   release|dmg)
     (cd "$ROOT/apps/macos" && swift build -c release -Xswiftc -DCANDIDATE_IDENTITY_GENERATED)
-    BIN_DIR="$ROOT/apps/macos/.build/arm64-apple-macosx/release"
+    BIN_DIR="$(cd "$ROOT/apps/macos" && swift build -c release --show-bin-path)"
     ;;
   debug)
     (cd "$ROOT/apps/macos" && swift build -Xswiftc -DCANDIDATE_IDENTITY_GENERATED)
-    BIN_DIR="$ROOT/apps/macos/.build/arm64-apple-macosx/debug"
+    BIN_DIR="$(cd "$ROOT/apps/macos" && swift build --show-bin-path)"
     ;;
   *)
     echo "ERROR: unknown config '$CONFIG' (expected release|debug)" >&2

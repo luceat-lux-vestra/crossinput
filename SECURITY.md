@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-v0.1.0 is the first public release; v0.1.2 is the current published field-use release. There are no LTS/stability guarantees yet.
+v0.1.0 is the first public release; v0.1.3 is the current published field-use release. There are no LTS/stability guarantees yet.
 All reports are welcome until a stable release exists.
 
 ## Reporting a vulnerability
@@ -22,8 +22,9 @@ Validation` component and weekly via `.github/workflows/hardening-audit.yml`
 - **Required check on `main`:** `Merge Gate`. The active ruleset requires this single
   aggregate context strictly, has no bypass actors, requires review-thread resolution, and
   allows squash-only merges. `Merge Gate` is produced by `ci.yml` and fails unless all
-  five internal components succeed: `macOS App Build + Test`, `Android Helper Build + Test`,
-  `Documentation Validation`, `Evidence & Tooling Validation`, and `Dependency Review`.
+  six internal components succeed: `macOS App Build + Test`, `macOS 15 Packaged App Compatibility`,
+  `Android Helper Build + Test`, `Documentation Validation`, `Evidence & Tooling Validation`, and
+  `Dependency Review`.
 - **Code scanning authority:** the custom `.github/workflows/codeql.yml` workflow is the
   single authority. Actions, Java/Kotlin, Python, and Swift are active on the pinned
   official action-managed bundle. CodeQL 2.27.1 restored support for the maintained
@@ -35,7 +36,7 @@ Validation` component and weekly via `.github/workflows/hardening-audit.yml`
   permissions are job-scoped and enumerated in `.github/hardening-policy.json`.
 - **Releases:** `v*` tags are immutable (deletion and update blocked, no bypass). The
   release workflow builds only from the tag's exact reviewed-`main` commit, verifies
-  checkout/version/signature/DMG identity, generates the checksum, attests the verified
+  checkout/version/packaged-app launch/signature/DMG identity, generates the checksum, attests the verified
   DMG build provenance with GitHub artifact attestations, publishes only after those
   checks, and re-verifies tag, commit and asset identity after publication. An
   inconclusive release lookup aborts rather than creating or mutating a release.

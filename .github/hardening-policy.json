@@ -16,6 +16,10 @@
           "name": "macOS App Build + Test"
         },
         {
+          "job": "macos-15-compat",
+          "name": "macOS 15 Packaged App Compatibility"
+        },
+        {
           "job": "android-helper",
           "name": "Android Helper Build + Test"
         },

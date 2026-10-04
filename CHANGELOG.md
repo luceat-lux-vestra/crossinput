@@ -5,6 +5,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-05
+
+Ampersand 0.1.3 is a launch-compatibility hotfix for the broken 0.1.2 macOS artifact. It preserves the 0.1.x product scope and the existing CoreHID ownership safety contract; #99 remains the explicit 0.2.0 permission/onboarding blocker.
+
+### Fixed
+
+- Replaced the direct Swift ABI dependency on `CoreHID.HIDDeviceClient.descriptor` with the stable IOKit C-ABI HID report-descriptor property path. The v0.1.2 artifact built on macOS 15 aborted in dyld on macOS 27, while an Xcode 27 build of the same direct Swift getter aborted on macOS 15.
+- Kept descriptor safety fail-closed: the IOKit device must independently match the CoreHID-verified vendor/product/location identity, built-in trackpad product, and built-in flag; zero, ambiguous, or descriptor-less matches are rejected before seizure.
+- Removed the packaging script's hard-coded SwiftPM `.build/arm64-apple-macosx/.../` output path and now discovers the toolchain-specific binary path through `swift build --show-bin-path`.
+
+### Release validation
+
+- macOS CI and release packaging use the Xcode 27 / macOS 27 ARM runner.
+- CI launches the packaged release app and fails on dyld or immediate-startup aborts.
+- The exact app packaged on macOS 27 is transferred to a macOS 15 runner and launch-smoked there, preserving the declared macOS 15+ support floor.
+- Release publication runs the packaged-app launch smoke before signature/DMG verification, provenance attestation, and GitHub Release mutation.
+
 ## [0.1.2] - 2026-10-05
 
 Ampersand 0.1.2 is an Architecture-Leap-in-progress field-use maintenance release built from the reviewed production `main` lineage. It advances the host-control ownership model substantially without claiming completion of the open Leap tracks. It intentionally remains on the 0.1.x line: issue #99 is still the explicit 0.2.0 permission/onboarding blocker, and this release does not claim ADR-0012 Level-3 release-stability completion.
