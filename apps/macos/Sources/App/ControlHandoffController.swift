@@ -851,7 +851,9 @@ final class ControlHandoffController: @unchecked Sendable {
             dy: CGFloat(dy)
         )
         let releasedEmergencyLatch = lifecycleLock.withLock {
-            guard emergencyReentryBlocked, directed < 0 else {
+            guard switchMachine.state == .localActive,
+                  emergencyReentryBlocked,
+                  directed < 0 else {
                 return false
             }
             emergencyReentryBlocked = false
