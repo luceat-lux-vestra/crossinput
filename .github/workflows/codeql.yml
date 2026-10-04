@@ -1,13 +1,6 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'AGENTS.md'
-      - 'docs/**/*.md'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
