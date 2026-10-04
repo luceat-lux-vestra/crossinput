@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import EdgeSwitch
 import Diagnostics
 
@@ -7,152 +8,139 @@ protocol RemoteCursorPresenting: AnyObject, Sendable {
     func restoreLocal()
 }
 
-/// A borderless non-activating panel is not key-capable by default because it
-/// has neither a title bar nor a resize bar. Cursor rectangles are a key-window
-/// facility in AppKit, so the remote cursor owner must explicitly be eligible
-/// to become key while retaining the non-activating panel style.
-final class RemoteCursorAuthorityPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+/// Thin runtime bridge to Carbon Appearance's public (deprecated)
+/// SetThemeCursor API. Unlike NSCursor.set(), this API is not scoped to the
+/// owning application's AppKit cursor stack.
+///
+/// Resolve dynamically so the modern Swift SDK does not need to expose legacy
+/// Carbon declarations at compile time. Failure to resolve is explicit and
+/// fail-closed for #96 presentation.
+final class CarbonThemeCursorBridge: @unchecked Sendable {
+    typealias SetThemeCursorFunction = @convention(c) (UInt32) -> Int32
+
+    static let shared = CarbonThemeCursorBridge()
+
+    private let handle: UnsafeMutableRawPointer?
+    private let setThemeCursorFunction: SetThemeCursorFunction?
+
+    private init() {
+        let candidates = [
+            "/System/Library/Frameworks/Carbon.framework/Carbon",
+            "/System/Library/Frameworks/Carbon.framework/Frameworks/HIToolbox.framework/HIToolbox",
+        ]
+
+        var resolvedHandle: UnsafeMutableRawPointer?
+        var resolvedFunction: SetThemeCursorFunction?
+
+        for path in candidates {
+            guard let candidate = dlopen(path, RTLD_LAZY | RTLD_LOCAL) else {
+                continue
+            }
+            guard let symbol = dlsym(candidate, "SetThemeCursor") else {
+                dlclose(candidate)
+                continue
+            }
+            resolvedHandle = candidate
+            resolvedFunction = unsafeBitCast(
+                symbol,
+                to: SetThemeCursorFunction.self
+            )
+            break
+        }
+
+        handle = resolvedHandle
+        setThemeCursorFunction = resolvedFunction
+    }
+
+    deinit {
+        if let handle {
+            dlclose(handle)
+        }
+    }
+
+    var isAvailable: Bool {
+        setThemeCursorFunction != nil
+    }
+
+    func set(_ cursor: UInt32) -> Int32? {
+        setThemeCursorFunction?(cursor)
+    }
 }
 
-final class RemoteCursorRectView: NSView {
-    let remoteCursor: NSCursor
-
-    init(cursor: NSCursor) {
-        self.remoteCursor = cursor
-        super.init(frame: .zero)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override var acceptsFirstResponder: Bool { true }
-    override var needsPanelToBecomeKey: Bool { true }
-
-    override func resetCursorRects() {
-        discardCursorRects()
-        addCursorRect(bounds, cursor: remoteCursor)
-    }
-}
-
-/// Presents the host-side remote-ownership cursor at the frozen handoff
-/// position without activating Ampersand or mutating the pointer position.
+/// Presents the host-side remote-ownership cursor without activating Ampersand
+/// and without mutating pointer position.
 ///
-/// A one-shot NSCursor.set() is insufficient here: it changes Ampersand's
-/// application cursor stack, but another active application may still own the
-/// visible cursor. The presenter therefore installs a tiny non-activating,
-/// key-capable AppKit panel under the already-frozen host cursor. Making this
-/// panel key gives its cursor rect real AppKit cursor authority without
-/// activating Ampersand.
+/// AppKit cursor APIs are application-scoped: Apple explicitly documents that
+/// NSCursor.current may differ from the actually visible cursor when another
+/// app is active. The previous NSCursor/cursor-rect candidates therefore could
+/// not own the global glyph in CrossInput's non-activating status-app model.
 ///
-/// Pointer isolation remains exclusively CoreHID's responsibility.
+/// Carbon Appearance's SetThemeCursor is a separate system-theme cursor API.
+/// It is deprecated but public, requires no private CGS/SkyLight SPI, and does
+/// not require pointer warping, synthetic mouse events, or app activation.
 final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
     @unchecked Sendable
 {
+    // Appearance.h ThemeCursor constants.
+    static let themeArrowCursor: UInt32 = 0
+    static let themeResizeLeftRightCursor: UInt32 = 17
+    static let themeResizeUpDownCursor: UInt32 = 21
+
     private let lock = NSLock()
     private var operationGeneration: UInt64 = 0
+    private let bridge: CarbonThemeCursorBridge
 
-    // Main-queue owned.
-    private var presentationPanel: RemoteCursorAuthorityPanel?
+    init(bridge: CarbonThemeCursorBridge = .shared) {
+        self.bridge = bridge
+    }
 
     func presentRemote(edge: ScreenEdge) {
         let generation = nextGeneration()
+        let themeCursor = Self.themeCursor(for: edge)
+
         Task { @MainActor [weak self] in
             guard let self,
                   self.isCurrent(generation) else {
                 return
             }
 
-            self.removePanelIfPresent()
-
-            let cursor = Self.cursor(for: edge)
-            let mouse = NSEvent.mouseLocation
-            guard let screen = Self.screen(containing: mouse) else {
+            guard self.bridge.isAvailable else {
                 Diagnostics.log(
-                    "host cursor presentation failed reason=no-screen"
+                    "host cursor presentation failed mode=carbon-theme "
+                        + "reason=SetThemeCursor-unavailable"
                 )
                 return
             }
 
-            let frame = Self.presentationFrame(
-                around: mouse,
-                in: screen.frame
-            )
-            let view = RemoteCursorRectView(cursor: cursor)
-            let panel = RemoteCursorAuthorityPanel(
-                contentRect: frame,
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered,
-                defer: false
-            )
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.hasShadow = false
-            panel.hidesOnDeactivate = false
-            panel.isFloatingPanel = true
-            panel.becomesKeyOnlyIfNeeded = false
-            panel.acceptsMouseMovedEvents = true
-            // Do not ignore mouse hit-testing: WindowServer must consider this
-            // view's cursor rect. CoreHID has already seized the built-in
-            // trackpad, and the panel is removed before ownership is released.
-            panel.ignoresMouseEvents = false
-            panel.level = .screenSaver
-            panel.collectionBehavior = [
-                .canJoinAllSpaces,
-                .fullScreenAuxiliary,
-                .stationary,
-                .ignoresCycle,
-            ]
-            panel.contentView = view
-
             let appWasActive = NSApp.isActive
             let frontmostPIDBefore =
                 NSWorkspace.shared.frontmostApplication?.processIdentifier
-
-            // A non-activating panel may become key without activating its
-            // owning application. This is the material difference from the
-            // previous orderFrontRegardless-only candidate, whose cursor rect
-            // existed but never obtained key-window cursor authority.
-            panel.makeKeyAndOrderFront(nil)
-            panel.resetCursorRects()
-
-            // CoreHID has seized the trackpad, so there may be no subsequent
-            // local mouse event to publish the newly authoritative cursor rect.
-            // Set the same native cursor once after key-window ownership exists.
-            cursor.set()
-
-            self.presentationPanel = panel
-
+            let status = self.bridge.set(themeCursor)
             let frontmostPIDAfter =
                 NSWorkspace.shared.frontmostApplication?.processIdentifier
+
             Diagnostics.log(
-                "host cursor presentation remote mode=key-cursor-rect "
+                "host cursor presentation remote mode=carbon-theme "
+                    + "generation=\(generation) "
                     + "edge=\(edge.rawValue) "
+                    + "status=\(status.map(String.init) ?? "nil") "
                     + "appWasActive=\(appWasActive) "
                     + "appActive=\(NSApp.isActive) "
-                    + "panelKey=\(panel.isKeyWindow) "
-                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter) "
-                    + "cursorRectsEnabled=\(panel.areCursorRectsEnabled)"
+                    + "frontmostUnchanged=\(frontmostPIDBefore == frontmostPIDAfter)"
             )
 
             self.logSystemCursorVerdict(
-                cursor: cursor,
                 edge: edge,
                 generation: generation,
                 phase: "immediate"
             )
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-                [weak self, weak panel] in
+                [weak self] in
                 guard let self,
-                      let panel,
-                      self.isCurrent(generation),
-                      self.presentationPanel === panel else {
+                      self.isCurrent(generation) else {
                     return
                 }
                 self.logSystemCursorVerdict(
-                    cursor: cursor,
                     edge: edge,
                     generation: generation,
                     phase: "settled"
@@ -168,36 +156,26 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
                   self.isCurrent(generation) else {
                 return
             }
-            guard self.presentationPanel != nil else { return }
+            guard self.bridge.isAvailable else { return }
 
-            self.removePanelIfPresent()
+            let status = self.bridge.set(Self.themeArrowCursor)
             Diagnostics.log(
-                "host cursor presentation local mode=key-cursor-rect restored"
+                "host cursor presentation local mode=carbon-theme "
+                    + "status=\(status.map(String.init) ?? "nil")"
             )
         }
     }
 
     @MainActor
-    private func removePanelIfPresent() {
-        presentationPanel?.orderOut(nil)
-        presentationPanel?.close()
-        presentationPanel = nil
-    }
-
-    @MainActor
     private func logSystemCursorVerdict(
-        cursor: NSCursor,
         edge: ScreenEdge,
         generation: UInt64,
         phase: String
     ) {
-        // currentSystem is deprecated for product logic, but Apple documents
-        // it as the cursor actually displayed system-wide. Use it only as a
-        // bounded diagnostic oracle so physical #96 runs no longer depend on
-        // an operator visually classifying the glyph.
+        let expected = Self.cursor(for: edge)
         let currentSystem = NSCursor.currentSystem
         let matches = currentSystem.map {
-            Self.cursorAppearanceMatches($0, cursor)
+            Self.cursorAppearanceMatches($0, expected)
         } ?? false
         Diagnostics.log(
             "host cursor presentation verdict "
@@ -223,6 +201,15 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
         lock.withLock { operationGeneration == generation }
     }
 
+    static func themeCursor(for edge: ScreenEdge) -> UInt32 {
+        switch edge {
+        case .left, .right:
+            return themeResizeLeftRightCursor
+        case .top, .bottom:
+            return themeResizeUpDownCursor
+        }
+    }
+
     static func cursor(for edge: ScreenEdge) -> NSCursor {
         switch edge {
         case .left, .right:
@@ -238,28 +225,5 @@ final class NativeRemoteCursorPresenter: RemoteCursorPresenting,
     ) -> Bool {
         lhs.hotSpot == rhs.hotSpot
             && lhs.image.tiffRepresentation == rhs.image.tiffRepresentation
-    }
-
-    private static func screen(containing point: NSPoint) -> NSScreen? {
-        NSScreen.screens.first {
-            NSMouseInRect(point, $0.frame, false)
-        } ?? NSScreen.main
-    }
-
-    static func presentationFrame(
-        around point: NSPoint,
-        in screenFrame: NSRect
-    ) -> NSRect {
-        let side: CGFloat = 48
-        let half = side / 2
-
-        let minX = screenFrame.minX
-        let maxX = max(minX, screenFrame.maxX - side)
-        let minY = screenFrame.minY
-        let maxY = max(minY, screenFrame.maxY - side)
-
-        let x = min(max(point.x - half, minX), maxX)
-        let y = min(max(point.y - half, minY), maxY)
-        return NSRect(x: x, y: y, width: side, height: side)
     }
 }
