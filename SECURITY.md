@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-v0.1.0 is the first public release; v0.1.1 is the current published field-use release. There are no LTS/stability guarantees yet.
+v0.1.0 is the first public release; v0.1.2 is the current published field-use release. There are no LTS/stability guarantees yet.
 All reports are welcome until a stable release exists.
 
 ## Reporting a vulnerability

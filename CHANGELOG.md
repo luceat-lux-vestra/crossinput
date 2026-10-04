@@ -5,6 +5,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-05
+
+Ampersand 0.1.2 is an Architecture-Leap-in-progress field-use maintenance release built from the reviewed production `main` lineage. It advances the host-control ownership model substantially without claiming completion of the open Leap tracks. It intentionally remains on the 0.1.x line: issue #99 is still the explicit 0.2.0 permission/onboarding blocker, and this release does not claim ADR-0012 Level-3 release-stability completion.
+
+### Added
+
+- A semantic macOS input domain and clearer input-capability ownership boundaries, keeping local capture capability separate from Android Session lifecycle.
+- CoreHID built-in-trackpad ownership in a disposable child process with exact-device matching, two-phase seizure activation, parent-lifetime cleanup, and independent `deviceUnseized` release evidence.
+- Isolated native directional cursor presentation for remote ownership, with a disposable helper process and bounded background-presentation authority.
+- Reproducible runtime diagnostics for host ownership, helper lifecycle, cursor presentation, and sanitized exact-candidate evidence.
+- Stronger repository/release hardening, including aggregated Merge Gate evidence, Dependency Review, CodeQL maintenance, workflow policy validation, and DMG provenance attestation.
+
+### Changed
+
+- Reworked macOS handoff around explicit ownership and fail-closed lifecycle boundaries instead of long-lived in-process pointer confinement.
+- DeX normal return uses authoritative Android compositor boundary observation for system-routed desktop pointer ownership rather than inferring the screen boundary from relative deltas.
+- Local-control publication now requires proven cursor-helper cleanup plus physical CoreHID release; visible cursor appearance is diagnostic rather than an ownership oracle.
+- macOS development/runtime baseline is macOS 15+ for the CoreHID production ownership path.
+- Android build tooling is aligned to Java 25 / Android 17 while retaining CXI v1 compatibility.
+
+### Fixed
+
+- Removed the previous host-pointer lockout/re-entry failure mode by proving CoreHID release through both ownership-process exit and an independent unseize witness.
+- Prevented cursor-appearance mismatch from falsely blocking an otherwise proven DeX -> Mac return and poisoning the next handoff generation.
+- Made same-generation concurrent return callers share one ordered host-return transaction instead of racing cursor/CoreHID teardown.
+- Added bounded cursor-helper startup tolerance so normal cold-start variance does not cause unnecessary fail-local admission.
+- Preserved fail-local behavior across normal return, emergency return, capture-originated release, remote failure, and external-control takeover.
+
+### Known limitations / evidence status
+
+- The packaged macOS app still does not bootstrap its matching Android helper automatically; the helper must be deployed separately with the documented development workflow.
+- The Architecture Leap remains in progress under #101/#115; this release does not claim those epics/tracks complete.
+- Issue #99 remains the explicit **0.2.0 release blocker** for first-run input-permission onboarding and runtime permission recovery.
+- Issue #222 tracks an intermittent Mac -> DeX edge-entry usability issue where a handoff may require repeated push attempts; the current release fails local safely and does not leave stale host ownership.
+- ADR-0012 Level-3 physical release-stability evidence remains tracked separately in #68 and is incomplete. This 0.1.2 field-use release does not claim Level-3 PASS.
+
 ## [0.1.1] - 2026-09-13
 
 Ampersand 0.1.1 is a pre-Architecture-Leap field-use maintenance release built from the reviewed production `main` lineage. It does not claim ADR-0012 Level-3 release-stability completion, and it does not satisfy the separate 0.2.0 permission/onboarding blocker tracked by #99.
