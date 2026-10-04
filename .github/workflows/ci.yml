@@ -15,8 +15,10 @@ concurrency:
 jobs:
   macos-app:
     name: macOS App Build + Test
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 20
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
     steps:
       - name: Detect documentation-only scope
         id: scope
@@ -136,6 +138,62 @@ jobs:
         run: |
           cd apps/macos
           swift test
+
+      - name: Package release app
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        run: bash scripts/package-macos.sh release
+
+      - name: Packaged app launch smoke
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        run: bash scripts/smoke-packaged-app-launch.sh dist/Ampersand.app
+
+      - name: Archive packaged app for compatibility smoke
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        run: tar -C dist -czf "$RUNNER_TEMP/Ampersand.app.tgz" Ampersand.app
+
+      - name: Upload packaged app for compatibility smoke
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ampersand-macos27-candidate
+          path: ${{ runner.temp }}/Ampersand.app.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-15-compat:
+    name: macOS 15 Packaged App Compatibility
+    needs: [macos-app]
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Documentation-only fast path
+        if: ${{ needs.macos-app.outputs.docs_only == 'true' }}
+        run: echo "Documentation-only change; packaged app compatibility is not applicable."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}
+        with:
+          persist-credentials: false
+
+      - name: Download macOS 27 packaged candidate
+        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ampersand-macos27-candidate
+          path: "${{ runner.temp }}/ampersand-compat"
+
+      - name: Extract packaged candidate
+        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ampersand-compat/app"
+          tar -xzf "$RUNNER_TEMP/ampersand-compat/Ampersand.app.tgz" \
+            -C "$RUNNER_TEMP/ampersand-compat/app"
+
+      - name: Launch Xcode 27 packaged app on macOS 15
+        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}
+        run: |
+          bash scripts/smoke-packaged-app-launch.sh \
+            "$RUNNER_TEMP/ampersand-compat/app/Ampersand.app"
 
   android-helper:
     name: Android Helper Build + Test
@@ -491,7 +549,7 @@ jobs:
 
   mergeGate:
     name: Merge Gate
-    needs: [macos-app, android-helper, markdown, scripts, dependencyReview]
+    needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencyReview]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -499,6 +557,7 @@ jobs:
       - name: Require every merge-gate component to succeed
         env:
           MACOS_RESULT: ${{ needs['macos-app'].result }}
+          MACOS_COMPAT_RESULT: ${{ needs['macos-15-compat'].result }}
           ANDROID_RESULT: ${{ needs['android-helper'].result }}
           DOCS_RESULT: ${{ needs.markdown.result }}
           TOOLING_RESULT: ${{ needs.scripts.result }}
@@ -509,6 +568,7 @@ jobs:
           failed=0
           for entry in \
             "macOS App Build + Test=$MACOS_RESULT" \
+            "macOS 15 Packaged App Compatibility=$MACOS_COMPAT_RESULT" \
             "Android Helper Build + Test=$ANDROID_RESULT" \
             "Documentation Validation=$DOCS_RESULT" \
             "Evidence & Tooling Validation=$TOOLING_RESULT" \

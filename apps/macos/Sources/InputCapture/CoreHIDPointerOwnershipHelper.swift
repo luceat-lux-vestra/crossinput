@@ -159,8 +159,11 @@ private enum CoreHIDPointerOwnershipHelperRuntime {
             return 72
         }
 
-        let descriptor = await client.descriptor
+        let descriptor: Data
         do {
+            descriptor = try IOKitHIDReportDescriptorProvider.descriptor(
+                matching: expectedIdentity
+            )
             let xy = try HIDReportDescriptorSemantics.analyzePointerXY(
                 descriptor: descriptor
             )

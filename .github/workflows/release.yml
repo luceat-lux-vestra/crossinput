@@ -26,7 +26,7 @@ env:
 
 jobs:
   dmg:
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 30
     permissions:
       contents: write
@@ -77,6 +77,9 @@ jobs:
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
+
+      - name: Launch packaged app smoke
+        run: bash scripts/smoke-packaged-app-launch.sh dist/Ampersand.app
 
       - name: Verify version, signature, and DMG integrity
         id: artifact

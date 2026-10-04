@@ -110,8 +110,8 @@ def main():
     case("Merge Gate cannot omit a component",
          lambda root: edit(
              workflow(root, "ci.yml"),
-             "needs: [macos-app, android-helper, markdown, scripts, dependencyReview]",
-             "needs: [macos-app, android-helper, markdown, scripts]",
+             "needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencyReview]",
+             "needs: [macos-app, macos-15-compat, android-helper, markdown, scripts]",
              1),
          "GATE_AGGREGATE")
 
