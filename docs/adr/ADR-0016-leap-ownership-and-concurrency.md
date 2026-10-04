@@ -385,12 +385,57 @@ repeated P0 Quartz confinement.
 - an independent listen-only emergency keyDown tap provides a separate
   Shift-Command-X receipt path;
 - CoreHID is the sole remote pointer ownership/semantic source;
-- after that ownership becomes ready, native directional cursor presentation is
-  published for the configured edge axis;
-- presentation is withdrawn at the synchronous local-return gate before
-  CoreHID release;
-- no private SkyLight/CGS dependency, custom cursor, hide/show/associate stack,
-  synthetic click/focus/movement, or Quartz cursor-repair warp is admitted.
+- the seizing `HIDDeviceClient` is owned by a disposable child process, not by
+  the long-lived app process;
+- the parent witness and child seizer are matched to the same specific CoreHID
+  device by `uniqueID` and/or `locationID`; absence of a specific locator is
+  a fail-closed acquisition error rather than permission to guess;
+- helper acquisition is two-phase: target validation must reach `prepared`
+  before the parent can commit seizure, eliminating an ambiguous
+  cancellation-before-seize window;
+- the parent retains an independent non-seizing CoreHID witness, and local
+  ownership may be published only after the child process has exited **and**
+  that witness observed `deviceUnseized`;
+- child stdin is a parent-lifetime lease (parent death -> EOF -> child exit),
+  with bounded SIGKILL fallback for a wedged helper;
+- after CoreHID ownership is ready, a separate disposable cursor helper must
+  prove the native directional cursor for the configured edge through
+  `NSCursor.currentSystem`; remote keyboard/pointer admission remains closed
+  until that cursor READY proof succeeds;
+- that cursor helper alone may resolve the narrow SkyLight
+  `SetsCursorInBackground` property so the native AppKit cursor can be
+  published while Ampersand remains a background/accessory application;
+- this SPI is strictly presentation-only: CoreHID remains the sole pointer
+  isolation/semantic owner, and cursor-helper state never participates in
+  physical release proof;
+- the cursor helper snapshots the pre-remote system cursor before publishing
+  the directional cursor;
+- the cursor helper has its own parent-lifetime stdin lease; return requests
+  EOF, removes cursor rect ownership, requests the pre-remote cursor while its
+  background authority still exists, disables that authority, then exits. A
+  pre-CoreHID `NSCursor.currentSystem` match is diagnostic only, not the
+  final visible-cursor proof;
+- normal return, emergency return, capture-originated release, remote failure,
+  and backend failure converge on one capture-generation-scoped host-return
+  transaction. Same-generation concurrent callers join its result instead of
+  independently progressing cursor/CoreHID teardown;
+- the parent waits a bounded graceful-exit window, falls back to SIGKILL only
+  for a wedged helper, and fully reaps it before CoreHID ownership-process
+  teardown;
+- after CoreHID process-exit + independent `deviceUnseized` proof, the
+  parent samples `NSCursor.currentSystem` against the parent-side pre-remote
+  appearance for diagnostics. Exact appearance equality is **not** an ownership
+  oracle because the local UI may legitimately choose a different native cursor;
+  capture release and `.localActive` require proven helper cleanup plus physical
+  CoreHID release, not snapshot equality;
+- cursor admission timeout/mismatch or unexpected helper death is a fail-local
+  condition for the exact Control generation;
+- after READY, the helper continuously validates the actual system cursor; a
+  bounded run of unrecoverable mismatches terminates the child and therefore
+  fails that exact Control generation local rather than tolerating #96;
+- outside that disposable presentation process, no private cursor SPI,
+  custom cursor, hide/show/associate stack, synthetic click/focus/movement, or
+  Quartz cursor-repair warp is admitted.
 
 Historical #96 evidence that repeated edge-hold warping can corrupt AppKit
 directional cursor rendering remains a negative regression constraint. The

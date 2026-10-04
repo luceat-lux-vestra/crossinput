@@ -184,8 +184,10 @@ local pointer / edge observation
   -> EdgeDetector / ownership-anomaly observation
 
 remote pointer
-  -> CoreHID built-in-trackpad seizure
-  -> raw report decoder / semantic translator
+  -> disposable CoreHID ownership helper process
+     -> built-in-trackpad seizure
+     -> raw report decoder / semantic translator
+     -> fixed-width semantic pointer IPC
   -> current active ControlLease.InputIngress
   -> DeliveryWorker
   -> RemoteCommandLane
@@ -203,7 +205,23 @@ keyboard
 ```
 
 Pointer event types are not registered on the long-lived modifying tap in the
-CoreHID production topology. CoreHID is the sole remote pointer owner.
+CoreHID production topology. CoreHID is the sole remote pointer owner, but the
+seizing `HIDDeviceClient` is deliberately isolated from the main application
+process.
+
+The parent binds its non-seizing witness and the child seizer to the same
+specific CoreHID device using CoreHID matching identity (`uniqueID` and/or
+`locationID`); if no specific locator exists, cross-process acquisition fails
+closed rather than guessing from product metadata.
+
+Acquisition is two-phase: the child validates that exact target device and
+reports `prepared`; only an explicit parent commit allows seizure. Before
+commit, cancellation is provably non-seizing. After commit, cleanup treats
+seizure as possible until it has both terminated the ownership process and
+independently observed CoreHID `deviceUnseized`. The child stdin pipe is also a parent-lifetime
+lease, so parent death produces EOF and tears down the disposable owner; a
+bounded SIGKILL fallback handles a wedged child. The generation registry remains
+reserved until physical release is proven.
 
 Physical target evidence shows ordinary tap-to-click does not end with a
 zero-contact Report-ID-2 frame: contact-present reports stop instead. The
@@ -352,24 +370,52 @@ with its own run loop. Its receipt does not depend on the modifying keyboard
 tap, Carbon event dispatch, or Android progress.
 
 Cursor presentation is a fourth, presentation-only owner tied to the same
-Control epoch:
+Control epoch and isolated from physical pointer ownership:
 
-- it is published only after the CoreHID lease is published and matching
-  keyboard admission becomes ready;
-- a small transparent non-activating AppKit panel is placed under the frozen
-  host-edge pointer and owns a normal cursor rectangle;
-- left/right ownership uses native `NSCursor.resizeLeftRight`;
-- top/bottom ownership uses native `NSCursor.resizeUpDown`;
-- this deliberately avoids one-shot `NSCursor.set()`, whose application cursor
-  need not be the visible system cursor while another app is active;
-- the panel is withdrawn at the synchronous local-return gate before CoreHID
-  release;
-- stale main-thread presentation work is generation-rejected.
+- the CoreHID lease may be published first, but remote keyboard/pointer
+  admission remains closed until this cursor helper reaches READY;
+- a disposable cursor helper places a small transparent non-activating AppKit
+  panel under the frozen host-edge pointer and owns the one-direction native
+  `NSCursor.columnResize(directions:)` / `rowResize(directions:)` cursor;
+- the helper is the **only** process permitted to resolve the narrow private
+  SkyLight `SetsCursorInBackground` property. That SPI is presentation-only:
+  it never owns confinement, HID semantics, release proof, pointer position, or
+  local-return recovery;
+- the helper must observe `NSCursor.currentSystem` matching the expected
+  directional cursor before sending its READY handshake. A mismatch, timeout,
+  launch failure, or unexpected helper exit fails the exact Control epoch local;
+- stdin is a parent-lifetime lease; on return the helper removes its cursor
+  rects, requests the pre-remote cursor while its background authority still
+  exists, disables that authority, and exits cleanly. Any system-cursor match
+  observed before CoreHID release is diagnostic rather than the final local
+  appearance oracle;
+- all normal/emergency/capture-originated/failure return sources coalesce into
+  one capture-generation-scoped host-return transaction. Duplicate callers for
+  the same generation wait for that transaction instead of independently
+  advancing cursor cleanup or CoreHID release;
+- the parent gives helper cleanup a bounded graceful-exit window and uses
+  SIGKILL only as containment fallback; the helper is fully reaped **before**
+  CoreHID ownership-process teardown begins;
+- after CoreHID process-exit + independent `deviceUnseized` proof, the
+  parent samples `NSCursor.currentSystem` against the parent-side pre-remote
+  appearance for diagnostics. Exact appearance equality is **not** an ownership
+  oracle because the local UI may legitimately choose a different native cursor;
+  capture release and `.localActive` require proven helper cleanup plus physical
+  CoreHID release, not snapshot equality;
+- periodic maintenance may reassert the same native cursor only while the
+  helper remains the admitted presentation owner, but it must re-check the
+  actual system cursor after each reassertion; three consecutive 100 ms
+  mismatches terminate the cursor child so the exact Control epoch fails local
+  instead of silently continuing with an ordinary arrow;
+- this bounded child-local maintenance is not a main-process cursor-repair
+  stack.
 
-The directional cursor does not provide isolation and is not a recovery hack.
-Do not reintroduce hide/show, `CGAssociate`, synthetic click/focus/movement,
-Quartz hold/restore warps, custom cursor masking, or private SkyLight/CGS
-presentation-reset permutations already rejected by #96 evidence.
+The directional cursor does not provide isolation. CoreHID remains the sole
+pointer isolation/semantic owner and its independent process-exit +
+`deviceUnseized` proof remains the local-return boundary. Outside the isolated
+cursor helper, do not introduce private cursor SPI, hide/show, `CGAssociate`,
+synthetic click/focus/movement, Quartz hold/restore warps, custom cursor masking,
+or other presentation-reset permutations rejected by #96 evidence.
 
 Exact-head physical proof must show the directional cursor during real
 `remoteActive` ownership and normal local cursor behavior after return.
