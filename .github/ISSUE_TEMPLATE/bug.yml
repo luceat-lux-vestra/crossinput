@@ -1,0 +1,92 @@
+name: Bug report
+description: Report an Ampersand bug
+title: "fix: "
+labels:
+  - type/bug
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: Describe the problem you observed.
+      placeholder: What went wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable sequence that reproduces the issue.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead?
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 26.0
+    validations:
+      required: true
+
+  - type: input
+    id: android
+    attributes:
+      label: Android device and version
+      description: Include the device model and Android version.
+      placeholder: e.g. Galaxy S26 Ultra / Android 17
+    validations:
+      required: true
+
+  - type: input
+    id: ampersand
+    attributes:
+      label: Ampersand version or commit
+      placeholder: e.g. 0.1.2 or abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: adb
+    attributes:
+      label: ADB version
+      placeholder: Output of adb version
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Real-device evidence
+      description: Attach or link the relevant real-device ADB/logcat excerpt, screen capture/video, or reproducible device command list. Do not include keystrokes, clipboard contents, or HID payloads.
+      placeholder: Describe the attached evidence and what it shows.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: evidence_ack
+    attributes:
+      label: Verification acknowledgement
+      options:
+        - label: I included real-device evidence appropriate to this report and did not include sensitive input payloads.
+          required: true
