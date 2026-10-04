@@ -1,8 +1,7 @@
 name: Bug report
 description: Report an Ampersand bug
 title: "fix: "
-labels:
-  - type/bug
+labels: type/bug
 body:
   - type: textarea
     id: symptom
