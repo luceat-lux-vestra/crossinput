@@ -290,39 +290,66 @@ struct AppleTrackpadSemanticTranslatorTests {
         #expect(down == [SemanticPointerEvent(.button(button: 0, down: true))])
     }
 
-    @Test("latched click contact identity cannot change while held")
-    func heldClickRejectsContactIdentityChange() throws {
-        var primary = AppleTrackpadSemanticTranslator()
-        _ = try primary.translate(
-            decode(buttons: 0b001, contactCount: 1)
+    @Test("primary click stays latched while a second contact performs drag")
+    func primaryHeldClickAllowsSecondContactDrag() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(buttons: 0b001, contactCount: 1)
+            ) == [SemanticPointerEvent(.button(button: 0, down: true))]
         )
         #expect(
-            throws: AppleTrackpadSemanticTranslator.TranslationError.invalidState
-        ) {
-            try primary.translate(
+            try translator.translate(
                 decode(
                     buttons: 0b001,
                     pointerX: 3,
+                    pointerY: -2,
                     contactCount: 2
                 )
-            )
-        }
-
-        var secondary = AppleTrackpadSemanticTranslator()
-        _ = try secondary.translate(
-            decode(buttons: 0b001, contactCount: 2)
+            ) == [SemanticPointerEvent(.move(dx: 3, dy: -2))]
         )
         #expect(
-            throws: AppleTrackpadSemanticTranslator.TranslationError.invalidState
-        ) {
-            try secondary.translate(
+            try translator.translate(
                 decode(
                     buttons: 0b001,
-                    pointerX: 3,
+                    pointerX: 2,
+                    pointerY: 1,
                     contactCount: 1
                 )
-            )
-        }
+            ) == [SemanticPointerEvent(.move(dx: 2, dy: 1))]
+        )
+        #expect(
+            try translator.translate(
+                decode(buttons: 0, contactCount: 1)
+            ) == [SemanticPointerEvent(.button(button: 0, down: false))]
+        )
+    }
+
+    @Test("secondary click stays latched while contact count changes during drag")
+    func secondaryHeldClickAllowsContactChangeDrag() throws {
+        var translator = AppleTrackpadSemanticTranslator()
+
+        #expect(
+            try translator.translate(
+                decode(buttons: 0b001, contactCount: 2)
+            ) == [SemanticPointerEvent(.button(button: 1, down: true))]
+        )
+        #expect(
+            try translator.translate(
+                decode(
+                    buttons: 0b001,
+                    pointerX: -4,
+                    pointerY: 2,
+                    contactCount: 1
+                )
+            ) == [SemanticPointerEvent(.move(dx: -4, dy: 2))]
+        )
+        #expect(
+            try translator.translate(
+                decode(buttons: 0, contactCount: 1)
+            ) == [SemanticPointerEvent(.button(button: 1, down: false))]
+        )
     }
 
     @Test("motion while secondary click is held fails closed")
