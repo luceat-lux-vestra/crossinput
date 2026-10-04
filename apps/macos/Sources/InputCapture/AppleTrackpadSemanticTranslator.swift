@@ -41,7 +41,12 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         var tapEligible = true
     }
 
+    /// Physical Button1 identity, latched from raw down until raw up.
     private var activeButton: UInt32?
+    /// Remote primary-button state is independent from its source. A
+    /// three-finger drag and raw Button1 may overlap on the real trackpad; both
+    /// co-own one logical primary-down instead of generating duplicate edges.
+    private var logicalPrimaryDown = false
     private var gesture: ContactGesture?
     private var suppressTapUntilLift = false
     /// CoreHID seizure bypasses macOS' three-finger-drag recognizer. Keep a
@@ -110,17 +115,29 @@ struct AppleTrackpadSemanticTranslator: Sendable {
 
         if clicked && !wasClicked {
             let button: UInt32
-            switch report.contactCount {
-            case 1: button = 0
-            case 2: button = 1
-            default:
-                throw TranslationError.unsupportedContactCount(
-                    report.contactCount
-                )
+            if threeFingerSequenceActive || report.contactCount == 3 {
+                // Physical evidence shows raw Button1 may transition during a
+                // three-finger drag. Treat it as another owner of the same
+                // primary drag; never fail or emit a duplicate primary-down.
+                button = 0
+            } else {
+                switch report.contactCount {
+                case 1: button = 0
+                case 2: button = 1
+                default:
+                    throw TranslationError.unsupportedContactCount(
+                        report.contactCount
+                    )
+                }
             }
             activeButton = button
             gesture = nil
             suppressTapUntilLift = true
+
+            if button == 0 {
+                guard !logicalPrimaryDown else { return [] }
+                logicalPrimaryDown = true
+            }
             return [
                 SemanticPointerEvent(.button(button: button, down: true))
             ]
@@ -131,6 +148,13 @@ struct AppleTrackpadSemanticTranslator: Sendable {
                 throw TranslationError.invalidState
             }
             activeButton = nil
+
+            if button == 0 {
+                // Three-finger drag may still own the logical primary button.
+                guard !threeFingerDragActive else { return [] }
+                guard logicalPrimaryDown else { return [] }
+                logicalPrimaryDown = false
+            }
             return [
                 SemanticPointerEvent(.button(button: button, down: false))
             ]
@@ -165,9 +189,12 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             var events: [SemanticPointerEvent] = []
             if !threeFingerDragActive {
                 threeFingerDragActive = true
-                events.append(
-                    SemanticPointerEvent(.button(button: 0, down: true))
-                )
+                if !logicalPrimaryDown {
+                    logicalPrimaryDown = true
+                    events.append(
+                        SemanticPointerEvent(.button(button: 0, down: true))
+                    )
+                }
             }
             events.append(
                 SemanticPointerEvent(.move(dx: dx, dy: dy))
@@ -179,9 +206,14 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             var events: [SemanticPointerEvent] = []
             if threeFingerDragActive {
                 threeFingerDragActive = false
-                events.append(
-                    SemanticPointerEvent(.button(button: 0, down: false))
-                )
+                // A concurrently held raw primary button keeps the remote
+                // primary logically down across the 3 -> 2 -> 1 transition.
+                if activeButton != 0, logicalPrimaryDown {
+                    logicalPrimaryDown = false
+                    events.append(
+                        SemanticPointerEvent(.button(button: 0, down: false))
+                    )
+                }
             }
             // Keep suppressing partial-lift semantics until all contacts lift.
             return events
@@ -264,11 +296,14 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             tapResolution = .suppressedByPhysicalClick
             if threeFingerDragActive {
                 threeFingerDragActive = false
-                return [
-                    SemanticPointerEvent(
-                        .button(button: 0, down: false)
-                    )
-                ]
+                if activeButton != 0, logicalPrimaryDown {
+                    logicalPrimaryDown = false
+                    return [
+                        SemanticPointerEvent(
+                            .button(button: 0, down: false)
+                        )
+                    ]
+                }
             }
             return []
         }
@@ -278,6 +313,10 @@ struct AppleTrackpadSemanticTranslator: Sendable {
             gesture = nil
             suppressTapUntilLift = false
             tapResolution = .suppressedByPhysicalClick
+            if button == 0 {
+                guard logicalPrimaryDown else { return [] }
+                logicalPrimaryDown = false
+            }
             return [
                 SemanticPointerEvent(
                     .button(button: button, down: false)
@@ -355,19 +394,21 @@ struct AppleTrackpadSemanticTranslator: Sendable {
         gesture = nil
         suppressTapUntilLift = false
         threeFingerSequenceActive = false
+        threeFingerDragActive = false
 
-        if threeFingerDragActive {
-            threeFingerDragActive = false
-            activeButton = nil
+        let physicalButton = activeButton
+        activeButton = nil
+
+        if logicalPrimaryDown {
+            logicalPrimaryDown = false
             return [
                 SemanticPointerEvent(.button(button: 0, down: false))
             ]
         }
 
-        guard let button = activeButton else { return [] }
-        activeButton = nil
+        guard let physicalButton, physicalButton != 0 else { return [] }
         return [
-            SemanticPointerEvent(.button(button: button, down: false))
+            SemanticPointerEvent(.button(button: physicalButton, down: false))
         ]
     }
 }
