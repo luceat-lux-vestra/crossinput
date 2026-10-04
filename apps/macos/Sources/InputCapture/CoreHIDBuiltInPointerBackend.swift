@@ -29,30 +29,6 @@ private final class CoreHIDPointerClientSlot: @unchecked Sendable {
     }
 }
 
-private final class CoreHIDMonitorCompletion: @unchecked Sendable {
-    private let lock = NSLock()
-    private let semaphore = DispatchSemaphore(value: 0)
-    private var completed = false
-
-    func finish() {
-        let shouldSignal = lock.withLock {
-            guard !completed else { return false }
-            completed = true
-            return true
-        }
-        if shouldSignal {
-            semaphore.signal()
-        }
-    }
-
-    func wait(timeout: DispatchTimeInterval) -> Bool {
-        if lock.withLock({ completed }) {
-            return true
-        }
-        return semaphore.wait(timeout: .now() + timeout) == .success
-    }
-}
-
 private final class CoreHIDMonitorTaskSlot: @unchecked Sendable {
     private let lock = NSLock()
     private var task: Task<Void, Never>?
@@ -65,12 +41,18 @@ private final class CoreHIDMonitorTaskSlot: @unchecked Sendable {
         lock.withLock { task?.cancel() }
     }
 
-    /// Releases the retained Task object only after monitor completion.
-    /// The Task closure captures the CoreHID notification stream; keeping the
-    /// completed Task alive can therefore keep the seized HIDDeviceClient alive
-    /// indirectly even after the explicit client slot is cleared.
-    func dropTask() {
-        lock.withLock { task = nil }
+    /// Takes sole ownership of the monitor task and awaits its actual return.
+    /// This is stronger than a flag signalled from inside the task's defer:
+    /// that signal can run while the closure stack and captured stream live.
+    func retire() async {
+        let task = lock.withLock {
+            let task = self.task
+            self.task = nil
+            return task
+        }
+        guard let task else { return }
+        await task.value
+        // The task handle and closure captures are released on return.
     }
 }
 
@@ -392,7 +374,6 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
     private let streamState: CoreHIDPointerStreamState
     private let releaseResponsibility: CoreHIDPointerReleaseResponsibility
     private let monitorTaskSlot: CoreHIDMonitorTaskSlot
-    private let monitorCompletion: CoreHIDMonitorCompletion
     private let releaseLock = NSLock()
     private var released = false
 
@@ -402,8 +383,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         clientSlot: CoreHIDPointerClientSlot,
         streamState: CoreHIDPointerStreamState,
         releaseResponsibility: CoreHIDPointerReleaseResponsibility,
-        monitorTaskSlot: CoreHIDMonitorTaskSlot,
-        monitorCompletion: CoreHIDMonitorCompletion
+        monitorTaskSlot: CoreHIDMonitorTaskSlot
     ) {
         self.generation = generation
         self.registry = registry
@@ -411,7 +391,6 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         self.streamState = streamState
         self.releaseResponsibility = releaseResponsibility
         self.monitorTaskSlot = monitorTaskSlot
-        self.monitorCompletion = monitorCompletion
     }
 
     func transferReleaseResponsibilityToLifecycleOwner() {
@@ -452,27 +431,19 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         )
 
         let releaseGeneration = generation
-        let monitorCompletion = monitorCompletion
         let monitorTaskSlot = monitorTaskSlot
         let clientSlot = clientSlot
         Task.detached(priority: .userInitiated) {
-            let monitorStopped = monitorCompletion.wait(
-                timeout: .seconds(1)
-            )
+            // Await the task itself, not an in-task completion signal. Only a
+            // returned task proves that its closure stack is gone and the
+            // captured CoreHID notification stream can be released.
+            await monitorTaskSlot.retire()
             Diagnostics.log(
-                "corehid pointer monitor retirement generation=\(releaseGeneration) "
-                    + "stopped=\(monitorStopped)"
+                "corehid pointer monitor retired generation=\(releaseGeneration)"
             )
 
-            // The completed Task itself retains its closure context, including
-            // the notification stream. Drop that owner before clearing the
-            // explicit HIDDeviceClient slot so CoreHID can actually deinitialize
-            // the seizing client deterministically.
-            monitorTaskSlot.dropTask()
-
-            // Keep potentially blocking HIDDeviceClient teardown off the return
-            // caller. At this point stream admission is closed, cancellation
-            // was requested, and the task/stream retention chain is severed.
+            // With the task/stream capture gone, clearing this explicit client
+            // slot must retire the seizing HIDDeviceClient.
             let deinitialized = clientSlot.dropClient()
             Diagnostics.log(
                 "corehid pointer client release generation=\(releaseGeneration) "
@@ -582,14 +553,11 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
             )
             let releaseResponsibility =
                 CoreHIDPointerReleaseResponsibility()
-            let monitorCompletion = CoreHIDMonitorCompletion()
 
             // Critical ownership shape: the task captures the stream and slot,
             // never the seizing HIDDeviceClient directly. release() can drop
             // the final explicit client reference without awaiting this task.
             let monitorTask = Task {
-                defer { monitorCompletion.finish() }
-
                 func failClosed(_ reason: String) {
                     guard streamState.fail() else { return }
                     Diagnostics.log(
@@ -674,8 +642,7 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
                 clientSlot: clientSlot,
                 streamState: streamState,
                 releaseResponsibility: releaseResponsibility,
-                monitorTaskSlot: monitorTaskSlot,
-                monitorCompletion: monitorCompletion
+                monitorTaskSlot: monitorTaskSlot
             )
         } catch {
             registry.release(generation)
