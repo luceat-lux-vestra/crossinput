@@ -331,7 +331,8 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
         )
 
         await enterRemote(machine)
-        XCTAssertTrue(await waitUntil { backend.hasStarted })
+        let backendStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(backendStarted)
         XCTAssertTrue(
             presenter.presentedEdges.isEmpty,
             "remote cursor must not be published before CoreHID ownership is ready"
@@ -369,15 +370,17 @@ final class ControlHandoffHostOwnershipTests: XCTestCase {
         let context = makeController(backend: backend)
 
         await enterRemote(context.machine)
-        XCTAssertTrue(await waitUntil { backend.hasStarted })
+        let backendStarted = await waitUntil { backend.hasStarted }
+        XCTAssertTrue(backendStarted)
 
         let lease = FakeHostPointerLease(generation: 890)
         backend.succeed(with: lease)
-        XCTAssertTrue(await waitUntil {
+        let leaseActivated = await waitUntil {
             context.controller.hasActiveHostPointerLeaseForTesting(
                 generation: lease.generation
             )
-        })
+        }
+        XCTAssertTrue(leaseActivated)
 
         context.controller.emergencyReturn()
 
