@@ -22,6 +22,26 @@ private final class CleanupBarrier: @unchecked Sendable {
     let resume = DispatchSemaphore(value: 0)
 }
 
+private struct ImmediateBoundaryWatchService: BoundaryWatchServicing {
+    func start(
+        controlToken: UInt64,
+        targetID: UInt32,
+        edge: RemoteBoundaryEdge,
+        timeout: TimeInterval
+    ) async throws -> PreparedBoundaryWatch {
+        PreparedBoundaryWatch(
+            controlToken: controlToken,
+            targetID: targetID,
+            sessionGeneration: 1,
+            mode: .compositor,
+            layerStack: Int32(targetID)
+        )
+    }
+
+    func stop(_ prepared: PreparedBoundaryWatch) {}
+}
+
+
 private final class TestEventBox: @unchecked Sendable {
     let event: CGEvent
 
@@ -269,9 +289,11 @@ final class InputSenderTests: XCTestCase {
         let machine = EdgeSwitchStateMachine()
         let controller = ControlHandoffController(
             sender: fixture.sender,
+            boundaryWatch: ImmediateBoundaryWatchService(),
             capture: capture,
             switchMachine: machine
         )
+        controller.updateRemoteTarget(2)
 
         machine.activate()
         machine.flushCallbacks()
