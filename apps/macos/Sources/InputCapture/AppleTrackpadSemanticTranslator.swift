@@ -252,6 +252,27 @@ struct AppleTrackpadSemanticTranslator: Sendable {
     ) throws -> [SemanticPointerEvent] {
         tapResolution = nil
 
+        // The target trackpad does not emit a terminal zero-contact report.
+        // Report silence is the proven end-of-contact oracle, so it must also
+        // retire a three-finger sequence. Otherwise the partial-lift latch
+        // remains set forever and all subsequent one/two-finger input is
+        // swallowed until the entire CoreHID translator is reset.
+        if threeFingerSequenceActive {
+            threeFingerSequenceActive = false
+            gesture = nil
+            suppressTapUntilLift = false
+            tapResolution = .suppressedByPhysicalClick
+            if threeFingerDragActive {
+                threeFingerDragActive = false
+                return [
+                    SemanticPointerEvent(
+                        .button(button: 0, down: false)
+                    )
+                ]
+            }
+            return []
+        }
+
         if let button = activeButton {
             activeButton = nil
             gesture = nil
