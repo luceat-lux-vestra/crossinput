@@ -191,14 +191,22 @@ class BoundaryWatchControllerLifecycleTest {
             PointerBoundaryAuthority.COMPOSITOR,
         )
         assertTrue(
-            "restarted worker sample missing",
+            "restarted worker fresh sample missing",
             oracle.fourth.await(1, TimeUnit.SECONDS),
+        )
+        assertTrue(
+            "restarted worker grace sample missing",
+            oracle.fifth.await(1, TimeUnit.SECONDS),
+        )
+        assertFalse(
+            "restarted worker must retire after one grace sample",
+            oracle.sixth.await(100, TimeUnit.MILLISECONDS),
         )
 
         val sampleTimes = oracle.sampleTimes()
         assertEquals(
-            "preflight + fresh + grace + restarted sample count",
-            4,
+            "each worker gets one fresh sample and one grace sample",
+            5,
             sampleTimes.size,
         )
         assertEquals(0L, sampleTimes.first())
@@ -330,6 +338,8 @@ class BoundaryWatchControllerLifecycleTest {
         val second = CountDownLatch(1)
         val third = CountDownLatch(1)
         val fourth = CountDownLatch(1)
+        val fifth = CountDownLatch(1)
+        val sixth = CountDownLatch(1)
         private val lock = Any()
         private val samples = mutableListOf<Long>()
 
@@ -343,6 +353,8 @@ class BoundaryWatchControllerLifecycleTest {
             if (count == 2) second.countDown()
             if (count == 3) third.countDown()
             if (count == 4) fourth.countDown()
+            if (count == 5) fifth.countDown()
+            if (count == 6) sixth.countDown()
             return SurfaceFlingerSpritePosition(
                 name = "Sprite#0",
                 layerStack = layerStack,
