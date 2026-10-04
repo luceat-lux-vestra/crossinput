@@ -497,7 +497,7 @@ final class ControlHandoffController: @unchecked Sendable {
         let lifecycleGeneration = invalidateControlAdmissionsGeneration()
         Diagnostics.log(
             "host return phase=admissions-invalidated captureGeneration="
-                + (lifecycleGeneration.map(String.init) ?? "none")
+                + (lifecycleGeneration.map { String($0) } ?? "none")
         )
         hostPointerAcquisitionTaskSlot.cancelCurrent()
         Diagnostics.log("host return phase=acquisition-cancelled")
