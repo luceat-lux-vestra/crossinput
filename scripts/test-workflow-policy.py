@@ -245,7 +245,7 @@ def main():
          "LABEL_UNMANAGED")
 
     case("issue form references unmanaged label",
-         lambda root: edit(os.path.join(root, ".github", "ISSUE_TEMPLATE", "bug_report.md"),
+         lambda root: edit(os.path.join(root, ".github", "ISSUE_TEMPLATE", "bug.yml"),
                            "labels: type/bug", "labels: type/gone"),
          "LABEL_UNMANAGED")
 
