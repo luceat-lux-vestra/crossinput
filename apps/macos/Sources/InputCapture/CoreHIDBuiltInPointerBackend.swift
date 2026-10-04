@@ -9,15 +9,43 @@ import CoreHID
 private final class CoreHIDPointerClientSlot: @unchecked Sendable {
     private let lock = NSLock()
     private var client: HIDDeviceClient?
+    private weak var clientProbe: HIDDeviceClient?
 
     init(_ client: HIDDeviceClient) {
         self.client = client
+        self.clientProbe = client
     }
 
-    func dropClient() {
+    @discardableResult
+    func dropClient() -> Bool {
         lock.withLock {
             client = nil
+            return clientProbe == nil
         }
+    }
+}
+
+private final class CoreHIDMonitorCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var completed = false
+
+    func finish() {
+        let shouldSignal = lock.withLock {
+            guard !completed else { return false }
+            completed = true
+            return true
+        }
+        if shouldSignal {
+            semaphore.signal()
+        }
+    }
+
+    func wait(timeout: DispatchTimeInterval) -> Bool {
+        if lock.withLock({ completed }) {
+            return true
+        }
+        return semaphore.wait(timeout: .now() + timeout) == .success
     }
 }
 
@@ -338,6 +366,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
     private let streamState: CoreHIDPointerStreamState
     private let releaseResponsibility: CoreHIDPointerReleaseResponsibility
     private let monitorTask: Task<Void, Never>
+    private let monitorCompletion: CoreHIDMonitorCompletion
     private let releaseLock = NSLock()
     private var released = false
 
@@ -347,7 +376,8 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         clientSlot: CoreHIDPointerClientSlot,
         streamState: CoreHIDPointerStreamState,
         releaseResponsibility: CoreHIDPointerReleaseResponsibility,
-        monitorTask: Task<Void, Never>
+        monitorTask: Task<Void, Never>,
+        monitorCompletion: CoreHIDMonitorCompletion
     ) {
         self.generation = generation
         self.registry = registry
@@ -355,6 +385,7 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         self.streamState = streamState
         self.releaseResponsibility = releaseResponsibility
         self.monitorTask = monitorTask
+        self.monitorCompletion = monitorCompletion
     }
 
     func transferReleaseResponsibilityToLifecycleOwner() {
@@ -376,10 +407,15 @@ final class CoreHIDPointerLease: HostPointerOwnershipLease, @unchecked Sendable 
         guard shouldRelease else { return }
 
         monitorTask.cancel()
-        clientSlot.dropClient()
+        let monitorStopped = monitorCompletion.wait(
+            timeout: .milliseconds(100)
+        )
+        let clientDeinitialized = clientSlot.dropClient()
         registry.release(generation)
         Diagnostics.log(
-            "corehid pointer ownership released generation=\(generation)"
+            "corehid pointer ownership released generation=\(generation) "
+                + "monitorStopped=\(monitorStopped) "
+                + "clientDeinitialized=\(clientDeinitialized)"
         )
 
         // Remote cleanup is intentionally after local ownership restoration.
@@ -489,32 +525,34 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
             )
             let releaseResponsibility =
                 CoreHIDPointerReleaseResponsibility()
+            let monitorCompletion = CoreHIDMonitorCompletion()
 
             // Critical ownership shape: the task captures the stream and slot,
             // never the seizing HIDDeviceClient directly. release() can drop
             // the final explicit client reference without awaiting this task.
             let monitorTask = Task {
+                defer { monitorCompletion.finish() }
+
                 func failClosed(_ reason: String) {
                     guard streamState.fail() else { return }
                     Diagnostics.log(
                         "corehid pointer stream failed generation=\(generation) reason=\(reason)"
                     )
 
-                    // A published lease is owned by Control: notify it while
-                    // the seizing client is still alive so keyboard admission
-                    // can go local before pointer ownership returns.
-                    onFailure(generation)
-
-                    // Before responsibility transfers, the callback may
-                    // have no lifecycle-owned lease to take, so the backend
-                    // must restore local pointer ownership itself. Once Control
-                    // owns release responsibility, never self-unseize here:
-                    // Control must withdraw keyboard admission first even when
-                    // its slot has already been taken by a concurrent return.
-                    if !releaseResponsibility.isLifecycleOwned,
-                       registry.isCurrent(generation) {
-                        clientSlot.dropClient()
-                        registry.release(generation)
+                    // A published lease is owned by Control. Dispatch the
+                    // lifecycle callback out of this monitor task so release()
+                    // can synchronously wait for monitor retirement without
+                    // ever self-waiting on the task that detected the failure.
+                    if releaseResponsibility.isLifecycleOwned {
+                        Task {
+                            onFailure(generation)
+                        }
+                    } else {
+                        onFailure(generation)
+                        if registry.isCurrent(generation) {
+                            _ = clientSlot.dropClient()
+                            registry.release(generation)
+                        }
                     }
                 }
 
@@ -578,7 +616,8 @@ final class CoreHIDBuiltInPointerBackend: HostPointerOwnershipBackend {
                 clientSlot: clientSlot,
                 streamState: streamState,
                 releaseResponsibility: releaseResponsibility,
-                monitorTask: monitorTask
+                monitorTask: monitorTask,
+                monitorCompletion: monitorCompletion
             )
         } catch {
             registry.release(generation)
