@@ -61,15 +61,16 @@ independent ADR-0012 physical stability evidence contract.
 
 ### ADR-0012 Level-3 physical stability — #68
 
-Issue #68 remains the canonical release-stability tracker. Its current
-post-rewrite lineage is **0 / 100 accepted physical handoff/return cycles** and
-therefore **INCOMPLETE**.
+Issue #68 remains the canonical release-stability tracker. No qualifying
+post-rewrite Level-3 matrix/soak evidence has yet been credited, so the gate is
+**INCOMPLETE**.
 
 CI, unit tests, state-machine loops, or Leap task acceptance cannot satisfy this
-gate. Eligible credit comes only from real physical cycles on one valid release-
-candidate lineage, classified by the canonical analyzer. Production behavior
-changes that invalidate the lineage reset/apply the accounting rules in
-ADR-0012.
+gate. Level 3 requires the ADR-0012 real-device matrix (10 normal cycles plus
+four 5-execution safety/recovery groups), at least 30 minutes of representative
+real use, fail-closed analyzer PASS, and independent evidence review on one
+eligible release-candidate lineage. Production behavior changes that invalidate
+the lineage reset/apply the accounting rules in ADR-0012.
 
 See [testing](testing.md) and
 [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md).
