@@ -89,12 +89,12 @@ def main():
             passed += 1
         else:
             failed += 1
-    # INCOMPLETE: fewer than 100 clean cycles
+    # INCOMPLETE: fewer than 10 clean normal cycles
     lines = [IDENT]
-    for i in range(36):
+    for i in range(9):
         lines += clean_cycle(i * 4)
-    check(run_case("incomplete_36_cycles", lines, 100, "INCOMPLETE", 0,
-                   lambda r: r["counters"]["completed_physical_cycles"] == 36))
+    check(run_case("incomplete_9_cycles", lines, 10, "INCOMPLETE", 0,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 9))
 
     # raw remoteActive without recovery earns no credit; an unclosed session
     # at EOF is a HOLD condition (fail-closed boundary ambiguity)
@@ -111,15 +111,15 @@ def main():
     check(run_case("credit_with_recovery", lines, 100, "INCOMPLETE", 0,
                    lambda r: r["counters"]["completed_physical_cycles"] == 2))
     lines = [IDENT]
-    for i in range(100):
+    for i in range(10):
         lines += clean_cycle(i * 4)
-    check(run_case("pass_exactly_100", lines, 100, "PASS", 0))
+    check(run_case("pass_exactly_10", lines, 10, "PASS", 0))
 
-    # PASS: >100 clean cycles
+    # PASS: >10 clean normal cycles
     lines = [IDENT]
-    for i in range(101):
+    for i in range(11):
         lines += clean_cycle(i * 4)
-    check(run_case("pass_over_100", lines, 100, "PASS", 0))
+    check(run_case("pass_over_10", lines, 10, "PASS", 0))
 
     # FAIL: unexplained remoteUnavailable
     lines = [IDENT] + clean_cycle(0) + [
@@ -207,12 +207,12 @@ def main():
                    lambda r: r["counters"]["completed_physical_cycles"] == 1
                    and r["counters"]["insufficient_evidence_items"] >= 1))
 
-    # 99 contract-complete cycles: INCOMPLETE (below threshold)
+    # 9 contract-complete normal cycles: INCOMPLETE (below threshold)
     lines = [IDENT]
-    for i in range(99):
+    for i in range(9):
         lines += clean_cycle(i * 4)
-    check(run_case("incomplete_99_clean_cycles", lines, 100, "INCOMPLETE", 0,
-                   lambda r: r["counters"]["completed_physical_cycles"] == 99))
+    check(run_case("incomplete_9_clean_cycles", lines, 10, "INCOMPLETE", 0,
+                   lambda r: r["counters"]["completed_physical_cycles"] == 9))
 
     # same candidate SHA, DIFFERENT build identifiers: MIXED_BUILD_IDENTITIES
     lines = [
@@ -373,15 +373,15 @@ def main():
     # Regression the review flagged: the old fixture used the PRE-schema
     # manifest, tripped MANIFEST_SCHEMA, and "passed" because the assertion
     # ignored every reason except MIXED_CANDIDATES. The real case now is
-    # 2 SHAs, 2 build identifiers, an audited same-lineage manifest, and 99
-    # clean cycles: the window accumulates -> INCOMPLETE, exit 0, no MIXED_*.
+    # 2 SHAs, 2 build identifiers, an audited same-lineage manifest, and 9
+    # clean normal cycles: the window accumulates -> INCOMPLETE, exit 0, no MIXED_*.
     lines = list(two_shas)
-    for i in range(99):
+    for i in range(9):
         lines += clean_cycle(i * 4)
     check(run_with_manifest(
         "lineage_same_lineage_two_builds_incomplete", audited_lineage,
         lines, "INCOMPLETE", 0,
-        extra=lambda r: r["counters"]["completed_physical_cycles"] == 99
+        extra=lambda r: r["counters"]["completed_physical_cycles"] == 9
         and not any(x.startswith("MIXED_") for x in r["reasons"])))
 
     # two distinct audited lineages in one window: MIXED_CANDIDATES HOLD
