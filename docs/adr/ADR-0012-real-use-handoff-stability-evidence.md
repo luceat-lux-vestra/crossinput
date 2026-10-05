@@ -12,6 +12,12 @@
 > of those responsibilities only. Replacing those classes under ADR-0016 does
 > not avoid an evidence-window reset when the production behavior that can affect
 > handoff/return safety changes.
+>
+> **Level-3 revision (2026-10-06):** the former 100-cycle release blocker is
+> replaced by a risk-based physical qualification matrix: 30 real-device
+> scenario executions, a representative real-use soak, fail-closed diagnostics,
+> and zero safety failures. One hundred or more physical cycles remain useful
+> optional extended-confidence evidence, but are not a release blocker.
 
 ## Context
 
@@ -36,10 +42,13 @@ Problems with the manual-repetition reading:
    with diagnostics says more about operational stability than 5 minutes of
    mechanical repetition.
 
-The underlying intent — accumulate at least 100 real physical handoff/return
-cycles of operational evidence before declaring release stability — is sound
-and is retained. Only the manual execution method is removed. Issue #62 / PR
-#63 exposed the concrete conflict: a bug-fix PR was being asked to satisfy a
+The underlying intent — require real-device operational evidence before
+declaring release stability — is retained. The original fixed 100-cycle quota
+is not: repetitive count alone is expensive, samples too few failure modes, and
+does not by itself establish a sufficiently strong reliability bound. Level 3
+therefore uses a risk-based scenario matrix plus a real-use soak, while keeping
+fail-closed diagnostics and zero-tolerance safety outcomes. Issue #62 / PR #63
+exposed the original conflict: a bug-fix PR was being asked to satisfy a
 release-level gate before merge.
 
 ## Decision
@@ -50,17 +59,18 @@ Three explicit levels (full definition in `docs/testing.md`):
 
 1. **Level 1 — Issue/PR acceptance.** Unit/integration tests + CI green +
    targeted real-device verification of the behavior the change touched +
-   human visual confirmation where machines cannot observe. Never repetitive
-   cycles; never 100 cycles.
+   human visual confirmation where machines cannot observe. Never impose the
+   release-level matrix as a per-PR ritual.
 2. **Level 2 — Feature stabilization.** After all blocker issues for a feature
    close: release-candidate build, representative physical smoke test,
    diagnostics readiness for all classifiable failure modes.
-3. **Level 3 — Release stability.** On one release-candidate lineage:
-   >=100 real physical completed handoff cycles with sufficient diagnostics;
-   final stability verdict.
+3. **Level 3 — Release stability.** On one release-candidate lineage, complete
+   the risk-based physical qualification matrix below, run a representative
+   real-use soak, and obtain a fail-closed diagnostic PASS with zero safety
+   failures.
 
-A bug-fix PR is gated by Level 1 only. The >=100-cycle criterion is a
-feature/release gate (Level 3), not a per-PR merge gate.
+A bug-fix PR is gated by Level 1 only. The Level-3 scenario matrix is a
+feature/release gate, not a per-PR merge gate.
 
 ### Physical-cycle definition
 
@@ -73,7 +83,12 @@ local -> successful physical remote-active entry -> usable remote session
 
 Synthetic loops (`testOneHundredEdgeHandoffCyclesStaySafe`, state-machine
 replays) are deterministic regression tests worth keeping, but contribute
-**zero** physical cycles.
+**zero** physical qualification credit.
+
+The Level-3 matrix is deliberately broader than this normal-cycle definition.
+Emergency return, transport/helper failure, reconnect/re-entry, and lifecycle
+safety scenarios are real-device qualification executions even when they do not
+produce a normal `boundaryCrossed` completed-cycle credit.
 
 ### Candidate identity
 
@@ -121,18 +136,40 @@ contents remain prohibited.
 
 ### Evidence sufficiency
 
-A stability verdict requires, per candidate window:
+Level-3 release qualification requires all of the following on one eligible
+candidate lineage:
 
-- `completed physical cycles >= 100`;
+| Physical scenario | Minimum |
+| --- | ---: |
+| Normal Mac -> remote -> Mac handoff/return | 10 |
+| Emergency return | 5 |
+| Transport/helper failure with fail-local recovery | 5 |
+| Session reconnect/replacement followed by successful re-entry | 5 |
+| Control/lifecycle safety paths (enable/disable, takeover, capability/capture loss, held-input cleanup, or equivalent) | 5 |
+
+The matrix therefore contains at least **30 real-device scenario executions**.
+The control/lifecycle group should cover representative distinct paths rather
+than repeating one easy case five times.
+
+In addition:
+
+- perform at least **30 minutes** of representative real DeX use on the same
+  candidate lineage (60 minutes is recommended when practical);
 - pointer trap = 0;
 - known stuck-key/button incident = 0;
 - unexplained fail-safe remote-unavailable return = 0;
 - healthy-session watchdog recovery = 0;
-- unclassified control failure = 0; and
-- every other observed event classified into the taxonomy above.
+- unclassified control failure = 0;
+- every other observed event is classified into the taxonomy above; and
+- the exact candidate identity, matrix record, soak duration, and retained
+  evidence are independently reviewed.
 
-An offline analyzer (e.g. `scripts/analyze-handoff-stability.sh`) emits these
-counters and a fail-closed `STABILITY_GATE` verdict from sanitized diag logs.
+The offline analyzer (`scripts/analyze-handoff-stability.sh`) remains the
+canonical fail-closed diagnostic classifier. It automatically requires at least
+10 contract-complete normal physical cycles and verifies the machine-observable
+zero-failure conditions. Analyzer PASS **does not by itself complete Level 3**:
+the emergency/failure/reconnect/lifecycle matrix and soak are reviewed physical
+evidence tracked by #68.
 
 ## Evidence-window reset rules
 
@@ -173,9 +210,10 @@ change is proven behavior-neutral.
   operational evidence than natural usage; discourages repeated verification.
   Not rejected because it was inconvenient — it was rejected as *weaker
   evidence*.
-- **Removing the 100-cycle requirement entirely** — discards the only
-  quantitative operational-confidence threshold; replaced here by natural-use
-  accumulation instead.
+- **Keeping 100 physical cycles as the mandatory release blocker** — rejected
+  because a large repetitive quota is costly while under-sampling distinct
+  safety and recovery paths. The replacement keeps a quantitative floor but
+  distributes it across risk-bearing scenarios and adds a real-use soak.
 - **Counting synthetic/state-machine loop executions toward the total** —
   violates the physical-target requirement; a state-machine replay proves
   logic, not device behavior.
@@ -191,7 +229,8 @@ change is proven behavior-neutral.
 
 - Bug-fix PRs (#63-style) merge on targeted physical acceptance; feature
   stabilization tracks the aggregate.
-- Users are never asked to mechanically repeat a handoff 100 times.
+- Users are not asked to satisfy a large repetitive handoff quota; Level 3 is
+  executed as a bounded scenario matrix plus representative real use.
 - Architecture Leap runtime slices that materially change the responsibilities
   above reset the Level-3 candidate window even when they delete/rename all old
   implementation types.
@@ -204,15 +243,16 @@ change is proven behavior-neutral.
 - Policy adopted in AGENTS.md (Verification criteria) and `docs/testing.md`
   (Verification levels, Physical handoff cycle definition).
 - Applied to PR #63: acceptance reduced to targeted #62 physical checks; the
-  100-cycle section moved to this release-level gate.
+  broader physical qualification remains a release-level gate.
 - ADR-0016 keeps this physical-evidence policy authoritative while replacing the
   implementation ownership model.
 
 ## Revisit Conditions
 
-- If natural-use accumulation proves too slow to ever reach 100 cycles,
-  design and approve a physical automation harness (robotic or scripted HID
-  input against real hardware) — still physical, never synthetic loops.
+- Optional extended qualification may accumulate 100+ physical cycles,
+  manually or through an approved physical automation harness, when additional
+  confidence is useful. This evidence supplements rather than blocks the
+  scenario-based Level-3 gate.
 - If the analyzer's classification rate is too low (many UNCLASSIFIED),
   extend diagnostic metadata rather than loosening the fail-closed rule.
 - If wireless ADB latency produces legitimate timeouts during accumulation,
