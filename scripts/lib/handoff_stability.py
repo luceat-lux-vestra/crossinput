@@ -29,9 +29,9 @@ all (no report lines), trap status cannot be established -> INSUFFICIENT_
 EVIDENCE (HOLD), never silently 0.
 
 Status semantics:
-  PASS        all criteria incl. completed_physical_cycles >=
-              REQUIRED_CYCLES (100, module constant, not configurable)
-  INCOMPLETE  structurally clean, cycles < REQUIRED_CYCLES
+  PASS        automatic diagnostic subset is clean and
+              completed_physical_cycles >= REQUIRED_CYCLES (10)
+  INCOMPLETE  structurally clean, normal cycles < REQUIRED_CYCLES
   HOLD        adjudication required: UNCLASSIFIED, INSUFFICIENT_EVIDENCE,
               MIXED_CANDIDATES, MIXED_BUILD_IDENTITIES, MISSING_IDENTITY,
               DIRTY_CANDIDATE, MANIFEST_SCHEMA, ambiguous boundaries,
@@ -333,7 +333,9 @@ def analyze(lines):
     return w
 
 
-REQUIRED_CYCLES = 100  # ADR-0012 Level-3 gate; not configurable by design
+# Automatic diagnostic subset of ADR-0012 Level 3. Full release qualification
+# also requires the reviewed 30-execution scenario matrix and >=30 minute soak.
+REQUIRED_CYCLES = 10
 
 
 def verdict(w, lineage_of=None):

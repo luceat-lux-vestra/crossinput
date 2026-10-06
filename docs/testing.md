@@ -20,13 +20,14 @@
   arbitrary repeated-manual-run count. Repeat a case only when an intermittent
   defect or another stated hypothesis gives the repetition count evidentiary
   value.
-- >=100 real physical handoff/return cycles belong only to ADR-0012 Level 3.
+- The ADR-0012 Level-3 release qualification is a bounded real-device scenario
+  matrix plus a representative real-use soak; it is never a per-PR ritual.
 
 ## Verification levels
 
 Verification work is classified into three levels. The level determines what
-evidence a change requires; the >=100 physical-cycle criterion belongs only
-to Level 3 (see [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)).
+evidence a change requires; the risk-based physical qualification matrix belongs
+only to Level 3 (see [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)).
 
 ### Level 1 — Issue / PR acceptance
 
@@ -39,10 +40,10 @@ Applies to every individual issue fix and PR. Required:
 - Human visual confirmation when machine evidence cannot observe the surface
   (e.g. pointer visibility, scroll direction on screen).
 
-A bug-fix PR never requires repetitive manual cycles merely as ritual (and never
-100 cycles). The targeted checks are scoped to what the change could plausibly
-affect. If a defect is intermittent, record the reason for any chosen repetition
-count and what the repetitions are intended to establish.
+A bug-fix PR never requires the Level-3 release matrix merely as ritual. The
+targeted checks are scoped to what the change could plausibly affect. If a
+defect is intermittent, record the reason for any chosen repetition count and
+what the repetitions are intended to establish.
 
 Docs-only design work that introduces no new runtime/device claim may satisfy
 Level 1 without a fresh physical run when its issue/ADR explicitly says so; its
@@ -66,15 +67,36 @@ classification coverage must survive those implementation changes.
 
 ### Level 3 — Release stability
 
-Applies to the release candidate as a whole. Required:
+Applies to the release candidate as a whole. Required on one eligible
+release-candidate lineage:
 
-- At least 100 real physical completed handoff/return cycles accumulated on
-  the same release-candidate lineage — naturally during real use or through
-  an approved physical automation harness.
+| Physical scenario | Minimum |
+| --- | ---: |
+| Normal Mac -> remote -> Mac handoff/return | 10 |
+| Emergency return | 5 |
+| Transport/helper failure with fail-local recovery | 5 |
+| Session reconnect/replacement followed by successful re-entry | 5 |
+| Control/lifecycle safety paths | 5 |
+
+The control/lifecycle group should cover representative distinct paths such as
+enable/disable, external takeover, capability/capture loss, held-input cleanup,
+or equivalent safety exits rather than repeating one easy case.
+
+Also required:
+
+- At least 30 minutes of representative real DeX use on the same lineage;
+  60 minutes is recommended when practical.
 - Sufficient diagnostics to classify each anomaly. Unclassified failures or
   mixed build identities fail closed (no PASS).
-- Final stability verdict is made against this record, not against per-PR
-  evidence alone.
+- Zero pointer traps, stuck key/button incidents, unexplained fail-local
+  returns, and healthy-session watchdog recoveries.
+- `scripts/analyze-handoff-stability.sh` PASS for the machine-observable
+  diagnostic subset, including at least 10 normal contract-complete cycles.
+- Independent review of the exact candidate identity, scenario record, soak
+  duration, and retained evidence.
+
+Analyzer PASS alone does not complete Level 3; the scenario matrix and soak are
+part of the release qualification record.
 
 ## Physical handoff cycle definition
 
@@ -415,7 +437,7 @@ ADR-0016/ADR-0012 obligations.
 | Pointer fallback | deterministic forced InputManager movement/click/scroll routing | helper smoke recorded; app/screen pending |
 | Failure safety | helper kill, ADB disconnect, emergency hotkey, reconnect, held key/button cleanup, stale callback suppression | pending |
 | Target lifecycle | display removal/reappearance, refresh, selected target disappearance, failed selection rollback, stale A/B response | selection/stale-response tests pass; removal/reappearance deferred to issue #17 |
-| Edge stability | targeted physical handoff/return checks per change; >=100 physical cycles tracked at release level ([ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)) | real app 100-cycle event-tap/helper record ✅ (synthetic/regression evidence, zero physical-cycle credit); release-level accumulation pending |
+| Edge stability | targeted physical handoff/return checks per change; Level-3 scenario matrix + soak tracked at release level ([ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md)) | real app 100-cycle event-tap/helper record ✅ (synthetic/regression evidence, zero physical qualification credit); release-level qualification pending |
 
 ## Edge switching stability (historical Phase 5; current authority: ADR-0012)
 
@@ -425,10 +447,10 @@ ADR-0016/ADR-0012 obligations.
   cycles toward the Level-3 gate unless a separately approved physical
   automation harness satisfies ADR-0012's physical-cycle definition.
 - Release stability is declared complete only under the Level-3 rule in
-  [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md): >=100 real
-  physical handoff/return cycles accumulated on a release-candidate lineage,
-  naturally or via approved physical automation — never by asking a user to
-  manually bounce the pointer 100 times in one sitting.
+  [ADR-0012](adr/ADR-0012-real-use-handoff-stability-evidence.md): the bounded
+  risk-based physical scenario matrix, representative real-use soak, and
+  fail-closed zero-safety-failure review must all pass on one eligible
+  release-candidate lineage.
 - For each failure case, verify the current architecture's ownership/control
   diagnostics and recovery path. Do not require an obsolete class/state-machine
   log name after that implementation has been superseded.

@@ -44,16 +44,14 @@ Preserve validated product behavior, device/protocol facts, safety invariants, a
 
 - "It works" claims must attach one of: real-device `dumpsys display` log, ADB `logcat`/helper excerpt, video/screen capture, or a reproducible command list of the verification procedure appropriate to the claim.
 - DeX and phone-display input routing verification follows the protocol in `docs/testing.md`.
-- Edge-switching release stability is not declared complete until at least
-  100 real physical handoff/return cycles have been observed on a
-  release-candidate build with sufficient diagnostics to classify unexpected
-  failures. Cycles may accumulate naturally during real use or through an
-  approved physical automation harness; synthetic unit/state-machine loops do
-  not satisfy the physical-cycle requirement. Individual bug-fix PRs require
-  targeted physical verification of the affected behavior only — they never
-  require 100 repetitive manual cycles, and a user is never required to
-  manually repeat the same handoff 100 times in one sitting. See
-  `docs/testing.md` (verification levels) and ADR-0012 for the full policy.
+- Edge-switching release stability uses the ADR-0012 Level-3
+  risk-based physical qualification: 10 normal handoff/return cycles plus
+  5 emergency-return, 5 transport/helper-failure recovery, 5 reconnect/re-entry,
+  and 5 control/lifecycle safety executions, followed by at least 30 minutes of
+  representative real use. Synthetic unit/state-machine loops do not satisfy
+  physical qualification. Individual bug-fix PRs require only targeted physical
+  verification of affected behavior; the Level-3 matrix is never a per-PR
+  ritual. See `docs/testing.md` and ADR-0012 for the full fail-closed policy.
 
 ## Workflow
 
