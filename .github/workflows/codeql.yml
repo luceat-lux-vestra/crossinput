@@ -35,15 +35,15 @@ jobs:
         include:
           - language: actions
             build-mode: none
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - language: java-kotlin
             build-mode: manual
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           # The ADR-0012 stability analyzer and the repository hardening gate
           # are Python; both are security-relevant tooling.
           - language: python
             build-mode: none
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - language: swift
             build-mode: autobuild
             os: macos-15
@@ -65,7 +65,7 @@ jobs:
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: '25.0.4.1'
+          java-version: '25.0.4'
 
       - name: Set up Android SDK
         if: matrix.language == 'java-kotlin'
@@ -76,6 +76,10 @@ jobs:
         run: |
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Install native ARM64 Android 37 build tools
+        if: ${{ matrix.language == 'java-kotlin' }}
+        run: bash scripts/setup-android-arm64-build-tools.sh
 
       - name: Validate Gradle wrapper
         if: matrix.language == 'java-kotlin'

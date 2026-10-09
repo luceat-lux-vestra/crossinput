@@ -24,7 +24,7 @@ concurrency:
 jobs:
   detect:
     name: detect
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     permissions:
       contents: read
@@ -80,7 +80,7 @@ jobs:
     name: report
     needs: detect
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     permissions:
       issues: write

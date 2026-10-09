@@ -197,7 +197,7 @@ jobs:
 
   android-helper:
     name: Android Helper Build + Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
       - name: Detect documentation-only scope
@@ -311,7 +311,7 @@ jobs:
         if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           distribution: temurin
-          java-version: "25.0.4.1"
+          java-version: '25.0.4'
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         if: ${{ steps.scope.outputs.docs_only != 'true' }}
       - name: Install Android 17 SDK
@@ -319,6 +319,9 @@ jobs:
         run: |
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Install native ARM64 Android 37 build tools
+        if: ${{ steps.scope.outputs.docs_only != 'true' }}
+        run: bash scripts/setup-android-arm64-build-tools.sh
       - name: Validate Gradle wrapper
         if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
@@ -346,7 +349,7 @@ jobs:
 
   markdown:
     name: Documentation Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - name: Reuse exact-SHA Fast evidence
@@ -424,7 +427,7 @@ jobs:
 
   scripts:
     name: Evidence & Tooling Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - name: Reuse exact-SHA Fast evidence
@@ -539,7 +542,7 @@ jobs:
 
   dependencyReview:
     name: Dependency Review
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - name: Review dependency changes
@@ -551,7 +554,7 @@ jobs:
     name: Merge Gate
     needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencyReview]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
       - name: Require every merge-gate component to succeed
