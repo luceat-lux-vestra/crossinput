@@ -234,8 +234,8 @@ def main():
 
     case("job without timeout",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "    runs-on: ubuntu-latest\n    timeout-minutes: 10\n",
-                           "    runs-on: ubuntu-latest\n"),
+                           "    runs-on: ubuntu-24.04-arm\n    timeout-minutes: 10\n",
+                           "    runs-on: ubuntu-24.04-arm\n"),
          "HYGIENE_NO_TIMEOUT")
 
     # Automation referencing a label nothing guarantees exists.
