@@ -1,0 +1,120 @@
+name: Android runner A/B (research)
+
+# Temporary paired research surface: four full Android validation jobs on the
+# same checked-out PR merge SHA. The path filter prevents costs on unrelated PRs.
+# Retain workflow_dispatch for explicit reproducible experiments after landing.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/android-runner-ab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-runner-ab-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-ab:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    name: Android A/B ${{ matrix.arch }} sample ${{ matrix.sample }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-24.04
+            expected_uname: x86_64
+            sample: 1
+          - arch: arm64
+            os: ubuntu-24.04-arm
+            expected_uname: aarch64
+            sample: 1
+          - arch: x64
+            os: ubuntu-24.04
+            expected_uname: x86_64
+            sample: 2
+          - arch: arm64
+            os: ubuntu-24.04-arm
+            expected_uname: aarch64
+            sample: 2
+
+    steps:
+      - name: Checkout identical benchmark source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert architecture and record exact source
+        env:
+          EXPECTED_UNAME: ${{ matrix.expected_uname }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_UNAME"
+          echo "Benchmark product SHA=$(git rev-parse HEAD)"
+          echo "Runner arch=$(uname -m)"
+          test -z "$(git status --porcelain)"
+
+      - name: Set up Java 25 (architecture-specific read-only caches)
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25.0.4'
+          cache: gradle
+          cache-jdk: true
+          cache-read-only: true
+          cache-dependency-path: |
+            android/helper/**/*.gradle*
+            android/helper/**/gradle.properties
+            android/helper/**/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android 17 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v sdkmanager >/dev/null
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Install verified native ARM64 Android tools
+        if: matrix.arch == 'arm64'
+        run: bash scripts/setup-android-arm64-build-tools.sh
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Static guard - no input payload in logs
+        run: bash scripts/check-log-guard.sh
+
+      - name: Build and test full Android helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd android/helper
+          chmod +x gradlew
+          build_start="$(date +%s)"
+          ./gradlew assembleDebug --console=plain
+          test_start="$(date +%s)"
+          ./gradlew test --console=plain
+          test_end="$(date +%s)"
+          {
+            echo "### Android benchmark"
+            echo "- Architecture: ${{ matrix.arch }}"
+            echo "- Sample: ${{ matrix.sample }}"
+            echo "- Product SHA: $(git rev-parse HEAD)"
+            echo "- Build step: $((test_start - build_start)) seconds"
+            echo "- Test step: $((test_end - test_start)) seconds"
+            echo "- Build + test: $((test_end - build_start)) seconds"
+            echo "- Cache policy: read-only; never save from PR"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify Java 25 and Android 17 outputs
+        run: bash scripts/check-android-toolchain.sh
