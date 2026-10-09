@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          "$CODEQL_DIST/codeql" version
+          echo "CodeQL CLI identity will be verified from the CodeQL init/analyze step logs."
           ps -axo pid=,ppid=,pcpu=,comm= >/dev/null
           rm -f "$RUNNER_TEMP/swift-codeql-probe.tsv" "$RUNNER_TEMP/swift-codeql-probe.stop"
           RUNNER_TRACKING_ID='' nohup python3 scripts/swift-codeql-process-probe.py \
