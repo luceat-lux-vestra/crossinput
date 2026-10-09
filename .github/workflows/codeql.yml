@@ -66,6 +66,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '25.0.4'
+          cache: gradle
+          cache-jdk: true
+          # Only trusted default-branch scheduled runs publish caches.
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-dependency-path: |
+            android/helper/**/*.gradle*
+            android/helper/**/gradle.properties
+            android/helper/**/gradle-wrapper.properties
 
       - name: Set up Android SDK
         if: matrix.language == 'java-kotlin'
