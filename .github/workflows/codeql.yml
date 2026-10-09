@@ -35,15 +35,15 @@ jobs:
         include:
           - language: actions
             build-mode: none
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - language: java-kotlin
             build-mode: manual
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           # The ADR-0012 stability analyzer and the repository hardening gate
           # are Python; both are security-relevant tooling.
           - language: python
             build-mode: none
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
           - language: swift
             build-mode: autobuild
             os: macos-15
