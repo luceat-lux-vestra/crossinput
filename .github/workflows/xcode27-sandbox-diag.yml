@@ -9,7 +9,8 @@ on:
       - '.github/workflows/xcode27-sandbox-diag.yml'
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: sandbox-arch-diag-${{ github.event.pull_request.number || github.ref }}
