@@ -6,18 +6,35 @@ TOOLS_DIR="${RUNNER_TEMP:-$(mktemp -d)}/crossinput-workflow-security"
 mkdir -p "$TOOLS_DIR"
 
 ACTIONLINT_VERSION="1.7.12"
-ACTIONLINT_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 ZIZMOR_VERSION="1.30.0"
-ZIZMOR_SHA256="ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed"
+# Official versioned release assets and sha256 digests; never execute x64 on ARM.
+case "$(uname -m)" in
+  aarch64)
+    ACTIONLINT_ARCH="arm64"
+    ACTIONLINT_SHA256="325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6"
+    ZIZMOR_ARCH="aarch64"
+    ZIZMOR_SHA256="018a024d6b6d09733b07f6ef42838d984c23ec04bc9b2acd55f7d67826aeafe5"
+    ;;
+  x86_64)
+    ACTIONLINT_ARCH="amd64"
+    ACTIONLINT_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+    ZIZMOR_ARCH="x86_64"
+    ZIZMOR_SHA256="ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed"
+    ;;
+  *)
+    echo "Unsupported workflow security scanner architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 
 actionlint_archive="$TOOLS_DIR/actionlint.tar.gz"
 zizmor_archive="$TOOLS_DIR/zizmor.tar.gz"
 
-curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error   "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"   --output "$actionlint_archive"
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error   "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${ACTIONLINT_ARCH}.tar.gz"   --output "$actionlint_archive"
 echo "${ACTIONLINT_SHA256}  ${actionlint_archive}" | sha256sum -c -
 tar -xzf "$actionlint_archive" -C "$TOOLS_DIR" actionlint
 
-curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error   "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"   --output "$zizmor_archive"
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error   "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-${ZIZMOR_ARCH}-unknown-linux-gnu.tar.gz"   --output "$zizmor_archive"
 echo "${ZIZMOR_SHA256}  ${zizmor_archive}" | sha256sum -c -
 tar -xzf "$zizmor_archive" -C "$TOOLS_DIR" zizmor
 
