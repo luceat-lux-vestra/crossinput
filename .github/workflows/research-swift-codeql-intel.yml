@@ -33,7 +33,8 @@ jobs:
           set -euo pipefail
           echo '=== Research branch / product provenance ==='
           git rev-parse HEAD
-          test "$(git rev-parse HEAD^)" = d7b12edda07448db72aef4d40d432a1358a704e9
+          test "$(git rev-parse HEAD:apps)" = bc79e8407e47c3134748324ee7b6bf183b92b2b7
+          test "$(git rev-parse HEAD:scripts)" = 595932336887f79a795b7ec283430c4fe6ebf651
           changed="$(git diff --name-only HEAD^ HEAD)"
           printf 'Changed from production PR HEAD: %s\n' "$changed"
           test "$changed" = '.github/workflows/research-swift-codeql-intel.yml'
