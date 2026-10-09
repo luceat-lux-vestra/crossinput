@@ -1,0 +1,82 @@
+name: macOS sandbox executable architecture diagnostic
+
+# Research-only diagnostic; NEVER a replacement for CodeQL or Merge Gate.
+# Does not check out untrusted PR code or access repo credentials/secrets.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/xcode27-sandbox-diag.yml'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sandbox-arch-diag-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-binary-architecture:
+    name: Sandbox executable on ${{ matrix.image }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - macos-15
+          - macos-26
+          - xcode-27
+    steps:
+      - name: Identify native OS architecture and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Architecture and operating system ==="
+          uname -m
+          sw_vers
+          echo "=== Swift toolchain ==="
+          /usr/bin/swift --version
+          echo "=== sandbox-exec file metadata ==="
+          if test -e /usr/bin/sandbox-exec; then
+            /usr/bin/file /usr/bin/sandbox-exec
+            /usr/bin/lipo -archs /usr/bin/sandbox-exec || true
+            /usr/bin/otool -hv /usr/bin/sandbox-exec || true
+          else
+            echo "SANDBOX_EXEC_NOT_PRESENT"
+          fi
+          echo "=== Selected binary types ==="
+          /usr/bin/file /usr/bin/swift /usr/bin/true
+
+      - name: Exercise system sandbox-exec with a harmless command
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64" || {
+            echo "RUNNER_ARCH_MISMATCH"
+            exit 1
+          }
+          echo "=== Unsandboxed native command ==="
+          /usr/bin/true
+          echo "=== Sandboxed native true command ==="
+          set +e
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true \
+            > "$RUNNER_TEMP/sandbox.stdout" 2> "$RUNNER_TEMP/sandbox.stderr"
+          rc=$?
+          set -e
+          echo "sandbox_exec_exit_status=$rc"
+          echo "sandbox_exec_stderr:"
+          cat "$RUNNER_TEMP/sandbox.stderr"
+          if [ "$rc" -eq 0 ]; then
+            echo "SANDBOX_EXEC_COMPATIBLE"
+          else
+            echo "SANDBOX_EXEC_INCOMPATIBLE_NOT_A_VALID_CODEQL_RESULT"
+          fi
+          {
+            echo "### Sandbox executable diagnostic"
+            echo "- Runner: ${{ matrix.image }}"
+            echo "- Native architecture: $(uname -m)"
+            echo "- sandbox-exec exit: $rc"
+            echo "- This diagnostic does not run, disable or replace CodeQL."
+          } >> "$GITHUB_STEP_SUMMARY"
