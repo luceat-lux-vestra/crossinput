@@ -82,67 +82,67 @@ jobs:
             echo "- This diagnostic does not run, disable or replace CodeQL."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  codeql-swiftpm-sandbox-isolation:
-    name: CodeQL SwiftPM sandbox ${{ matrix.variant }} on xcode-27
-    # Study only trusted-repository PRs, never fork-provided manifests/scripts.
+  codeql-dyld-loader-isolation:
+    name: CodeQL injected loader on ${{ matrix.image }}
+    # Research only: CodeQL tracing and system tools, never a production scan.
     if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: xcode-27
-    timeout-minutes: 12
-    permissions:
-      contents: read
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - variant: default-sandbox
-            sandbox_mode: default
-          - variant: disabled-sandbox-diagnostic-only
-            sandbox_mode: disable
+        image:
+          - macos-26
+          - xcode-27
     steps:
       - name: Checkout without persisting credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Create deterministic synthetic Swift package (not user project)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p .codeql-sandbox-probe/Sources/CodeQLSandboxProbe
-          printf '%s\n' \
-            '// swift-tools-version:6.0' \
-            'import PackageDescription' \
-            'let package = Package(name: "CodeQLSandboxProbe", targets: [.executableTarget(name: "CodeQLSandboxProbe")])' \
-            > .codeql-sandbox-probe/Package.swift
-          printf '%s\n' 'print("CodeQL diagnostic synthetic source")' \
-            > .codeql-sandbox-probe/Sources/CodeQLSandboxProbe/main.swift
-          echo "Runner architecture: $(uname -m)"
-          /usr/bin/swift --version
-
-      - name: Initialize Swift CodeQL tracer in manual mode (research only)
+      - name: Initialize Swift CodeQL instrumentation for native loader audit
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: swift
           build-mode: manual
 
-      - name: Compile deterministic Swift package under CodeQL instrumentation
+      - name: Inspect actual CodeQL tracer Mach-O slices with preload disabled
         shell: bash
         env:
-          SANDBOX_MODE: ${{ matrix.sandbox_mode }}
+          # Required just to start the diagnostic shell on candidate macOS27;
+          # the next probes explicitly re-enable it on harmless system tools.
+          DYLD_INSERT_LIBRARIES: ""
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
-          echo "Research variant: $SANDBOX_MODE"
-          if [ "$SANDBOX_MODE" = disable ]; then
-            # Diagnose SwiftPM sandbox spawning ONLY for synthetic fixed code.
-            # Never copy this flag into production Swift CodeQL or fork PR builds.
-            /usr/bin/swift build --package-path .codeql-sandbox-probe --arch arm64 --disable-sandbox
-          else
-            /usr/bin/swift build --package-path .codeql-sandbox-probe --arch arm64
-          fi
-
-      - name: Analyze synthetic CodeQL database without security-alert upload
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          upload: never
-          category: /research:swiftpm-${{ matrix.variant }}
+          echo "=== Native runner and CodeQL distribution ==="
+          sw_vers
+          echo "CodeQL version:"
+          "$CODEQL_DIST/codeql" version
+          tracer="$CODEQL_DIST/tools/osx64/libtrace.dylib"
+          echo "=== CodeQL tracer binary architecture ==="
+          test -f "$tracer"
+          /usr/bin/file "$tracer"
+          /usr/bin/lipo -archs "$tracer"
+          echo "=== Native baseline shell ==="
+          /bin/bash -c 'echo NATIVE_BASH_STARTED'
+          echo "=== CodeQL tracer injected into shell ==="
+          set +e
+          DYLD_INSERT_LIBRARIES="$tracer" /bin/bash -c 'echo TRACED_BASH_STARTED'
+          traced_shell_rc=$?
+          echo "=== CodeQL tracer injected into native sandbox executable ==="
+          DYLD_INSERT_LIBRARIES="$tracer" /usr/bin/sandbox-exec \
+            -p '(version 1)(allow default)' /usr/bin/true
+          traced_sandbox_rc=$?
+          set -e
+          echo "CODEQL_TRACED_BASH_EXIT=$traced_shell_rc"
+          echo "CODEQL_TRACED_SANDBOX_EXIT=$traced_sandbox_rc"
+          echo "These synthetic system-executable tests are not a Swift CodeQL scan."
+          {
+            echo "### Native CodeQL dylib-loader compatibility"
+            echo "- Runner: ${{ matrix.image }}"
+            echo "- Native arch: $(uname -m)"
+            echo "- Traced bash return code: $traced_shell_rc"
+            echo "- Traced sandbox-exec return code: $traced_sandbox_rc"
+            echo "- Observational only; keep production Swift CodeQL untouched."
+          } >> "$GITHUB_STEP_SUMMARY"
