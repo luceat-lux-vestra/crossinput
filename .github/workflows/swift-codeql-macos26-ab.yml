@@ -1,0 +1,79 @@
+name: Swift CodeQL macOS 26 research
+
+# Temporary apples-to-apples full-product analysis to evaluate the supported
+# macOS 26 image. Do NOT replace or bypass the existing Swift CodeQL gate.
+# Limited to trusted repo heads and explicit research dispatch.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/swift-codeql-macos26-ab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: swift-codeql-macos26-ab-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-swift-macos26:
+    name: Full Swift CodeQL on macOS 26 (research)
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record full-product benchmark input and Swift toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo "CodeQL research product SHA: $(git rev-parse HEAD)"
+          test -f apps/macos/Package.swift
+          test -z "$(git status --porcelain)"
+          sw_vers
+          /usr/bin/swift --version
+          echo "Same entire Swift workspace and product source as protected PR CodeQL."
+
+      - name: Initialize CodeQL (Swift, full autobuild)
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: swift
+          build-mode: autobuild
+
+      - name: Record CodeQL CLI identity and start argument-free process probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$CODEQL_DIST/codeql" version
+          ps -axo pid=,ppid=,pcpu=,comm= >/dev/null
+          rm -f "$RUNNER_TEMP/swift-codeql-probe.tsv" "$RUNNER_TEMP/swift-codeql-probe.stop"
+          RUNNER_TRACKING_ID='' nohup python3 scripts/swift-codeql-process-probe.py \
+            sample "$RUNNER_TEMP/swift-codeql-probe.tsv" \
+            "$RUNNER_TEMP/swift-codeql-probe.stop" </dev/null >/dev/null 2>&1 &
+          echo "Native Swift process sampler started; no command arguments or secrets logged."
+
+      - name: Full Swift package autobuild under CodeQL extraction
+        uses: github/codeql-action/autobuild@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+
+      - name: Preserve Swift build process profile evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/swift-codeql-process-probe.py \
+            report "$RUNNER_TEMP/swift-codeql-probe.tsv" \
+            "$RUNNER_TEMP/swift-codeql-probe.stop"
+
+      - name: Evaluate full Swift CodeQL suite (no duplicate security upload)
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /research:swift-macos26
+          upload: never
