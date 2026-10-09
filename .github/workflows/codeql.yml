@@ -46,7 +46,7 @@ jobs:
             os: ubuntu-24.04-arm
           - language: swift
             build-mode: autobuild
-            os: xcode-27
+            os: macos-15
 
     steps:
       - name: Checkout repository
