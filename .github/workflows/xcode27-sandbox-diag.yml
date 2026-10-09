@@ -1,7 +1,7 @@
 name: macOS sandbox executable architecture diagnostic
 
 # Research-only diagnostic; NEVER a replacement for CodeQL or Merge Gate.
-# Does not check out untrusted PR code or access repo credentials/secrets.
+# No credentials/secrets. The synthetic CodeQL study checks out trusted-repo PRs\n# only; untrusted fork PRs cannot execute that job. Product scanning is unchanged.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -81,3 +81,68 @@ jobs:
             echo "- sandbox-exec exit: $rc"
             echo "- This diagnostic does not run, disable or replace CodeQL."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  codeql-swiftpm-sandbox-isolation:
+    name: CodeQL SwiftPM sandbox ${{ matrix.variant }} on xcode-27
+    # Study only trusted-repository PRs, never fork-provided manifests/scripts.
+    if: github.event_name != 'pull_request' || (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: xcode-27
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default-sandbox
+            sandbox_mode: default
+          - variant: disabled-sandbox-diagnostic-only
+            sandbox_mode: disable
+    steps:
+      - name: Checkout without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create deterministic synthetic Swift package (not user project)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .codeql-sandbox-probe/Sources/CodeQLSandboxProbe
+          printf '%s\n' \
+            '// swift-tools-version:6.0' \
+            'import PackageDescription' \
+            'let package = Package(name: "CodeQLSandboxProbe", targets: [.executableTarget(name: "CodeQLSandboxProbe")])' \
+            > .codeql-sandbox-probe/Package.swift
+          printf '%s\n' 'print("CodeQL diagnostic synthetic source")' \
+            > .codeql-sandbox-probe/Sources/CodeQLSandboxProbe/main.swift
+          echo "Runner architecture: $(uname -m)"
+          /usr/bin/swift --version
+
+      - name: Initialize Swift CodeQL tracer in manual mode (research only)
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: swift
+          build-mode: manual
+
+      - name: Compile deterministic Swift package under CodeQL instrumentation
+        shell: bash
+        env:
+          SANDBOX_MODE: ${{ matrix.sandbox_mode }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo "Research variant: $SANDBOX_MODE"
+          if [ "$SANDBOX_MODE" = disable ]; then
+            # Diagnose SwiftPM sandbox spawning ONLY for synthetic fixed code.
+            # Never copy this flag into production Swift CodeQL or fork PR builds.
+            /usr/bin/swift build --package-path .codeql-sandbox-probe --arch arm64 --disable-sandbox
+          else
+            /usr/bin/swift build --package-path .codeql-sandbox-probe --arch arm64
+          fi
+
+      - name: Analyze synthetic CodeQL database without security-alert upload
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          upload: never
+          category: /research:swiftpm-${{ matrix.variant }}
