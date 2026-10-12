@@ -1,0 +1,73 @@
+name: Android ARM64 trusted cache seed
+
+# Production builds/PRs only restore caches. Dependency/config changes on
+# reviewed main provision a trusted architecture-matched producer. An edit to
+# this workflow also seeds the initial cache after the first merge.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/helper/**/*.gradle*'
+      - 'android/helper/**/gradle.properties'
+      - 'android/helper/**/gradle-wrapper.properties'
+      - 'android/helper/gradle/**'
+      - '.github/workflows/android-cache-seed.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-arm64-trusted-cache-seed-main
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout reviewed main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Seed architecture-matched Java 25 / Gradle caches
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25.0.4'
+          cache: gradle
+          cache-jdk: true
+          cache-read-only: false
+          cache-dependency-path: |
+            android/helper/**/*.gradle*
+            android/helper/**/gradle.properties
+            android/helper/**/gradle-wrapper.properties
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install Android 17 SDK
+        run: |
+          set -euo pipefail
+          command -v sdkmanager >/dev/null
+          sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Install verified native ARM64 Android tools
+        run: bash scripts/setup-android-arm64-build-tools.sh
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Build and test Android Helper to prime cache
+        run: |
+          set -euo pipefail
+          bash scripts/check-log-guard.sh
+          cd android/helper
+          chmod +x gradlew
+          ./gradlew assembleDebug test --console=plain
+
+      - name: Verify Java 25 / Android 17 toolchain
+        run: bash scripts/check-android-toolchain.sh
