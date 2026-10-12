@@ -24,8 +24,16 @@ GRADLE_INFO="$(
   JAVA_HOME="$JAVA_HOME" ANDROID_HOME="$ANDROID_HOME" ./gradlew --version
 )"
 printf '%s\n' "$GRADLE_INFO"
-printf '%s\n' "$GRADLE_INFO" | grep -Eq '^Gradle 9\.8\.0$' ||
-  fail "Gradle wrapper is not 9.8.0"
+# The wrapper distribution is the reviewed version authority. Permit 9.8.x
+# patches, but reject a different vendor, distribution type or Gradle minor.
+GRADLE_WRAPPER_PROPERTIES="$ROOT/android/helper/gradle/wrapper/gradle-wrapper.properties"
+GRADLE_EXPECTED_VERSION="$(
+  sed -nE 's@^distributionUrl=https\\://services\.gradle\.org/distributions/gradle-(9\.8\.[0-9]+)-bin\.zip$@\1@p' "$GRADLE_WRAPPER_PROPERTIES"
+)"
+[ -n "$GRADLE_EXPECTED_VERSION" ] ||
+  fail "Gradle wrapper distribution must be the official Gradle 9.8.x bin.zip"
+printf '%s\n' "$GRADLE_INFO" | grep -Fxq "Gradle $GRADLE_EXPECTED_VERSION" ||
+  fail "Running Gradle does not match pinned wrapper version $GRADLE_EXPECTED_VERSION"
 printf '%s\n' "$GRADLE_INFO" | grep -Eq '^(Launcher JVM|JVM): .*25' ||
   fail "Gradle is not running on Java 25"
 
@@ -69,4 +77,4 @@ if bad:
 print(f"Verified {len(candidates)} Kotlin classfiles at Java 25 major 69")
 PY
 
-echo "Toolchain verified: Java=$JAVA_VERSION Android=37 BuildTools=37.0.0 Gradle=9.8.0 classfile=69"
+echo "Toolchain verified: Java=$JAVA_VERSION Android=37 BuildTools=37.0.0 Gradle=$GRADLE_EXPECTED_VERSION classfile=69"
