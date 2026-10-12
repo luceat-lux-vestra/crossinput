@@ -99,7 +99,7 @@ def needs_of(job):
 
 
 def check_android_seed_contract(workflows, findings):
-    """Only trusted main may write and every native Android build input can seed."""
+    """Only trusted main may write, and only real Gradle cache-key inputs seed."""
     filename = "android-cache-seed.yml"
     workflow = workflows.get(filename)
     if workflow is None:
@@ -112,8 +112,6 @@ def check_android_seed_contract(workflows, findings):
         "android/helper/**/gradle.properties",
         "android/helper/**/gradle-wrapper.properties",
         "android/helper/gradle/**",
-        "android/helper/gradlew",
-        "scripts/setup-android-arm64-build-tools.sh",
         ".github/workflows/android-cache-seed.yml",
     }
     actual = (push or {}).get("paths") if isinstance(push, dict) else None
