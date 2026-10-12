@@ -127,17 +127,24 @@ jobs:
         if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           persist-credentials: false
-      - name: Swift Build
-        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
-        run: |
-          cd apps/macos
-          swift build
-
       - name: Swift Test
         if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
         run: |
           cd apps/macos
           swift test
+
+      # The test graph already compiles App and the core/library targets. Build
+      # only the two standalone executables outside that graph instead of
+      # repeating a full debug Swift build.
+      - name: Build standalone Swift tools
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        run: |
+          cd apps/macos
+          swift build --product cxi-smoke
+          swift build --product cxi-stress
+          bin_dir="$(swift build --show-bin-path)"
+          test -x "$bin_dir/cxi-smoke"
+          test -x "$bin_dir/cxi-stress"
 
       - name: Package release app
         if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
