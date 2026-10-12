@@ -66,6 +66,15 @@ jobs:
         with:
           distribution: temurin
           java-version: '25.0.4'
+          cache: gradle
+          cache-jdk: true
+          # Only trusted main seed/scheduled CodeQL writes cache entries.
+          # PR-controlled workflow never publishes executable cache state.
+          cache-read-only: ${{ github.event_name != 'schedule' }}
+          cache-dependency-path: |
+            android/helper/**/*.gradle*
+            android/helper/**/gradle.properties
+            android/helper/**/gradle-wrapper.properties
 
       - name: Set up Android SDK
         if: matrix.language == 'java-kotlin'
