@@ -1,0 +1,109 @@
+# RESEARCH-ONLY: same-commit, two-runner SwiftPM cache transport A/B.
+# Never promote to permanent required CI or production cache writer without ROI.
+name: SwiftPM cache transport research
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/swift-cache-benchmark.yml'
+permissions:
+  contents: read
+concurrency:
+  group: swiftpm-cache-benchmark-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  cold:
+    if: ${{ github.event.pull_request.number == 237 }}
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile cold Swift debug/test/release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/macos
+          xcodebuild -version
+          swift --version
+          measure() {
+            label="$1"; shift
+            start="$(python3 -c 'import time; print(time.monotonic())')"
+            "$@"
+            end="$(python3 -c 'import time; print(time.monotonic())')"
+            echo "SWIFT_BENCH_${label}_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          }
+          measure COLD_DEBUG swift build
+          measure COLD_TEST swift test
+          measure COLD_RELEASE swift build -c release
+      - name: Create same-SHA SwiftPM output archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v zstd
+          cd apps/macos
+          test -d .build/out
+          echo "SWIFT_BENCH_RAW_KIB=$(du -sk .build/out | awk '{print $1}')"
+          start="$(python3 -c 'import time; print(time.monotonic())')"
+          COPYFILE_DISABLE=1 tar -cf - .build/out | zstd -q -T0 -3 -o "$RUNNER_TEMP/swift-cache.tar.zst"
+          end="$(python3 -c 'import time; print(time.monotonic())')"
+          echo "SWIFT_BENCH_ARCHIVE_BYTES=$(stat -f %z "$RUNNER_TEMP/swift-cache.tar.zst")"
+          echo "SWIFT_BENCH_ARCHIVE_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          cd "$RUNNER_TEMP"
+          shasum -a 256 swift-cache.tar.zst > swift-cache.tar.zst.sha256
+          { xcodebuild -version; swift --version; } > swift-cache-toolchain.txt
+      - name: Upload research artifact (not an Actions cache)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: swiftpm-transport-237
+          path: |
+            ${{ runner.temp }}/swift-cache.tar.zst
+            ${{ runner.temp }}/swift-cache.tar.zst.sha256
+            ${{ runner.temp }}/swift-cache-toolchain.txt
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  warm:
+    if: ${{ github.event.pull_request.number == 237 }}
+    needs: [cold]
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download research archive on independent macOS runner
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: swiftpm-transport-237
+          path: ${{ runner.temp }}
+      - name: Verify and restore SwiftPM output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          shasum -a 256 -c swift-cache.tar.zst.sha256
+          { xcodebuild -version; swift --version; } > current-toolchain.txt
+          diff -u swift-cache-toolchain.txt current-toolchain.txt
+          cd "$GITHUB_WORKSPACE/apps/macos"
+          start="$(python3 -c 'import time; print(time.monotonic())')"
+          zstd -q -dc "$RUNNER_TEMP/swift-cache.tar.zst" | COPYFILE_DISABLE=1 tar -xf -
+          end="$(python3 -c 'import time; print(time.monotonic())')"
+          echo "SWIFT_BENCH_RESTORE_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          test -d .build/out
+      - name: Rebuild and test from restored same-SHA cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/macos
+          measure() {
+            label="$1"; shift
+            start="$(python3 -c 'import time; print(time.monotonic())')"
+            "$@"
+            end="$(python3 -c 'import time; print(time.monotonic())')"
+            echo "SWIFT_BENCH_${label}_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          }
+          measure WARM_DEBUG swift build
+          measure WARM_TEST swift test
+          measure WARM_RELEASE swift build -c release

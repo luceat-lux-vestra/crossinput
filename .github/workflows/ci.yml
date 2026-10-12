@@ -143,6 +143,46 @@ jobs:
         if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         run: bash scripts/package-macos.sh release
 
+      # Research-only evidence for #235: before deciding whether a trusted-main
+      # SwiftPM writer is worth the macOS runner and archive costs.
+      - name: Measure SwiftPM compiler cache footprint
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          cd apps/macos
+          test -d .build || { echo "::error::SwiftPM build directory missing"; exit 1; }
+          echo "SWIFTPM_CACHE_TOTAL_KIB=$(du -sk .build | awk '{print $1}')"
+          echo "SWIFTPM_CACHE_FILES=$(find .build -type f | wc -l | tr -d ' ')"
+          for item in .build/* .build/*/debug .build/*/release; do
+            if [ -d "$item" ]; then
+              printf 'SWIFTPM_CACHE_COMPONENT_KIB=%s path=%s\n' "$(du -sk "$item" | awk '{print $1}')" "$item"
+            fi
+          done
+
+      - name: Measure SwiftPM cache transport feasibility
+        if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd apps/macos
+          echo "SWIFTPM_OUT_TREE_KIB=$(du -sk .build/out | awk '{print $1}')"
+          # Snapshot local payload only. No PR cache write or artifact upload.
+          # A real GitHub cache transfer A/B is a separate decision.
+          if command -v zstd >/dev/null 2>&1; then
+            archive="$RUNNER_TEMP/swiftpm-build-out.tar.zst"
+            start="$(python3 -c 'import time; print(time.monotonic())')"
+            COPYFILE_DISABLE=1 tar -cf - .build/out | zstd -q -T0 -3 -o "$archive"
+            end="$(python3 -c 'import time; print(time.monotonic())')"
+            echo "SWIFTPM_ZSTD_ARCHIVE_BYTES=$(stat -f %z "$archive")"
+            echo "SWIFTPM_ZSTD_ARCHIVE_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+            rm -f "$archive"
+          else
+            echo "SWIFTPM_ZSTD_ARCHIVE_STATUS=unavailable"
+          fi
+
       - name: Packaged app launch smoke
         if: ${{ steps.scope.outputs.docs_only != 'true' && (github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true') }}
         run: bash scripts/smoke-packaged-app-launch.sh dist/Ampersand.app
