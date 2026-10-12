@@ -98,6 +98,46 @@ def needs_of(job):
     return set()
 
 
+def check_android_seed_contract(workflows, findings):
+    """Only trusted main may write and every native Android build input can seed."""
+    filename = "android-cache-seed.yml"
+    workflow = workflows.get(filename)
+    if workflow is None:
+        findings.add("ANDROID_SEED_INPUTS", filename, "missing trusted-main Android producer")
+        return
+    events = triggers(workflow)
+    push = events.get("push")
+    expected = {
+        "android/helper/**/*.gradle*",
+        "android/helper/**/gradle.properties",
+        "android/helper/**/gradle-wrapper.properties",
+        "android/helper/gradle/**",
+        "android/helper/gradlew",
+        "scripts/setup-android-arm64-build-tools.sh",
+        ".github/workflows/android-cache-seed.yml",
+    }
+    actual = (push or {}).get("paths") if isinstance(push, dict) else None
+    if (
+        not isinstance(actual, list)
+        or len(actual) != len(expected)
+        or set(actual) != expected
+        or push.get("branches") != ["main"]
+        or "workflow_dispatch" not in events
+    ):
+        findings.add("ANDROID_SEED_INPUTS", filename,
+                     f"protected-main dependency input guard drift: paths={actual!r}")
+    jobs = workflow.get("jobs") or {}
+    seed = jobs.get("seed") or {}
+    if seed.get("if") != "${{ github.ref == 'refs/heads/main' }}":
+        findings.add("ANDROID_SEED_AUTHORITY", filename, "seed must write only on main")
+    java = next((step for step in seed.get("steps", [])
+                 if step.get("name") == "Seed architecture-matched Java 25 / Gradle caches"), {})
+    with_input = java.get("with") or {}
+    if with_input.get("cache-read-only") is not False:
+        findings.add("ANDROID_SEED_AUTHORITY", filename,
+                     "trusted-main producer must be the only explicit Android writer")
+
+
 def check_required_gates(workflows, policy, findings):
     """Contexts <-> producing jobs, and no way for a producer to disappear."""
     seen = set()
@@ -916,6 +956,7 @@ def main():
     check_labels(args.root, findings)
     check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
+    check_android_seed_contract(workflows, findings)
     check_manual_live_readback_policy(policy, findings)
     check_hardening_audit_lifecycle(args.root, workflows, findings)
     check_release_provenance(args.root, workflows, policy, findings)

@@ -353,6 +353,25 @@ def main():
              "                  ...context.repo, issue_number: owned.number, state: 'open',\n"),
          "AUDIT_RECOVERY")
 
+    # Native Android producer input contract: changes to wrapper and native
+    # build-tool installer must not silently skip protected-main cache warming.
+    case("android Gradle wrapper guard removed",
+         lambda root: edit(
+             workflow(root, "android-cache-seed.yml"),
+             "      - 'android/helper/gradlew'\n", ""),
+         "ANDROID_SEED_INPUTS")
+    case("android native tool installer guard removed",
+         lambda root: edit(
+             workflow(root, "android-cache-seed.yml"),
+             "      - 'scripts/setup-android-arm64-build-tools.sh'\n", ""),
+         "ANDROID_SEED_INPUTS")
+    case("Android cache seed broadened to unrelated Swift sources",
+         lambda root: edit(
+             workflow(root, "android-cache-seed.yml"),
+             "      - 'android/helper/gradlew'\n",
+             "      - 'android/helper/gradlew'\n      - 'apps/macos/Sources/**'\n"),
+         "ANDROID_SEED_INPUTS")
+
     # CodeQL authority: both a custom workflow and a default-setup policy.
     case("codeql dual authority",
          lambda root: policy_edit(
