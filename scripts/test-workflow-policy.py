@@ -353,23 +353,28 @@ def main():
              "                  ...context.repo, issue_number: owned.number, state: 'open',\n"),
          "AUDIT_RECOVERY")
 
-    # Native Android producer input contract: changes to wrapper and native
-    # build-tool installer must not silently skip protected-main cache warming.
-    case("android Gradle wrapper guard removed",
+    # Native Android producer input contract: only files that can change the
+    # setup-java Gradle cache identity may auto-seed protected main.
+    case("android cache seed broadened to Gradle launcher",
          lambda root: edit(
              workflow(root, "android-cache-seed.yml"),
-             "      - 'android/helper/gradlew'\n", ""),
+             "      - '.github/workflows/android-cache-seed.yml'\n",
+             "      - 'android/helper/gradlew'\n"
+             "      - '.github/workflows/android-cache-seed.yml'\n"),
          "ANDROID_SEED_INPUTS")
-    case("android native tool installer guard removed",
+    case("android cache seed broadened to native SDK installer",
          lambda root: edit(
              workflow(root, "android-cache-seed.yml"),
-             "      - 'scripts/setup-android-arm64-build-tools.sh'\n", ""),
+             "      - '.github/workflows/android-cache-seed.yml'\n",
+             "      - 'scripts/setup-android-arm64-build-tools.sh'\n"
+             "      - '.github/workflows/android-cache-seed.yml'\n"),
          "ANDROID_SEED_INPUTS")
     case("Android cache seed broadened to unrelated Swift sources",
          lambda root: edit(
              workflow(root, "android-cache-seed.yml"),
-             "      - 'android/helper/gradlew'\n",
-             "      - 'android/helper/gradlew'\n      - 'apps/macos/Sources/**'\n"),
+             "      - '.github/workflows/android-cache-seed.yml'\n",
+             "      - 'apps/macos/Sources/**'\n"
+             "      - '.github/workflows/android-cache-seed.yml'\n"),
          "ANDROID_SEED_INPUTS")
 
     # CodeQL authority: both a custom workflow and a default-setup policy.

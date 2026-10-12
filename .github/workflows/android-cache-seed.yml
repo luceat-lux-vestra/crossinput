@@ -11,9 +11,9 @@ on:
       - 'android/helper/**/gradle.properties'
       - 'android/helper/**/gradle-wrapper.properties'
       - 'android/helper/gradle/**'
-      # The Gradle launcher and native SDK installer affect the cache producer.
-      - 'android/helper/gradlew'
-      - 'scripts/setup-android-arm64-build-tools.sh'
+      # Only inputs that can change setup-java's Gradle cache identity belong
+      # here. Launcher/native-SDK changes are validated by PR CI but cannot
+      # create a new cache key, so seeding them would only repeat validation.
       - '.github/workflows/android-cache-seed.yml'
   workflow_dispatch:
 
