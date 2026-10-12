@@ -1,0 +1,83 @@
+name: Swift build-order research
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/swift-build-order-research.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-build-order-research-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  baseline:
+    if: ${{ github.event.pull_request.number == 240 }}
+    name: Baseline full-build then test
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Measure current compile sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+          measure() {
+            label="$1"; shift
+            start="$(python3 -c 'import time; print(time.monotonic())')"
+            "$@"
+            end="$(python3 -c 'import time; print(time.monotonic())')"
+            echo "SWIFT_ORDER_${label}_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          }
+          cd apps/macos
+          measure BASELINE_BUILD swift build
+          measure BASELINE_TEST swift test
+          cd ../..
+          measure BASELINE_PACKAGE bash scripts/package-macos.sh release
+          test -x dist/Ampersand.app/Contents/MacOS/Ampersand
+          bash scripts/smoke-packaged-app-launch.sh dist/Ampersand.app
+
+  candidate:
+    if: ${{ github.event.pull_request.number == 240 }}
+    name: Test then build uncovered tools
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Measure narrowed compile sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+          measure() {
+            label="$1"; shift
+            start="$(python3 -c 'import time; print(time.monotonic())')"
+            "$@"
+            end="$(python3 -c 'import time; print(time.monotonic())')"
+            echo "SWIFT_ORDER_${label}_SECONDS=$(python3 -c 'import sys; print(round(float(sys.argv[2])-float(sys.argv[1]),3))' "$start" "$end")"
+          }
+          cd apps/macos
+          measure CANDIDATE_TEST swift test
+          measure CANDIDATE_SMOKE swift build --product cxi-smoke
+          measure CANDIDATE_STRESS swift build --product cxi-stress
+          bin_dir="$(swift build --show-bin-path)"
+          test -x "$bin_dir/cxi-smoke"
+          test -x "$bin_dir/cxi-stress"
+          cd ../..
+          measure CANDIDATE_PACKAGE bash scripts/package-macos.sh release
+          test -x dist/Ampersand.app/Contents/MacOS/Ampersand
+          bash scripts/smoke-packaged-app-launch.sh dist/Ampersand.app
