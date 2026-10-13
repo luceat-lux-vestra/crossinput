@@ -88,6 +88,9 @@
     ],
     "hardening-audit.yml": [
       "issues"
+    ],
+    "android-dependency-submission.yml": [
+      "contents"
     ]
   },
   "staged_status_checks": [],
