@@ -1,0 +1,2 @@
+Temporary non-language CodeQL scope probe.
+This branch is for CI measurement only and will not be merged.
