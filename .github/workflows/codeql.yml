@@ -45,7 +45,7 @@ jobs:
             build-mode: none
             os: ubuntu-24.04-arm
           - language: swift
-            build-mode: autobuild
+            build-mode: manual
             os: macos-15
 
     steps:
@@ -105,9 +105,11 @@ jobs:
         if: matrix.language == 'java-kotlin'
         run: scripts/check-android-toolchain.sh
 
-      - name: Autobuild Swift sources for CodeQL
+      - name: Build Swift sources for CodeQL
         if: matrix.language == 'swift'
-        uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        run: |
+          cd apps/macos
+          swift build --arch arm64
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
