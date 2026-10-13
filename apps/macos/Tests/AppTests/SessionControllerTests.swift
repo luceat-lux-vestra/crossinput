@@ -70,6 +70,36 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(pending.shutdownCount, 2)
     }
 
+    func testFatalEventFailsLiveSessionBeforeForwardingTheSignal() async throws {
+        let session = FakeSession(serial: "device")
+        let factory = SessionFactoryBox([session])
+        let controller = SessionController(sessionFactory: { _ in factory.next() })
+        var received: [MessageType] = []
+        var stateWhenForwarded: SessionState?
+        controller.onEvent = { frame in
+            received.append(frame.type)
+            stateWhenForwarded = controller.state
+        }
+
+        _ = try await controller.connect(serial: "device")
+        var payload = Data()
+        var code = UInt32(4).littleEndian
+        payload.append(Data(bytes: &code, count: MemoryLayout<UInt32>.size))
+        let message = Data("pointer cleanup unconfirmed".utf8)
+        var length = UInt32(message.count).littleEndian
+        payload.append(Data(bytes: &length, count: MemoryLayout<UInt32>.size))
+        payload.append(message)
+
+        session.triggerEvent(CxiFrame(type: .fatalError, requestId: 7, payload: payload))
+        for _ in 0..<3 { await Task.yield() }
+
+        XCTAssertEqual(controller.state, .failed("helper fatal 4: pointer cleanup unconfirmed"))
+        XCTAssertEqual(stateWhenForwarded, .failed("helper fatal 4: pointer cleanup unconfirmed"))
+        XCTAssertNil(controller.reference.current())
+        XCTAssertEqual(session.shutdownCount, 1)
+        XCTAssertEqual(received, [.fatalError])
+    }
+
     func testTerminalFailureClearsAndShutsDownLiveSession() async throws {
         let session = FakeSession(serial: "device")
         let factory = SessionFactoryBox([session])

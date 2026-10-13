@@ -123,6 +123,20 @@ public final class SessionController {
         manager.onEvent = { [weak self, weak manager] frame in
             Task { @MainActor in
                 guard let self, let manager, self.session === manager else { return }
+                if frame.type == .fatalError {
+                    let message: String
+                    if let fatal = try? Messages.decodeFatalError(frame.payload) {
+                        message = "helper fatal \(fatal.code): \(fatal.message)"
+                    } else {
+                        message = "helper fatal: malformed payload"
+                    }
+                    // FATAL_ERROR invalidates the live helper/session. Do not
+                    // leave a published SessionReference behind for input
+                    // delivery while presentation still processes the signal.
+                    self.fail(message)
+                    self.onEvent?(frame)
+                    return
+                }
                 self.onEvent?(frame)
             }
         }
