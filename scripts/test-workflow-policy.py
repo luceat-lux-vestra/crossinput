@@ -353,6 +353,40 @@ def main():
              "                  ...context.repo, issue_number: owned.number, state: 'open',\n"),
          "AUDIT_RECOVERY")
 
+    # Android dependency graph publisher: generate only from trusted main,
+    # only when dependency inputs change, and never write Gradle cache state.
+    case("Android dependency publisher cannot run on pull requests",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             "  workflow_dispatch:\n",
+             "  pull_request:\n  workflow_dispatch:\n"),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android dependency publisher must stay on main",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             "    if: ${{ github.ref == 'refs/heads/main' }}\n",
+             ""),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android dependency publisher cache must stay read-only",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             "          cache-read-only: true\n",
+             "          cache-read-only: false\n"),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android dependency publisher must submit generated graph",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             "          dependency-graph: generate-and-submit\n",
+             "          dependency-graph: generate-and-upload\n"),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android dependency publisher cannot broaden input scope",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             "      - \".github/workflows/android-dependency-submission.yml\"\n",
+             "      - \"apps/macos/Sources/**\"\n"
+             "      - \".github/workflows/android-dependency-submission.yml\"\n"),
+         "ANDROID_DEPS_SUBMISSION")
+
     # Native Android producer input contract: only files that can change the
     # setup-java Gradle cache identity may auto-seed protected main.
     case("android cache seed broadened to Gradle launcher",
