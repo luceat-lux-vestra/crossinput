@@ -37,3 +37,4 @@ object Protocol {
     const val TYPE_BOUNDARY_REACHED: Int = 0x800B
     const val TYPE_BOUNDARY_WATCH_ERROR: Int = 0x800C
 }
+// Temporary CodeQL Android-scope probe; this branch will not be merged.
