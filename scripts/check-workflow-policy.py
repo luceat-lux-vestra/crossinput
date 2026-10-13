@@ -98,6 +98,80 @@ def needs_of(job):
     return set()
 
 
+def check_android_dependency_submission_contract(workflows, findings):
+    """Keep Android dependency publication narrow, trusted, and cache read-only."""
+    filename = "android-dependency-submission.yml"
+    workflow = workflows.get(filename)
+    if workflow is None:
+        findings.add("ANDROID_DEPS_SUBMISSION", filename,
+                     "missing protected-main Android dependency publisher")
+        return
+
+    events = triggers(workflow)
+    push = events.get("push")
+    expected_paths = {
+        "android/helper/**/*.gradle*",
+        "android/helper/**/gradle.properties",
+        "android/helper/**/gradle-wrapper.properties",
+        "android/helper/gradle/**",
+        ".github/workflows/android-dependency-submission.yml",
+    }
+    actual_paths = (push or {}).get("paths") if isinstance(push, dict) else None
+    if (
+        not isinstance(push, dict)
+        or push.get("branches") != ["main"]
+        or not isinstance(actual_paths, list)
+        or len(actual_paths) != len(expected_paths)
+        or set(actual_paths) != expected_paths
+        or "workflow_dispatch" not in events
+        or "pull_request" in events
+        or "pull_request_target" in events
+    ):
+        findings.add(
+            "ANDROID_DEPS_SUBMISSION",
+            filename,
+            f"publisher trigger/input scope drift: push={push!r}, events={sorted(events)}",
+        )
+
+    submit = (workflow.get("jobs") or {}).get("submit") or {}
+    if submit.get("if") != "${{ github.ref == 'refs/heads/main' }}":
+        findings.add("ANDROID_DEPS_SUBMISSION", filename,
+                     "publisher job must be fenced to refs/heads/main")
+    if submit.get("permissions") != {"contents": "write"}:
+        findings.add("ANDROID_DEPS_SUBMISSION", filename,
+                     "publisher job must hold only contents: write")
+
+    step = next(
+        (step for step in steps_of(submit)
+         if step.get("name") == "Generate and submit Android Gradle dependency graph"),
+        None,
+    )
+    if not step:
+        findings.add("ANDROID_DEPS_SUBMISSION", filename,
+                     "missing Gradle dependency-submission step")
+        return
+
+    uses = step.get("uses") or ""
+    if not uses.startswith("gradle/actions/dependency-submission@"):
+        findings.add("ANDROID_DEPS_SUBMISSION", filename,
+                     f"unexpected dependency publisher action: {uses!r}")
+
+    inputs = step.get("with") or {}
+    expected_inputs = {
+        "build-root-directory": "android/helper",
+        "dependency-graph": "generate-and-submit",
+        "cache-read-only": True,
+        "validate-wrappers": True,
+    }
+    for key, expected in expected_inputs.items():
+        if inputs.get(key) != expected:
+            findings.add(
+                "ANDROID_DEPS_SUBMISSION",
+                filename,
+                f"{key} must be {expected!r}, got {inputs.get(key)!r}",
+            )
+
+
 def check_android_seed_contract(workflows, findings):
     """Only trusted main may write, and only real Gradle cache-key inputs seed."""
     filename = "android-cache-seed.yml"
@@ -955,6 +1029,7 @@ def main():
     check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
     check_android_seed_contract(workflows, findings)
+    check_android_dependency_submission_contract(workflows, findings)
     check_manual_live_readback_policy(policy, findings)
     check_hardening_audit_lifecycle(args.root, workflows, findings)
     check_release_provenance(args.root, workflows, policy, findings)
