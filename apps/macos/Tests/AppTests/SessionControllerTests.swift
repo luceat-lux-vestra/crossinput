@@ -76,10 +76,12 @@ final class SessionControllerTests: XCTestCase {
         let controller = SessionController(sessionFactory: { _ in factory.next() })
         var received: [MessageType] = []
         var stateWhenForwarded: SessionState?
+        var sessionPublishedWhenForwarded: Bool?
         var shutdownCountWhenForwarded: Int?
         controller.onEvent = { frame in
             received.append(frame.type)
             stateWhenForwarded = controller.state
+            sessionPublishedWhenForwarded = controller.reference.current() != nil
             shutdownCountWhenForwarded = session.shutdownCount
         }
 
@@ -96,7 +98,8 @@ final class SessionControllerTests: XCTestCase {
         for _ in 0..<3 { await Task.yield() }
 
         XCTAssertEqual(controller.state, .failed("helper fatal 4: pointer cleanup unconfirmed"))
-        XCTAssertEqual(stateWhenForwarded, .ready)
+        XCTAssertEqual(stateWhenForwarded, .failed("helper fatal 4: pointer cleanup unconfirmed"))
+        XCTAssertEqual(sessionPublishedWhenForwarded, false)
         XCTAssertEqual(shutdownCountWhenForwarded, 0)
         XCTAssertNil(controller.reference.current())
         XCTAssertEqual(session.shutdownCount, 1)
