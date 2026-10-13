@@ -31,7 +31,8 @@ import org.mockito.kotlin.whenever
  *   matching actionButton (Samsung's DeX pipeline rejects press/release
  *   events whose actionButton disagrees with buttonState),
  * - buttonState accumulates across held buttons and clears on release,
- * - close() leaves no stuck buttons behind.
+ * - close() attempts accepted held-button UPs before clearing local state;
+ *   async injection acceptance does not by itself prove remote cleanup.
  */
 class InputManagerPointerInjectorTest {
     private val log: Logger = mock()
@@ -196,16 +197,26 @@ class InputManagerPointerInjectorTest {
     }
 
     @Test
-    fun closeAfterHeldButtonsBuildsNoStuckEvents() {
+    fun closeAttemptsReleaseForAllHeldButtonsBeforeDroppingSelection() {
         val injector = newInjector()
         injector.press(0)
         injector.press(1)
+        injector.press(2)
 
         injector.close()
-        // Held-button cleanup is the UhidPointerInjector contract (kernel
-        // device); the InputManager backend holds no virtual device, so close
-        // must simply tear down selection state without emitting events.
-        assertEquals(2, captured.size)
+
+        assertEquals(6, captured.size)
+        assertEquals(MotionEvent.ACTION_BUTTON_RELEASE, captured[3].action)
+        assertEquals(MotionEvent.BUTTON_TERTIARY, captured[3].actionButton)
+        assertEquals(
+            MotionEvent.BUTTON_PRIMARY or MotionEvent.BUTTON_SECONDARY,
+            captured[3].buttonState,
+        )
+        assertEquals(MotionEvent.ACTION_BUTTON_RELEASE, captured[4].action)
+        assertEquals(MotionEvent.BUTTON_SECONDARY, captured[4].actionButton)
+        assertEquals(MotionEvent.BUTTON_PRIMARY, captured[4].buttonState)
+        assertEquals(MotionEvent.ACTION_UP, captured[5].action)
+        assertEquals(0, captured[5].buttonState)
     }
 
     // ---- Lifecycle: no stale button state across epochs (merge-gate req 1) --
@@ -216,6 +227,7 @@ class InputManagerPointerInjectorTest {
         injector.press(1)
 
         injector.close()
+        assertEquals(MotionEvent.ACTION_BUTTON_RELEASE, captured.last().action)
         injector.selectDisplay(display())
         val move = injector.moveRelative(5, 5)
 
@@ -231,7 +243,9 @@ class InputManagerPointerInjectorTest {
         injector.press(0)
         injector.press(2)
 
-        injector.selectDisplay(display())
+        assertTrue(injector.selectDisplay(display()))
+        assertEquals(MotionEvent.ACTION_BUTTON_RELEASE, captured[2].action)
+        assertEquals(MotionEvent.ACTION_UP, captured[3].action)
 
         val move = injector.moveRelative(3, 4)
         assertEquals(PointerDelivery.deliveredMovement(3, 4), move)
@@ -247,10 +261,32 @@ class InputManagerPointerInjectorTest {
 
         injector.close()
         injector.close()
+        assertEquals(2, captured.size) // exactly one terminal release
 
         injector.selectDisplay(display())
         assertEquals(PointerDelivery.deliveredMovement(1, 1), injector.moveRelative(1, 1))
         assertEquals(MotionEvent.ACTION_HOVER_MOVE, captured.last().action)
+    }
+
+    @Test
+    fun rejectedOldTargetReleaseBlocksNewTargetSelection() {
+        val calls = mutableListOf<MotionEvent>()
+        val setter = ActionButtonSetter { _, button ->
+            captured.lastOrNull()?.actionButton = button
+            true
+        }
+        val injector = newInjectorWith(
+            setter,
+            calls,
+            accept = { event -> event.action != MotionEvent.ACTION_BUTTON_RELEASE },
+        )
+        assertEquals(PointerDelivery.DELIVERED, injector.button(1, true))
+
+        // The locally held button was accepted, but its terminal release was
+        // not. Do not discard the old routing context and select another.
+        assertTrue(!injector.selectDisplay(display()))
+        assertEquals(MotionEvent.ACTION_BUTTON_RELEASE, captured.last().action)
+        assertEquals(MotionEvent.BUTTON_SECONDARY, captured.last().actionButton)
     }
 
     // ---- Fail-closed ActionButtonSetter (merge-gate req 2) ------------------
@@ -258,6 +294,7 @@ class InputManagerPointerInjectorTest {
     private fun newInjectorWith(
         actionButtonSetter: ActionButtonSetter,
         injectCalls: MutableList<MotionEvent>,
+        accept: (MotionEvent) -> Boolean = { true },
     ): InputManagerPointerInjector {
         captured.clear()
         staticMock = Mockito.mockStatic(
@@ -281,7 +318,7 @@ class InputManagerPointerInjectorTest {
             .thenReturn(Mockito.mock(InputManager::class.java))
         val eventInjector = MotionEventInjector { event ->
             injectCalls += event
-            true
+            accept(event)
         }
         return InputManagerPointerInjector(
             log,
