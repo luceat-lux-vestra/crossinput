@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ spec = importlib.util.spec_from_file_location("resolve_fast_evidence", RESOLVER_
 if spec is None or spec.loader is None:
     raise RuntimeError(f"Could not load {RESOLVER_PATH}")
 resolver = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = resolver
 spec.loader.exec_module(resolver)
 
 
@@ -175,8 +177,6 @@ class FastEvidenceResolverTests(unittest.TestCase):
 
 class FinalGateStructureTests(unittest.TestCase):
     def test_all_final_components_remain_behind_fail_closed_merge_gate(self) -> None:
-        import sys
-
         sys.path.insert(0, str(ROOT / "scripts" / "lib"))
         import workflow_yaml
 
