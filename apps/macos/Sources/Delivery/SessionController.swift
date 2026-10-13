@@ -130,11 +130,12 @@ public final class SessionController {
                     } else {
                         message = "helper fatal: malformed payload"
                     }
-                    // FATAL_ERROR invalidates the live helper/session. Do not
-                    // leave a published SessionReference behind for input
-                    // delivery while presentation still processes the signal.
-                    self.fail(message)
+                    // Surface the fatal signal first. AppModel must release
+                    // local target/control ownership before fail() performs
+                    // best-effort helper shutdown, which may wait on Android.
+                    // Local return must never be gated on remote cleanup.
                     self.onEvent?(frame)
+                    self.fail(message)
                     return
                 }
                 self.onEvent?(frame)
