@@ -112,7 +112,20 @@
       "python",
       "swift"
     ],
-    "exceptions": []
+    "exceptions": [],
+    "pr_language_scope": {
+      "classifier": "scripts/codeql-scope.py",
+      "trusted_base": true,
+      "always_analyze": [
+        "actions"
+      ],
+      "fail_closed": true,
+      "full_scan_paths": [
+        ".github/workflows/codeql.yml",
+        "scripts/codeql-scope.py",
+        ".github/codeql/**"
+      ]
+    }
   },
   "release_provenance": {
     "workflow": "release.yml",

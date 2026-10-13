@@ -424,6 +424,42 @@ def main():
                            "          tools: https://example.invalid/codeql-bundle.tar.zst\n"),
          "CODEQL_TOOLS_OVERRIDE")
 
+    case("CodeQL scope policy cannot fail open",
+         lambda root: policy_edit(
+             root,
+             lambda policy: policy["codeql_coverage"]["pr_language_scope"].update(
+                 {"fail_closed": False})),
+         "CODEQL_SCOPE_POLICY")
+
+    case("CodeQL scope must load policy from trusted base",
+         lambda root: edit(
+             workflow(root, "codeql.yml"),
+             "          ref: ${{ github.event.pull_request.base.sha }}\n",
+             "          ref: ${{ github.event.pull_request.head.sha }}\n"),
+         "CODEQL_SCOPE_CONTRACT")
+
+    case("CodeQL scope cannot execute head-controlled classifier",
+         lambda root: edit(
+             workflow(root, "codeql.yml"),
+             '          helper=".codeql-trusted-base/scripts/codeql-scope.py"\n',
+             '          helper="scripts/codeql-scope.py"\n'),
+         "CODEQL_SCOPE_CONTRACT")
+
+    case("CodeQL heavy analysis cannot drop Swift impact gate",
+         lambda root: edit(
+             workflow(root, "codeql.yml"),
+             "            || (matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true')\n",
+             "            || matrix.language == 'swift'\n",
+             1),
+         "CODEQL_SCOPE_CONTRACT")
+
+    case("CodeQL scope fixtures must remain in required tooling gate",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "        run: python3 scripts/test-codeql-scope.py\n",
+             "        run: echo scope-fixtures-removed\n"),
+         "CODEQL_SCOPE_CONTRACT")
+
     # An unparsable workflow must abort the audit (exit 2), never pass quietly.
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, "repo")
