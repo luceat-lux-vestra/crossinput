@@ -647,248 +647,87 @@ def check_issue_labeler_safety(root, workflows, findings):
                      "issue body text must not be used as authoritative metadata classification input")
 
 def check_codeql_authority(root, workflows, policy, findings):
-    """Static half of the single-authority and trusted PR-scope contracts."""
+    """Single pinned CodeQL authority; weekly/manual full coverage, no PR analysis."""
     authority = policy["codeql_authority"]
     has_custom = "codeql.yml" in workflows
     if authority == "custom-workflow" and not has_custom:
         findings.add("CODEQL_AUTHORITY", ".github/workflows",
-                     "policy names the custom workflow as CodeQL authority but codeql.yml is gone")
+                     "custom CodeQL authority file is missing")
     if authority == "default-setup" and has_custom:
         findings.add("CODEQL_AUTHORITY", ".github/workflows/codeql.yml",
-                     "policy names default setup as CodeQL authority but a custom workflow "
-                     "is also present; analysis would be duplicated")
-
+                     "duplicate custom and default CodeQL authority")
     if authority != "custom-workflow" or not has_custom:
         return
 
     workflow = workflows["codeql.yml"]
     jobs = workflow.get("jobs") or {}
-
+    where = ".github/workflows/codeql.yml"
     for job_id, job in jobs.items():
         for step in steps_of(job):
             if not isinstance(step, dict):
                 continue
             uses = str(step.get("uses") or "")
             if uses.startswith("github/codeql-action/init@"):
-                with_block = step.get("with") or {}
-                if "tools" in with_block:
-                    findings.add(
-                        "CODEQL_TOOLS_OVERRIDE",
-                        f"codeql.yml:{job_id}",
-                        "custom CodeQL authority must use the bundle managed by the "
-                        "pinned github/codeql-action; external tools overrides require "
-                        "a separately reviewed supply-chain policy",
-                    )
+                if "tools" in (step.get("with") or {}):
+                    findings.add("CODEQL_TOOLS_OVERRIDE", f"codeql.yml:{job_id}",
+                                 "pinned CodeQL bundle must not be replaced by custom tools")
 
+    if set(jobs) != {"analyze"}:
+        findings.add("CODEQL_SCOPE_RETIRED", where,
+                     "PR scope/classifier and extra CodeQL jobs must stay retired")
+    analyze = jobs.get("analyze") or {}
+    if "needs" in analyze or "if" in analyze:
+        findings.add("CODEQL_FULL_MATRIX", where,
+                     "analyze must run every scheduled/manual language without skip or dependency")
+    if analyze.get("runs-on") != "${{ matrix.os }}":
+        findings.add("CODEQL_FULL_MATRIX", where,
+                     "matrix runner must not selectively avoid the Swift macOS analysis")
     coverage = policy.get("codeql_coverage") or {}
-    expected_scope_policy = {
-        "classifier": "scripts/codeql-scope.py",
-        "trusted_base": True,
-        "always_analyze": ["actions"],
-        "fail_closed": True,
-        "full_scan_paths": [
-            ".github/workflows/codeql.yml",
-            "scripts/codeql-scope.py",
-            ".github/codeql/**",
-        ],
-    }
-    if coverage.get("pr_language_scope") != expected_scope_policy:
-        findings.add(
-            "CODEQL_SCOPE_POLICY",
-            ".github/hardening-policy.json",
-            "CodeQL PR language-scope policy drifted from the trusted fail-closed contract",
-        )
-
-    scope = jobs.get("scope")
-    analyze = jobs.get("analyze")
-    if not isinstance(scope, dict) or not isinstance(analyze, dict):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            ".github/workflows/codeql.yml",
-            "CodeQL must retain both the trusted scope job and analyze matrix job",
-        )
-        return
-
-    if scope.get("permissions") != {"contents": "read", "pull-requests": "read"}:
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:scope",
-            "scope job must hold exactly contents:read and pull-requests:read",
-        )
-
-    expected_outputs = {
-        "actions_impact": "${{ steps.scope.outputs.actions_impact }}",
-        "swift_impact": "${{ steps.scope.outputs.swift_impact }}",
-        "java_impact": "${{ steps.scope.outputs.java_impact }}",
-        "python_impact": "${{ steps.scope.outputs.python_impact }}",
-        "reason": "${{ steps.scope.outputs.reason }}",
-    }
-    if scope.get("outputs") != expected_outputs:
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:scope",
-            "scope job outputs must expose every language impact plus the reason",
-        )
-
-    scope_steps = {step.get("id"): step for step in steps_of(scope) if isinstance(step, dict)}
-    trusted = scope_steps.get("trusted_base")
-    classifier = scope_steps.get("scope")
-    if not isinstance(trusted, dict):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT", "codeql.yml:scope",
-            "trusted-base checkout step is missing",
-        )
-    else:
-        trusted_with = trusted.get("with") or {}
-        if (
-            trusted.get("continue-on-error") is not True
-            or trusted_with.get("ref") != "${{ github.event.pull_request.base.sha }}"
-            or trusted_with.get("path") != ".codeql-trusted-base"
-            or trusted_with.get("persist-credentials") is not False
-        ):
-            findings.add(
-                "CODEQL_SCOPE_CONTRACT",
-                "codeql.yml:scope",
-                "scope policy must be loaded from the immutable PR base with no persisted credentials",
-            )
-
-    if not isinstance(classifier, dict):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT", "codeql.yml:scope",
-            "language-impact classifier step is missing",
-        )
-    else:
-        run = str(classifier.get("run") or "")
-        required = [
-            'helper=".codeql-trusted-base/scripts/codeql-scope.py"',
-            "gh api --paginate --slurp",
-            'emit_full_scan "github-api-failure"',
-            'emit_full_scan "trusted-base-helper-missing"',
-            'emit_full_scan "trusted-base-helper-failure"',
-        ]
-        if any(fragment not in run for fragment in required):
-            findings.add(
-                "CODEQL_SCOPE_CONTRACT",
-                "codeql.yml:scope",
-                "classifier must use trusted-base policy and fail closed on missing or malformed evidence",
-            )
-
-    needs = analyze.get("needs")
-    if needs != "scope" and not (isinstance(needs, list) and "scope" in needs):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:analyze",
-            "analyze job must depend on the trusted scope decision",
-        )
-
+    if "pr_language_scope" in coverage:
+        findings.add("CODEQL_SCOPE_RETIRED", ".github/hardening-policy.json",
+                     "obsolete PR classifier must not remain in active CodeQL policy")
+    if coverage.get("active_languages") != ["actions", "java-kotlin", "python", "swift"]:
+        findings.add("CODEQL_FULL_MATRIX", ".github/hardening-policy.json",
+                     "all original four CodeQL languages must remain active")
     matrix = ((analyze.get("strategy") or {}).get("matrix") or {}).get("include") or []
-    languages = [item.get("language") for item in matrix if isinstance(item, dict)]
-    if languages != coverage.get("active_languages"):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:analyze",
-            f"CodeQL matrix languages drifted: {languages!r}",
-        )
-
-    analyze_steps = {
-        step.get("name"): step
-        for step in steps_of(analyze)
-        if isinstance(step, dict) and step.get("name")
-    }
-    skip = analyze_steps.get("Trusted scope skip")
-    if not isinstance(skip, dict):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT", "codeql.yml:analyze",
-            "non-impacting languages must retain an explicit successful skip step",
-        )
-    else:
-        skip_if = str(skip.get("if") or "")
-        if not all(
-            fragment in skip_if
-            for fragment in (
-                "needs.scope.outputs.java_impact != 'true'",
-                "needs.scope.outputs.python_impact != 'true'",
-                "needs.scope.outputs.swift_impact != 'true'",
-            )
-        ):
-            findings.add(
-                "CODEQL_SCOPE_CONTRACT",
-                "codeql.yml:analyze",
-                "skip step is not fenced by every heavy-language impact output",
-            )
-
+    expected_matrix = [
+        {"language": "actions", "build-mode": "none", "os": "ubuntu-24.04-arm"},
+        {"language": "java-kotlin", "build-mode": "manual", "os": "ubuntu-24.04-arm"},
+        {"language": "python", "build-mode": "none", "os": "ubuntu-24.04-arm"},
+        {"language": "swift", "build-mode": "autobuild", "os": "macos-15"},
+    ]
+    if matrix != expected_matrix or (analyze.get("strategy") or {}).get("fail-fast") is not False:
+        findings.add("CODEQL_FULL_MATRIX", where,
+                     "all four language, runner, build-mode and no-fail-fast semantics required")
+    steps = {s.get("name"): s for s in steps_of(analyze) if isinstance(s, dict)}
+    if "Trusted scope skip" in steps or "scope" in jobs:
+        findings.add("CODEQL_SCOPE_RETIRED", where, "PR scope skip cannot return")
     for step_name in ("Checkout repository", "Initialize CodeQL", "Perform CodeQL Analysis"):
-        step = analyze_steps.get(step_name)
-        condition = str((step or {}).get("if") or "")
-        if not isinstance(step, dict) or not all(
-            fragment in condition
-            for fragment in (
-                "matrix.language == 'actions'",
-                "needs.scope.outputs.java_impact == 'true'",
-                "needs.scope.outputs.python_impact == 'true'",
-                "needs.scope.outputs.swift_impact == 'true'",
-            )
-        ):
-            findings.add(
-                "CODEQL_SCOPE_CONTRACT",
-                f"codeql.yml:analyze:{step_name}",
-                "heavy CodeQL steps must run for Actions and every impacted language only",
-            )
-
-    for step_name in (
-        "Set up Java",
-        "Set up Android SDK",
-        "Install Android 17 SDK",
-        "Install native ARM64 Android 37 build tools",
-        "Validate Gradle wrapper",
-        "Build Android helper for CodeQL",
-        "Verify Java 25 / Android 17 toolchain",
-    ):
-        step = analyze_steps.get(step_name)
-        if not isinstance(step, dict) or "needs.scope.outputs.java_impact == 'true'" not in str(step.get("if") or ""):
-            findings.add(
-                "CODEQL_SCOPE_CONTRACT",
-                f"codeql.yml:analyze:{step_name}",
-                "Java/Kotlin build path must be fenced by trusted Java impact",
-            )
-
-    swift_step = analyze_steps.get("Autobuild Swift sources for CodeQL")
-    if not isinstance(swift_step, dict) or "needs.scope.outputs.swift_impact == 'true'" not in str(swift_step.get("if") or ""):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:analyze:Autobuild Swift sources for CodeQL",
-            "Swift autobuild must be fenced by trusted Swift impact",
-        )
-
-    if "needs.scope.outputs.swift_impact != 'true'" not in str(analyze.get("runs-on") or ""):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "codeql.yml:analyze",
-            "non-impacting Swift checks must avoid allocating the macOS runner",
-        )
-
-    ci = workflows.get("ci.yml") or {}
-    scripts_job = (ci.get("jobs") or {}).get("scripts") or {}
-    if not any(
-        str(step.get("run") or "").strip() == "python3 scripts/test-codeql-scope.py"
-        for step in steps_of(scripts_job)
-        if isinstance(step, dict)
-    ):
-        findings.add(
-            "CODEQL_SCOPE_CONTRACT",
-            "ci.yml:scripts",
-            "required Evidence & Tooling Validation must execute CodeQL scope fixtures",
-        )
-
+        step = steps.get(step_name)
+        if not isinstance(step, dict) or "if" in step:
+            findings.add("CODEQL_FULL_MATRIX", f"codeql.yml:{step_name}",
+                         "every full-scan language must initialize, checkout, and analyze")
+    for name in ("Set up Java", "Set up Android SDK", "Install Android 17 SDK",
+                 "Install native ARM64 Android 37 build tools", "Validate Gradle wrapper",
+                 "Build Android helper for CodeQL", "Verify Java 25 / Android 17 toolchain"):
+        step = steps.get(name)
+        if not isinstance(step, dict) or step.get("if") != "matrix.language == 'java-kotlin'":
+            findings.add("CODEQL_FULL_MATRIX", f"codeql.yml:{name}",
+                         "Android CodeQL toolchain must remain scoped to Java/Kotlin")
+    swift = steps.get("Autobuild Swift sources for CodeQL") or {}
+    if (swift.get("if") != "matrix.language == 'swift'"
+        or not str(swift.get("uses") or "").startswith("github/codeql-action/autobuild@")):
+        findings.add("CODEQL_FULL_MATRIX", "codeql.yml:swift",
+                     "full official Swift CodeQL autobuild remains mandatory")
 
 
 def check_release_codeql_security(root, workflows, policy, findings):
-    """Stage A: protect the exact-SHA scan and new automated Release path."""
+    """Stage B: exact-SHA four-language full scans and release protection."""
     spec = policy.get("release_codeql_security")
     where = ".github/workflows/codeql.yml"
     if (not isinstance(spec, dict)
         or spec.get("workflow") != "codeql.yml"
-        or spec.get("scan_events") != ["pull_request", "schedule", "workflow_dispatch"]
+        or spec.get("scan_events") != ["schedule", "workflow_dispatch"]
         or spec.get("retained_languages") != ["actions", "java-kotlin", "python", "swift"]
         or spec.get("exact_sha_input") != "candidate_sha"
         or spec.get("sarif_retention_days") != 90):
@@ -900,14 +739,14 @@ def check_release_codeql_security(root, workflows, policy, findings):
     candidate = manual.get("candidate_sha") if isinstance(manual, dict) else None
     if (not isinstance(candidate, dict) or candidate.get("required") is not True
         or candidate.get("type") != "string"
-        or "pull_request" not in events or "schedule" not in events):
+        or set(events) != {"schedule", "workflow_dispatch"}):
         findings.add("CODEQL_RELEASE_TRIGGER", where,
-                     "retain PR/schedule plus mandatory exact-SHA manual dispatch in Stage A")
+                     "only weekly and mandatory exact-SHA manual dispatch allowed in Stage B")
     analyze = (codeql.get("jobs") or {}).get("analyze") or {}
     steps = {s.get("name"): s for s in steps_of(analyze) if isinstance(s, dict)}
     guard = steps.get("Require exact protected-main source for full CodeQL evidence") or {}
     guard_run = str(guard.get("run") or "")
-    if (guard.get("if") != "github.event_name != 'pull_request'"
+    if ("if" in guard
         or not all(x in guard_run for x in (
             '[[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]]',
             'remote_main="$(gh api', '[[ "$remote_main" == "$EXPECTED_SHA" ]]'
@@ -917,7 +756,7 @@ def check_release_codeql_security(root, workflows, policy, findings):
     if env.get("EXPECTED_SHA") != "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}":
         findings.add("CODEQL_RELEASE_SOURCE", where, "wrong expected candidate SHA selection")
     checkout = steps.get("Checkout repository") or {}
-    if (checkout.get("with") or {}).get("ref") != "${{ github.event_name != 'pull_request' && env.EXPECTED_SHA || github.sha }}":
+    if (checkout.get("with") or {}).get("ref") != "${{ env.EXPECTED_SHA }}":
         findings.add("CODEQL_RELEASE_SOURCE", where, "full scan checkout must pin expected exact SHA")
     operation = steps.get("Perform CodeQL Analysis") or {}
     analysis_options = operation.get("with") or {}
@@ -927,7 +766,7 @@ def check_release_codeql_security(root, workflows, policy, findings):
         findings.add("CODEQL_RELEASE_SARIF", where, "CodeQL must emit raw SARIF on every full scan")
     artifact = steps.get("Retain exact-main raw CodeQL SARIF") or {}
     opts = artifact.get("with") or {}
-    if (artifact.get("if") != "github.event_name != 'pull_request'"
+    if ("if" in artifact
         or not str(artifact.get("uses") or "").startswith("actions/upload-artifact@")
         or opts.get("name") != "release-codeql-${{ env.EXPECTED_SHA }}-${{ matrix.language }}"
         or opts.get("path") != "${{ steps.analyze.outputs.sarif-output }}"
@@ -936,7 +775,7 @@ def check_release_codeql_security(root, workflows, policy, findings):
         findings.add("CODEQL_RELEASE_SARIF", where, "raw per-language SARIF artifact retention drift")
     verdict = steps.get("Reject invalid or High/Critical exact-main SARIF") or {}
     verdict_run = str(verdict.get("run") or "")
-    if (verdict.get("if") != "github.event_name != 'pull_request'"
+    if ("if" in verdict
         or "python3 scripts/release_codeql_verdict.py" not in verdict_run
         or '[[ "$remote_main" == "$EXPECTED_SHA" ]]' not in verdict_run):
         findings.add("CODEQL_RELEASE_VERDICT", where, "full scan must fail closed on SARIF and main drift")

@@ -364,9 +364,6 @@ jobs:
       - name: "Fast evidence resolver fixtures"
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: python3 scripts/test-fast-evidence.py
-      - name: "CodeQL language scope fixtures"
-        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
-        run: python3 scripts/test-codeql-scope.py
       - name: "Release CodeQL SARIF negative controls"
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: python3 scripts/release_codeql_verdict.py --self-test

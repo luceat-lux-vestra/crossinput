@@ -1,14 +1,8 @@
 name: CodeQL
 
+# Full CodeQL runs only on weekly schedule or exact-main manual dispatch.
+# PR scan trigger intentionally removed after protected-main validation #38524071347.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
-    paths-ignore:
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'AGENTS.md'
-      - 'docs/**/*.md'
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -22,119 +16,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: codeql-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  scope:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    name: Classify CodeQL scope
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      actions_impact: ${{ steps.scope.outputs.actions_impact }}
-      swift_impact: ${{ steps.scope.outputs.swift_impact }}
-      java_impact: ${{ steps.scope.outputs.java_impact }}
-      python_impact: ${{ steps.scope.outputs.python_impact }}
-      reason: ${{ steps.scope.outputs.reason }}
-
-    steps:
-      - name: Check out trusted PR base
-        id: trusted_base
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: .codeql-trusted-base
-          persist-credentials: false
-
-      - name: Classify language impact
-        id: scope
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          TRUSTED_BASE_OUTCOME: ${{ steps.trusted_base.outcome }}
-        run: |
-          set -euo pipefail
-
-          emit_full_scan() {
-            {
-              echo "actions_impact=true"
-              echo "swift_impact=true"
-              echo "java_impact=true"
-              echo "python_impact=true"
-              echo "reason=$1"
-            } >> "$GITHUB_OUTPUT"
-          }
-
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            emit_full_scan "non-pr-event"
-            exit 0
-          fi
-
-          if [ "$TRUSTED_BASE_OUTCOME" != "success" ]; then
-            emit_full_scan "trusted-base-checkout-$TRUSTED_BASE_OUTCOME"
-            exit 0
-          fi
-
-          helper=".codeql-trusted-base/scripts/codeql-scope.py"
-          if [ ! -f "$helper" ]; then
-            emit_full_scan "trusted-base-helper-missing"
-            exit 0
-          fi
-
-          evidence="$RUNNER_TEMP/codeql-scope"
-          mkdir -p "$evidence"
-
-          set +e
-          gh api \
-            -H 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
-            > "$evidence/meta.json"
-          meta_status=$?
-
-          gh api --paginate --slurp \
-            -H 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
-            > "$evidence/pages.json"
-          pages_status=$?
-          set -e
-
-          if [ "$meta_status" -ne 0 ] || [ "$pages_status" -ne 0 ]; then
-            emit_full_scan "github-api-failure"
-            exit 0
-          fi
-
-          helper_output="$evidence/github-output.txt"
-          set +e
-          python3 "$helper" \
-            --meta "$evidence/meta.json" \
-            --pages "$evidence/pages.json" \
-            --output-json "$evidence/result.json" \
-            --github-output "$helper_output" \
-            > "$evidence/stdout.txt" 2> "$evidence/stderr.txt"
-          helper_status=$?
-          set -e
-
-          if [ "$helper_status" -ne 0 ] || [ ! -s "$helper_output" ]; then
-            emit_full_scan "trusted-base-helper-failure"
-            exit 0
-          fi
-
-          cat "$helper_output" >> "$GITHUB_OUTPUT"
-          cat "$evidence/stdout.txt"
-
   analyze:
-    needs: scope
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: Analyze (${{ matrix.language }})
-    runs-on: ${{ matrix.language == 'swift' && needs.scope.outputs.swift_impact != 'true' && 'ubuntu-24.04-arm' || matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:
       actions: read
@@ -161,7 +49,6 @@ jobs:
 
     steps:
       - name: Require exact protected-main source for full CodeQL evidence
-        if: github.event_name != 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -174,51 +61,20 @@ jobs:
           remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           [[ "$remote_main" == "$EXPECTED_SHA" ]] || { echo "::error::main moved or differs from requested SHA"; exit 1; }
 
-      - name: Trusted scope skip
-        if: >-
-          ${{
-            matrix.language != 'actions'
-            && (
-              (matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact != 'true')
-              || (matrix.language == 'python' && needs.scope.outputs.python_impact != 'true')
-              || (matrix.language == 'swift' && needs.scope.outputs.swift_impact != 'true')
-            )
-          }}
-        env:
-          LANGUAGE: ${{ matrix.language }}
-          SCOPE_REASON: ${{ needs.scope.outputs.reason }}
-        run: |
-          echo "No trusted-base CodeQL impact for $LANGUAGE; heavy analysis is not applicable."
-          echo "scope-reason=$SCOPE_REASON"
-
       - name: Checkout repository
-        if: >-
-          ${{
-            matrix.language == 'actions'
-            || (matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true')
-            || (matrix.language == 'python' && needs.scope.outputs.python_impact == 'true')
-            || (matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true')
-          }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event_name != 'pull_request' && env.EXPECTED_SHA || github.sha }}
+          ref: ${{ env.EXPECTED_SHA }}
 
       - name: Initialize CodeQL
-        if: >-
-          ${{
-            matrix.language == 'actions'
-            || (matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true')
-            || (matrix.language == 'python' && needs.scope.outputs.python_impact == 'true')
-            || (matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true')
-          }}
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Set up Java
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
@@ -232,47 +88,40 @@ jobs:
             android/helper/**/gradle-wrapper.properties
 
       - name: Set up Android SDK
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
 
       - name: Install Android 17 SDK
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         run: |
           command -v sdkmanager >/dev/null
           sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Install native ARM64 Android 37 build tools
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         run: bash scripts/setup-android-arm64-build-tools.sh
 
       - name: Validate Gradle wrapper
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         uses: gradle/actions/wrapper-validation@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Build Android helper for CodeQL
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         run: |
           cd android/helper
           chmod +x gradlew
           ./gradlew test assembleDebug --console=plain
 
       - name: Verify Java 25 / Android 17 toolchain
-        if: matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true'
+        if: matrix.language == 'java-kotlin'
         run: scripts/check-android-toolchain.sh
 
       - name: Autobuild Swift sources for CodeQL
-        if: matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true'
+        if: matrix.language == 'swift'
         uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
       - name: Perform CodeQL Analysis
         id: analyze
-        if: >-
-          ${{
-            matrix.language == 'actions'
-            || (matrix.language == 'java-kotlin' && needs.scope.outputs.java_impact == 'true')
-            || (matrix.language == 'python' && needs.scope.outputs.python_impact == 'true')
-            || (matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true')
-          }}
         uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           category: /language:${{ matrix.language }}
@@ -280,7 +129,6 @@ jobs:
           output: ${{ runner.temp }}/release-codeql-${{ matrix.language }}
 
       - name: Retain exact-main raw CodeQL SARIF
-        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-codeql-${{ env.EXPECTED_SHA }}-${{ matrix.language }}
@@ -289,7 +137,6 @@ jobs:
           retention-days: 90
 
       - name: Reject invalid or High/Critical exact-main SARIF
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}

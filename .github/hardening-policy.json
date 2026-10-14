@@ -113,19 +113,7 @@
       "swift"
     ],
     "exceptions": [],
-    "pr_language_scope": {
-      "classifier": "scripts/codeql-scope.py",
-      "trusted_base": true,
-      "always_analyze": [
-        "actions"
-      ],
-      "fail_closed": true,
-      "full_scan_paths": [
-        ".github/workflows/codeql.yml",
-        "scripts/codeql-scope.py",
-        ".github/codeql/**"
-      ]
-    }
+    "scan_timing": "Weekly and exact protected-main manual only; no PR or push CodeQL. PR security discovery latency is deliberately increased."
   },
   "release_provenance": {
     "workflow": "release.yml",
@@ -143,10 +131,9 @@
     "actions/permissions/workflow": "Default GITHUB_TOKEN workflow permissions are an administration surface; scheduled low-privilege audit records them as manual-unverified when unreadable."
   },
   "release_codeql_security": {
-    "stage": "A: PR CodeQL retained until exact-SHA manual evidence passes",
+    "stage": "B: PR CodeQL retired after exact-main manual 4-language PASS #38524071347",
     "workflow": "codeql.yml",
     "scan_events": [
-      "pull_request",
       "schedule",
       "workflow_dispatch"
     ],
@@ -160,6 +147,7 @@
     "sarif_retention_days": 90,
     "first_publication": "exact-tag SHA full SARIF validated before new automated GitHub Release",
     "existing_release_recovery": "legacy existing-release asset upload preserved; does not prove first-publication security",
-    "owner_direct_release": "out-of-band owner GitHub UI/API publication cannot be blocked by this workflow"
+    "owner_direct_release": "out-of-band owner GitHub UI/API publication cannot be blocked by this workflow",
+    "pr_detection_tradeoff": "CodeQL is no longer executed for PRs. Vulnerabilities may be found only at the next weekly or manually dispatched full scan."
   }
 }

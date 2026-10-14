@@ -424,43 +424,31 @@ def main():
                            "          tools: https://example.invalid/codeql-bundle.tar.zst\n"),
          "CODEQL_TOOLS_OVERRIDE")
 
-    case("CodeQL scope policy cannot fail open",
-         lambda root: policy_edit(
-             root,
-             lambda policy: policy["codeql_coverage"]["pr_language_scope"].update(
-                 {"fail_closed": False})),
-         "CODEQL_SCOPE_POLICY")
+    # Stage B prevents accidental restoration of PR CodeQL and scope shortcuts.
+    case("PR CodeQL trigger must stay disabled",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "  schedule:\n", "  pull_request:\n  schedule:\n"),
+         "CODEQL_RELEASE_TRIGGER")
 
-    case("CodeQL scope must load policy from trusted base",
-         lambda root: edit(
-             workflow(root, "codeql.yml"),
-             "          ref: ${{ github.event.pull_request.base.sha }}\n",
-             "          ref: ${{ github.event.pull_request.head.sha }}\n"),
-         "CODEQL_SCOPE_CONTRACT")
+    case("CodeQL PR classifier job must stay retired",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "jobs:\n  analyze:",
+                           "jobs:\n  scope:\n    runs-on: ubuntu-24.04-arm\n"
+                           "    steps:\n      - run: echo obsolete\n  analyze:"),
+         "CODEQL_SCOPE_RETIRED")
 
-    case("CodeQL scope cannot execute head-controlled classifier",
-         lambda root: edit(
-             workflow(root, "codeql.yml"),
-             '          helper=".codeql-trusted-base/scripts/codeql-scope.py"\n',
-             '          helper="scripts/codeql-scope.py"\n'),
-         "CODEQL_SCOPE_CONTRACT")
+    case("Swift CodeQL still requires macOS",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "            os: macos-15\n", "            os: ubuntu-24.04-arm\n"),
+         "CODEQL_FULL_MATRIX")
 
-    case("CodeQL heavy analysis cannot drop Swift impact gate",
-         lambda root: edit(
-             workflow(root, "codeql.yml"),
-             "            || (matrix.language == 'swift' && needs.scope.outputs.swift_impact == 'true')\n",
-             "            || matrix.language == 'swift'\n",
-             1),
-         "CODEQL_SCOPE_CONTRACT")
+    case("Swift official autobuild cannot be skipped",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "        if: matrix.language == 'swift'\n",
+                           "        if: matrix.language == 'java-kotlin'\n"),
+         "CODEQL_FULL_MATRIX")
 
-    case("CodeQL scope fixtures must remain in required tooling gate",
-         lambda root: edit(
-             workflow(root, "ci.yml"),
-             "        run: python3 scripts/test-codeql-scope.py\n",
-             "        run: echo scope-fixtures-removed\n"),
-         "CODEQL_SCOPE_CONTRACT")
-
-    # Stage A exact-SHA security evidence and new-Release gate must be regressible.
+    # Stage B exact-SHA security evidence and new-Release gate must be regressible.
     case("manual CodeQL trigger is mandatory",
          lambda root: edit(workflow(root, "codeql.yml"),
                            "  workflow_dispatch:\n", "  missing_manual_dispatch:\n"),

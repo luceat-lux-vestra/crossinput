@@ -54,11 +54,11 @@ def metadata_ok(run, workflow, jobs, artifacts, repo, sha, now):
     except ValueError as exc:
         raise ValueError("invalid scan creation time") from exc
     # A successful scan is bound to immutable source, not an arbitrary age.
-    # An older run is eligible while all three original SARIF artifacts remain
+    # An older run is eligible while all four original SARIF artifacts remain
     # accessible and the CURRENT verifier still accepts their contents.
     if created.tzinfo is None or created > now:
         reject("scan has invalid or future timestamp")
-    expected_jobs = {"Classify CodeQL scope"} | {f"Analyze ({lang})" for lang in LANGUAGES}
+    expected_jobs = {f"Analyze ({lang})" for lang in LANGUAGES}
     if (not isinstance(jobs, dict)
         or jobs.get("total_count") != len(expected_jobs)
         or not isinstance(jobs.get("jobs"), list)
@@ -164,8 +164,8 @@ def self_test():
            "head_branch": "main", "head_sha": sha, "status": "completed",
            "conclusion": "success", "run_attempt": 1,
            "created_at": "2026-10-14T00:00:00Z"}
-    jobs = {"total_count": len(LANGUAGES) + 1, "jobs": [{"name": name,
-             "status": "completed", "conclusion": "success"} for name in sorted({"Classify CodeQL scope"} | {f"Analyze ({lang})" for lang in LANGUAGES})]}
+    jobs = {"total_count": len(LANGUAGES), "jobs": [{"name": name,
+             "status": "completed", "conclusion": "success"} for name in sorted({f"Analyze ({lang})" for lang in LANGUAGES})]}
     artifacts = {"total_count": len(LANGUAGES), "artifacts": [
         {"name": f"release-codeql-{sha}-{lang}", "id": i + 1,
          "size_in_bytes": 2000, "expired": False,
