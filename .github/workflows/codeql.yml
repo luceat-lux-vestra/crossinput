@@ -9,6 +9,12 @@ on:
       - 'CONTRIBUTING.md'
       - 'AGENTS.md'
       - 'docs/**/*.md'
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact 40-character protected main SHA to scan"
+        required: true
+        type: string
   schedule:
     - cron: '17 4 * * 1'
 
@@ -134,6 +140,8 @@ jobs:
       actions: read
       contents: read
       security-events: write
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -152,6 +160,20 @@ jobs:
             os: macos-15
 
     steps:
+      - name: Require exact protected-main source for full CodeQL evidence
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Exact 40-character SHA required"; exit 1; }
+          [[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || {
+            echo "::error::Manual/weekly CodeQL must target exact protected main event SHA"; exit 1;
+          }
+          remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "$remote_main" == "$EXPECTED_SHA" ]] || { echo "::error::main moved or differs from requested SHA"; exit 1; }
+
       - name: Trusted scope skip
         if: >-
           ${{
@@ -180,6 +202,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event_name != 'pull_request' && env.EXPECTED_SHA || github.sha }}
 
       - name: Initialize CodeQL
         if: >-
@@ -242,6 +265,7 @@ jobs:
         uses: github/codeql-action/autobuild@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
       - name: Perform CodeQL Analysis
+        id: analyze
         if: >-
           ${{
             matrix.language == 'actions'
@@ -252,3 +276,28 @@ jobs:
         uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           category: /language:${{ matrix.language }}
+          upload: ${{ github.event_name == 'workflow_dispatch' && 'never' || 'always' }}
+          output: ${{ runner.temp }}/release-codeql-${{ matrix.language }}
+
+      - name: Retain exact-main raw CodeQL SARIF
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-codeql-${{ env.EXPECTED_SHA }}-${{ matrix.language }}
+          path: ${{ steps.analyze.outputs.sarif-output }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Reject invalid or High/Critical exact-main SARIF
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_codeql_verdict.py \
+            --sarif-dir "$SARIF_DIR" \
+            --language "${{ matrix.language }}" \
+            --candidate-sha "$EXPECTED_SHA"
+          remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "$remote_main" == "$EXPECTED_SHA" ]] || { echo "::error::main moved during full CodeQL"; exit 1; }

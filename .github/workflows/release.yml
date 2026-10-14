@@ -29,6 +29,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 30
     permissions:
+      actions: read # Inspect exact-tag CodeQL workflow runs and raw SARIF.
       contents: write
       id-token: write
       attestations: write
@@ -74,6 +75,36 @@ jobs:
           }
 
           echo "commit=${head_commit}" >> "${GITHUB_OUTPUT}"
+
+      - name: Classify existing release recovery
+        id: release_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          lookup="$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null | grep -m1 -E '^HTTP/')"
+          set -e
+          case "$lookup" in
+            HTTP*\ 404*) echo "mode=new" >> "$GITHUB_OUTPUT" ;;
+            HTTP*\ 200*) echo "mode=recovery" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::Inconclusive release lookup: $lookup"; exit 1 ;;
+          esac
+
+      # Existing *published* release asset recovery is a legacy operation,
+      # not a first publication. Never treat an owner-created release as
+      # evidence of a secured first publication.
+      - name: Verify exact-tag CodeQL before first GitHub Release publication
+        if: steps.release_state.outputs.mode == 'new'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_codeql_gate.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --candidate-sha "$RELEASE_COMMIT"
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
@@ -122,6 +153,7 @@ jobs:
       - name: Create or refresh GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ steps.release_state.outputs.mode }}
           VERSION: ${{ steps.artifact.outputs.version }}
           DMG: ${{ steps.artifact.outputs.dmg }}
           CHECKSUM: ${{ steps.artifact.outputs.checksum }}
@@ -134,14 +166,16 @@ jobs:
             | grep -m1 -E '^HTTP/')"
           set -e
 
-          case "${lookup}" in
-            HTTP*\ 200*)
+          # Never turn an originally unverified "new" publication into a
+          # recovery if the release state changed during this run.
+          case "${RELEASE_MODE}:${lookup}" in
+            recovery:HTTP*\ 200*)
               gh release upload "${RELEASE_TAG}" \
                 "${DMG}" "${CHECKSUM}" \
                 --repo "${GITHUB_REPOSITORY}" \
                 --clobber
               ;;
-            HTTP*\ 404*)
+            new:HTTP*\ 404*)
               gh release create "${RELEASE_TAG}" \
                 "${DMG}" "${CHECKSUM}" \
                 --repo "${GITHUB_REPOSITORY}" \
@@ -150,7 +184,7 @@ jobs:
                 --notes "Ad-hoc signed DMG. See README 'Installation' for the first-launch right-click→Open step (no Developer ID)."
               ;;
             *)
-              echo "release lookup was inconclusive, refusing to publish: ${lookup}" >&2
+              echo "::error::Release state changed or lookup inconclusive: ${RELEASE_MODE}:${lookup}" >&2
               exit 1
               ;;
           esac
