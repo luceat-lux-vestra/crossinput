@@ -882,6 +882,101 @@ def check_codeql_authority(root, workflows, policy, findings):
 
 
 
+def check_release_codeql_security(root, workflows, policy, findings):
+    """Stage A: protect the exact-SHA scan and new automated Release path."""
+    spec = policy.get("release_codeql_security")
+    where = ".github/workflows/codeql.yml"
+    if (not isinstance(spec, dict)
+        or spec.get("workflow") != "codeql.yml"
+        or spec.get("scan_events") != ["pull_request", "schedule", "workflow_dispatch"]
+        or spec.get("retained_languages") != ["actions", "java-kotlin", "python", "swift"]
+        or spec.get("exact_sha_input") != "candidate_sha"
+        or spec.get("sarif_retention_days") != 90):
+        findings.add("CODEQL_RELEASE_POLICY", ".github/hardening-policy.json",
+                     "release security policy must retain full four-language exact-SHA evidence")
+    codeql = workflows.get("codeql.yml") or {}
+    events = triggers(codeql)
+    manual = (events.get("workflow_dispatch") or {}).get("inputs", {})
+    candidate = manual.get("candidate_sha") if isinstance(manual, dict) else None
+    if (not isinstance(candidate, dict) or candidate.get("required") is not True
+        or candidate.get("type") != "string"
+        or "pull_request" not in events or "schedule" not in events):
+        findings.add("CODEQL_RELEASE_TRIGGER", where,
+                     "retain PR/schedule plus mandatory exact-SHA manual dispatch in Stage A")
+    analyze = (codeql.get("jobs") or {}).get("analyze") or {}
+    steps = {s.get("name"): s for s in steps_of(analyze) if isinstance(s, dict)}
+    guard = steps.get("Require exact protected-main source for full CodeQL evidence") or {}
+    guard_run = str(guard.get("run") or "")
+    if (guard.get("if") != "github.event_name != 'pull_request'"
+        or not all(x in guard_run for x in (
+            '[[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]]',
+            'remote_main="$(gh api', '[[ "$remote_main" == "$EXPECTED_SHA" ]]'
+        ))):
+        findings.add("CODEQL_RELEASE_SOURCE", where, "exact main source verification missing")
+    env = analyze.get("env") or {}
+    if env.get("EXPECTED_SHA") != "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}":
+        findings.add("CODEQL_RELEASE_SOURCE", where, "wrong expected candidate SHA selection")
+    checkout = steps.get("Checkout repository") or {}
+    if (checkout.get("with") or {}).get("ref") != "${{ github.event_name != 'pull_request' && env.EXPECTED_SHA || github.sha }}":
+        findings.add("CODEQL_RELEASE_SOURCE", where, "full scan checkout must pin expected exact SHA")
+    operation = steps.get("Perform CodeQL Analysis") or {}
+    analysis_options = operation.get("with") or {}
+    if (operation.get("id") != "analyze"
+        or analysis_options.get("upload") != "${{ github.event_name == 'workflow_dispatch' && 'never' || 'always' }}"
+        or analysis_options.get("output") != "${{ runner.temp }}/release-codeql-${{ matrix.language }}"):
+        findings.add("CODEQL_RELEASE_SARIF", where, "CodeQL must emit raw SARIF on every full scan")
+    artifact = steps.get("Retain exact-main raw CodeQL SARIF") or {}
+    opts = artifact.get("with") or {}
+    if (artifact.get("if") != "github.event_name != 'pull_request'"
+        or not str(artifact.get("uses") or "").startswith("actions/upload-artifact@")
+        or opts.get("name") != "release-codeql-${{ env.EXPECTED_SHA }}-${{ matrix.language }}"
+        or opts.get("path") != "${{ steps.analyze.outputs.sarif-output }}"
+        or opts.get("if-no-files-found") != "error"
+        or opts.get("retention-days") != 90):
+        findings.add("CODEQL_RELEASE_SARIF", where, "raw per-language SARIF artifact retention drift")
+    verdict = steps.get("Reject invalid or High/Critical exact-main SARIF") or {}
+    verdict_run = str(verdict.get("run") or "")
+    if (verdict.get("if") != "github.event_name != 'pull_request'"
+        or "python3 scripts/release_codeql_verdict.py" not in verdict_run
+        or '[[ "$remote_main" == "$EXPECTED_SHA" ]]' not in verdict_run):
+        findings.add("CODEQL_RELEASE_VERDICT", where, "full scan must fail closed on SARIF and main drift")
+    release = (workflows.get("release.yml") or {}).get("jobs", {}).get("dmg") or {}
+    release_steps = steps_of(release)
+    named = {s.get("name"): (i, s) for i, s in enumerate(release_steps) if isinstance(s, dict)}
+    state = named.get("Classify existing release recovery")
+    gate = named.get("Verify exact-tag CodeQL before first GitHub Release publication")
+    build = named.get("Build DMG")
+    publish = named.get("Create or refresh GitHub Release")
+    source = named.get("Verify checked-out tag identity")
+    if not all((state, gate, build, publish, source)):
+        findings.add("RELEASE_CODEQL_ORDER", "release.yml", "missing source, recovery state, CodeQL gate or publish step")
+    else:
+        si, state_step = state
+        gi, gate_step = gate
+        bi, _ = build
+        pi, publish_step = publish
+        if not (source[0] < si < gi < bi < pi):
+            findings.add("RELEASE_CODEQL_ORDER", "release.yml", "pre-publication CodeQL gate must precede all builds and release mutation")
+        gate_run = str(gate_step.get("run") or "")
+        state_run = str(state_step.get("run") or "")
+        pub_run = str(publish_step.get("run") or "")
+        if (gate_step.get("if") != "steps.release_state.outputs.mode == 'new'"
+            or "--candidate-sha" not in gate_run
+            or "scripts/release_codeql_gate.py" not in gate_run
+            or "mode=new" not in state_run or "mode=recovery" not in state_run
+            or "new:HTTP*" not in pub_run or "recovery:HTTP*" not in pub_run
+            or "RELEASE_MODE" not in (publish_step.get("env") or {})):
+            findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
+    if (release.get("permissions") or {}).get("actions") != "read":
+        findings.add("RELEASE_CODEQL_GATE", "release.yml", "release verifier needs actions:read")
+    scripts = (workflows.get("ci.yml") or {}).get("jobs", {}).get("scripts") or {}
+    commands = {str(s.get("run") or "").strip() for s in steps_of(scripts) if isinstance(s, dict)}
+    for cmd in ("python3 scripts/release_codeql_verdict.py --self-test",
+                "python3 scripts/release_codeql_gate.py --self-test"):
+        if cmd not in commands:
+            findings.add("RELEASE_CODEQL_TESTS", "ci.yml:scripts", f"missing required offline negative fixture: {cmd}")
+
+
 MANUAL_LIVE_READBACKS = {
     "codeql",
     "actions/permissions",
@@ -1237,6 +1332,7 @@ def main():
     check_manual_live_readback_policy(policy, findings)
     check_hardening_audit_lifecycle(args.root, workflows, findings)
     check_release_provenance(args.root, workflows, policy, findings)
+    check_release_codeql_security(args.root, workflows, policy, findings)
     if args.live:
         check_live(args.repo, policy, findings)
 

@@ -460,6 +460,41 @@ def main():
              "        run: echo scope-fixtures-removed\n"),
          "CODEQL_SCOPE_CONTRACT")
 
+    # Stage A exact-SHA security evidence and new-Release gate must be regressible.
+    case("manual CodeQL trigger is mandatory",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "  workflow_dispatch:\n", "  missing_manual_dispatch:\n"),
+         "CODEQL_RELEASE_TRIGGER")
+
+    case("main exact SHA proof cannot be removed",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           '[[ "$remote_main" == "$EXPECTED_SHA" ]]',
+                           '[[ "1" == "1" ]]', 1),
+         "CODEQL_RELEASE_SOURCE")
+
+    case("raw CodeQL SARIF retention cannot be removed",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "      - name: Retain exact-main raw CodeQL SARIF",
+                           "      - name: Removed raw SARIF"),
+         "CODEQL_RELEASE_SARIF")
+
+    case("CodeQL SARIF severity verdict cannot be removed",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "python3 scripts/release_codeql_verdict.py",
+                           "echo not-verified"),
+         "CODEQL_RELEASE_VERDICT")
+
+    case("release pre-publication CodeQL gate cannot be removed",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "scripts/release_codeql_gate.py",
+                           "scripts/removed-security-gate.py"),
+         "RELEASE_CODEQL_GATE")
+
+    case("recovery classification cannot bypass first-publication check",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "new:HTTP*\\ 404*)", "recovery:HTTP*\\ 404*)"),
+         "RELEASE_CODEQL_GATE")
+
     # An unparsable workflow must abort the audit (exit 2), never pass quietly.
     with tempfile.TemporaryDirectory() as tmp:
         root = os.path.join(tmp, "repo")
