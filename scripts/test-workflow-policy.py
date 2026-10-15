@@ -35,6 +35,47 @@ def workflow(root, name):
     return os.path.join(root, ".github", "workflows", name)
 
 
+LIFECYCLE_WORKFLOW = """name: Lifecycle fixture
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lifecycle-fixture
+  cancel-in-progress: true
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo safe
+"""
+
+
+def add_lifecycle_workflow(root, name, owner=True, retire=True):
+    headers = []
+    if owner:
+        headers.append("# lifecycle-owner: issue #261")
+    if retire:
+        headers.append("# lifecycle-retire: remove after bounded research evidence is recorded")
+    path = workflow(root, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(headers + [LIFECYCLE_WORKFLOW]))
+
+
+def positive_case(name, mutate):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = os.path.join(tmp, "repo")
+        os.makedirs(root)
+        shutil.copytree(os.path.join(ROOT, ".github"), os.path.join(root, ".github"))
+        mutate(root)
+        status, output = run_checker(root)
+        if status != 0:
+            FAILURES.append(f"{name}: expected exit 0, got {status}\n{output}")
+        else:
+            print(f"  ok  {name}")
+
+
 def edit(path, old, new, count=1):
     with open(path, "r", encoding="utf-8") as handle:
         text = handle.read()
@@ -79,6 +120,31 @@ def policy_edit(root, mutate):
 
 def main():
     baseline()
+
+    positive_case(
+        "ephemeral workflow with lifecycle metadata",
+        lambda root: add_lifecycle_workflow(root, "research-lifecycle-fixture.yml"),
+    )
+    case(
+        "ephemeral workflow missing lifecycle owner",
+        lambda root: add_lifecycle_workflow(
+            root, "temporary-lifecycle-fixture.yml", owner=False
+        ),
+        "WORKFLOW_LIFECYCLE",
+    )
+    case(
+        "ephemeral workflow missing lifecycle retirement condition",
+        lambda root: add_lifecycle_workflow(
+            root, "experiment-lifecycle-fixture.yaml", retire=False
+        ),
+        "WORKFLOW_LIFECYCLE",
+    )
+    positive_case(
+        "maintained workflow filename needs no lifecycle metadata",
+        lambda root: add_lifecycle_workflow(
+            root, "ci-lifecycle-fixture.yml", owner=False, retire=False
+        ),
+    )
 
     # A required producer is renamed: the ruleset context would simply never be
     # reported again and the PR would sit "expected" forever - or, worse, the
