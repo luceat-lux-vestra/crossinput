@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Verify real exact-main CodeQL release evidence BEFORE GitHub Release mutation.
+"""Verify exact-source CodeQL release evidence before managed publication.
 
-This guard runs in the already-public 'released' workflow. It protects
-GitHub Release publication, NOT initial GitHub Release visibility.
+The caller may analyze the current protected main or an earlier immutable
+protected-main ancestor. This gate protects repository-managed first
+publication; an owner-created public GitHub Release remains out of band.
 """
 import argparse
 import datetime as dt
@@ -75,7 +76,7 @@ def metadata_ok(run, workflow, jobs, artifacts, repo, sha, now):
         or artifacts.get("total_count") != 2 * len(LANGUAGES)
         or not isinstance(artifacts.get("artifacts"), list)
         or len(artifacts["artifacts"]) != 2 * len(LANGUAGES)):
-        reject("expected precisely four retained SARIF artifacts")
+        reject("expected four SARIF plus four source-provenance artifacts")
     items = artifacts["artifacts"]
     if ({a.get("name") for a in items if isinstance(a, dict)} != expected_names
         or any(not isinstance(a, dict)
@@ -299,6 +300,26 @@ def self_test():
     probe("SARIF artifacts", lambda r, w, j, a: a["artifacts"].pop())
     probe("wrong-SHA", lambda r, w, j, a: a["artifacts"][0]["workflow_run"].update(head_sha="b" * 40))
     probe("ambiguous", lambda r, w, j, a: a["artifacts"][1].update(expired=True))
+    # Candidate ancestry: current main and a historical protected-main ancestor
+    # are accepted; divergence is rejected fail-closed.
+    for status in ("identical", "ahead"):
+        with mock.patch.object(sys.modules[__name__], "api", return_value={
+            "status": status,
+            "base_commit": {"sha": sha},
+            "merge_base_commit": {"sha": sha},
+        }):
+            check_repo_sha(repo, sha)
+    with mock.patch.object(sys.modules[__name__], "api", return_value={
+        "status": "diverged",
+        "base_commit": {"sha": sha},
+        "merge_base_commit": {"sha": "b" * 40},
+    }):
+        try:
+            check_repo_sha(repo, sha)
+        except ValueError as exc:
+            assert "not proven reachable" in str(exc)
+        else:
+            raise AssertionError("diverged release candidate was accepted")
     # The successful guard-only scheduled workflow is an intentional no-op,
     # never evidence for publication even though GitHub reports SUCCESS.
     schedule = dict(run, event="schedule")
