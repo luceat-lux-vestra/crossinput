@@ -742,14 +742,30 @@ def check_release_codeql_security(root, workflows, policy, findings):
         or set(events) != {"schedule", "workflow_dispatch"}):
         findings.add("CODEQL_RELEASE_TRIGGER", where,
                      "only weekly and mandatory exact-SHA manual dispatch allowed in Stage B")
+    guard_job = (codeql.get("jobs") or {}).get("scan-guard") or {}
+    decide = {v.get("name"): v for v in steps_of(guard_job) if isinstance(v, dict)}.get(
+        "Decide whether full CodeQL is required", {})
+    decide_run = str(decide.get("run") or "")
+    if (guard_job.get("name") != "CodeQL schedule guard"
+        or (guard_job.get("outputs") or {}).get("should_scan") != "${{ steps.decide.outputs.should_scan }}"
+        or "event=schedule&status=success&branch=main&per_page=100" not in decide_run
+        or 'and .head_sha == $sha' not in decide_run
+        or "should_scan=false" not in decide_run
+        or "should_scan=true" not in decide_run):
+        findings.add("CODEQL_SCHEDULE_GUARD", where, "unchanged exact-main SHA guard missing")
     analyze = (codeql.get("jobs") or {}).get("analyze") or {}
+    if (analyze.get("needs") != "scan-guard"
+        or analyze.get("if") != "needs.scan-guard.outputs.should_scan == 'true'"):
+        findings.add("CODEQL_SCHEDULE_GUARD", where, "matrix must depend on successful schedule guard")
     steps = {s.get("name"): s for s in steps_of(analyze) if isinstance(s, dict)}
     guard = steps.get("Require exact protected-main source for full CodeQL evidence") or {}
     guard_run = str(guard.get("run") or "")
     if ("if" in guard
         or not all(x in guard_run for x in (
-            '[[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]]',
-            'remote_main="$(gh api', '[[ "$remote_main" == "$EXPECTED_SHA" ]]'
+            '[[ "$GITHUB_REF" == "refs/heads/main" ]]',
+            'remote_main="$(gh api',
+            'compare/${EXPECTED_SHA}...',
+            '.merge_base_commit.sha == $sha',
         ))):
         findings.add("CODEQL_RELEASE_SOURCE", where, "exact main source verification missing")
     env = analyze.get("env") or {}
@@ -773,11 +789,17 @@ def check_release_codeql_security(root, workflows, policy, findings):
         or opts.get("if-no-files-found") != "error"
         or opts.get("retention-days") != 90):
         findings.add("CODEQL_RELEASE_SARIF", where, "raw per-language SARIF artifact retention drift")
+    manifest = steps.get("Retain source identity manifest") or {}
+    manifest_opts = manifest.get("with") or {}
+    if (manifest_opts.get("name") != "release-codeql-source-${{ env.EXPECTED_SHA }}-${{ matrix.language }}"
+        or manifest_opts.get("retention-days") != 90
+        or "Record exact source identity" not in steps):
+        findings.add("CODEQL_RELEASE_SOURCE", where, "source identity manifest must be retained")
     verdict = steps.get("Reject invalid or High/Critical exact-main SARIF") or {}
     verdict_run = str(verdict.get("run") or "")
     if ("if" in verdict
         or "python3 scripts/release_codeql_verdict.py" not in verdict_run
-        or '[[ "$remote_main" == "$EXPECTED_SHA" ]]' not in verdict_run):
+        or '.merge_base_commit.sha == $sha' not in verdict_run):
         findings.add("CODEQL_RELEASE_VERDICT", where, "full scan must fail closed on SARIF and main drift")
     release = (workflows.get("release.yml") or {}).get("jobs", {}).get("dmg") or {}
     release_steps = steps_of(release)
@@ -806,8 +828,8 @@ def check_release_codeql_security(root, workflows, policy, findings):
             or "new:HTTP*" not in pub_run or "recovery:HTTP*" not in pub_run
             or "RELEASE_MODE" not in (publish_step.get("env") or {})):
             findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
-    if (release.get("permissions") or {}).get("actions") != "read":
-        findings.add("RELEASE_CODEQL_GATE", "release.yml", "release verifier needs actions:read")
+    if (release.get("permissions") or {}).get("actions") != "write":
+        findings.add("RELEASE_CODEQL_GATE", "release.yml", "trusted release scanner dispatch requires actions:write")
     scripts = (workflows.get("ci.yml") or {}).get("jobs", {}).get("scripts") or {}
     commands = {str(s.get("run") or "").strip() for s in steps_of(scripts) if isinstance(s, dict)}
     for cmd in ("python3 scripts/release_codeql_verdict.py --self-test",
