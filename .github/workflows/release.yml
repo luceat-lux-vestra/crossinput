@@ -27,9 +27,10 @@ env:
 jobs:
   dmg:
     runs-on: xcode-27
-    timeout-minutes: 30
+    # CodeQL preflight may dispatch and join a bounded full four-language scan.
+    timeout-minutes: 60
     permissions:
-      actions: read # Inspect exact-tag CodeQL workflow runs and raw SARIF.
+      actions: write # Trusted candidate CodeQL dispatch and evidence retrieval; job-local only.
       contents: write
       id-token: write
       attestations: write
@@ -153,6 +154,7 @@ jobs:
       - name: Create or refresh GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
           RELEASE_MODE: ${{ steps.release_state.outputs.mode }}
           VERSION: ${{ steps.artifact.outputs.version }}
           DMG: ${{ steps.artifact.outputs.dmg }}
@@ -160,6 +162,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The tag must still resolve to the exact reviewed and scanned source
+          # immediately before mutating managed GitHub Release assets.
+          live_tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          [[ "$live_tag_commit" == "$SOURCE_COMMIT" ]] || {
+            echo "::error::Release tag source moved after preflight"; exit 1;
+          }
           set +e
           lookup="$(gh api --include \
             "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>/dev/null \

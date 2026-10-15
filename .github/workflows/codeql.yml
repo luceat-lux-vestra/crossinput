@@ -1,4 +1,5 @@
 name: CodeQL
+run-name: CodeQL source ${{ inputs.candidate_sha || github.sha }}
 
 # Full CodeQL runs only on weekly schedule or exact-main manual dispatch.
 # PR scan trigger intentionally removed after protected-main validation #38524071347.
@@ -16,11 +17,45 @@ permissions:
   contents: read
 
 concurrency:
-  group: codeql-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: true
+  group: codeql-${{ inputs.candidate_sha || github.sha }}
+  cancel-in-progress: false
 
 jobs:
+  scan-guard:
+    name: CodeQL schedule guard
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      should_scan: ${{ steps.decide.outputs.should_scan }}
+    steps:
+      - name: Decide whether full CodeQL is required
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != schedule ]]; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/codeql.yml/runs?event=schedule&status=success&branch=main&per_page=100")"
+          if jq -e --arg sha "$GITHUB_SHA" --argjson current "$GITHUB_RUN_ID" '
+            .workflow_runs | any(.id != $current and .head_sha == $sha
+              and .head_branch == "main" and .path == ".github/workflows/codeql.yml")
+          ' <<<"$runs" >/dev/null; then
+            echo "should_scan=false" >> "$GITHUB_OUTPUT"
+            echo "Unchanged scheduled main SHA: skip expensive CodeQL matrix"
+          else
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+          fi
+
   analyze:
+    needs: scan-guard
+    if: needs.scan-guard.outputs.should_scan == 'true'
     name: Analyze (${{ matrix.language }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -55,17 +90,57 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Exact 40-character SHA required"; exit 1; }
-          [[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || {
-            echo "::error::Manual/weekly CodeQL must target exact protected main event SHA"; exit 1;
-          }
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "::error::Trusted main workflow only"; exit 1; }
+          if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            [[ "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || exit 1
+          else
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || exit 1
+          fi
           remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
-          [[ "$remote_main" == "$EXPECTED_SHA" ]] || { echo "::error::main moved or differs from requested SHA"; exit 1; }
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${remote_main}")"
+          jq -e --arg sha "$EXPECTED_SHA" '
+            (.status == "ahead" or .status == "identical")
+            and .base_commit.sha == $sha and .merge_base_commit.sha == $sha
+          ' <<<"$compare" >/dev/null || { echo "::error::Not a protected-main ancestor"; exit 1; }
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
           ref: ${{ env.EXPECTED_SHA }}
+
+      - name: Verify scanned source checkout and ancestry
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$EXPECTED_SHA" FETCH_HEAD
+
+      - name: Record exact source identity
+        env:
+          CODEQL_LANGUAGE: ${{ matrix.language }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          expected = os.environ["EXPECTED_SHA"]
+          actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          if actual != expected:
+              raise SystemExit("Wrong checkout identity")
+          doc = {"schema": 1, "candidate_sha": expected, "checkout_sha": actual,
+                 "event_sha": os.environ["GITHUB_SHA"], "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                 "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                 "language": os.environ["CODEQL_LANGUAGE"]}
+          pathlib.Path(os.environ["RUNNER_TEMP"], "source-identity.json").write_text(json.dumps(doc))
+          PY
+
+      - name: Retain source identity manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-codeql-source-${{ env.EXPECTED_SHA }}-${{ matrix.language }}
+          path: ${{ runner.temp }}/source-identity.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
@@ -147,4 +222,5 @@ jobs:
             --language "${{ matrix.language }}" \
             --candidate-sha "$EXPECTED_SHA"
           remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
-          [[ "$remote_main" == "$EXPECTED_SHA" ]] || { echo "::error::main moved during full CodeQL"; exit 1; }
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${remote_main}")"
+          jq -e --arg sha "$EXPECTED_SHA" '(.status == "ahead" or .status == "identical") and .merge_base_commit.sha == $sha and .base_commit.sha == $sha' <<<"$compare" >/dev/null || exit 1

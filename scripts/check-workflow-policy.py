@@ -672,13 +672,14 @@ def check_codeql_authority(root, workflows, policy, findings):
                     findings.add("CODEQL_TOOLS_OVERRIDE", f"codeql.yml:{job_id}",
                                  "pinned CodeQL bundle must not be replaced by custom tools")
 
-    if set(jobs) != {"analyze"}:
+    if set(jobs) != {"scan-guard", "analyze"}:
         findings.add("CODEQL_SCOPE_RETIRED", where,
                      "PR scope/classifier and extra CodeQL jobs must stay retired")
     analyze = jobs.get("analyze") or {}
-    if "needs" in analyze or "if" in analyze:
+    if (analyze.get("needs") != "scan-guard"
+        or analyze.get("if") != "needs.scan-guard.outputs.should_scan == 'true'"):
         findings.add("CODEQL_FULL_MATRIX", where,
-                     "analyze must run every scheduled/manual language without skip or dependency")
+                     "full matrix must run on explicit dispatch and changed scheduled main SHA")
     if analyze.get("runs-on") != "${{ matrix.os }}":
         findings.add("CODEQL_FULL_MATRIX", where,
                      "matrix runner must not selectively avoid the Swift macOS analysis")
@@ -742,14 +743,30 @@ def check_release_codeql_security(root, workflows, policy, findings):
         or set(events) != {"schedule", "workflow_dispatch"}):
         findings.add("CODEQL_RELEASE_TRIGGER", where,
                      "only weekly and mandatory exact-SHA manual dispatch allowed in Stage B")
+    guard_job = (codeql.get("jobs") or {}).get("scan-guard") or {}
+    decide = {v.get("name"): v for v in steps_of(guard_job) if isinstance(v, dict)}.get(
+        "Decide whether full CodeQL is required", {})
+    decide_run = str(decide.get("run") or "")
+    if (guard_job.get("name") != "CodeQL schedule guard"
+        or (guard_job.get("outputs") or {}).get("should_scan") != "${{ steps.decide.outputs.should_scan }}"
+        or "event=schedule&status=success&branch=main&per_page=100" not in decide_run
+        or 'and .head_sha == $sha' not in decide_run
+        or "should_scan=false" not in decide_run
+        or "should_scan=true" not in decide_run):
+        findings.add("CODEQL_SCHEDULE_GUARD", where, "unchanged exact-main SHA guard missing")
     analyze = (codeql.get("jobs") or {}).get("analyze") or {}
+    if (analyze.get("needs") != "scan-guard"
+        or analyze.get("if") != "needs.scan-guard.outputs.should_scan == 'true'"):
+        findings.add("CODEQL_SCHEDULE_GUARD", where, "matrix must depend on successful schedule guard")
     steps = {s.get("name"): s for s in steps_of(analyze) if isinstance(s, dict)}
     guard = steps.get("Require exact protected-main source for full CodeQL evidence") or {}
     guard_run = str(guard.get("run") or "")
     if ("if" in guard
         or not all(x in guard_run for x in (
-            '[[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_SHA" == "$EXPECTED_SHA" ]]',
-            'remote_main="$(gh api', '[[ "$remote_main" == "$EXPECTED_SHA" ]]'
+            '[[ "$GITHUB_REF" == "refs/heads/main" ]]',
+            'remote_main="$(gh api',
+            'compare/${EXPECTED_SHA}...',
+            '.merge_base_commit.sha == $sha',
         ))):
         findings.add("CODEQL_RELEASE_SOURCE", where, "exact main source verification missing")
     env = analyze.get("env") or {}
@@ -773,11 +790,17 @@ def check_release_codeql_security(root, workflows, policy, findings):
         or opts.get("if-no-files-found") != "error"
         or opts.get("retention-days") != 90):
         findings.add("CODEQL_RELEASE_SARIF", where, "raw per-language SARIF artifact retention drift")
+    manifest = steps.get("Retain source identity manifest") or {}
+    manifest_opts = manifest.get("with") or {}
+    if (manifest_opts.get("name") != "release-codeql-source-${{ env.EXPECTED_SHA }}-${{ matrix.language }}"
+        or manifest_opts.get("retention-days") != 90
+        or "Record exact source identity" not in steps):
+        findings.add("CODEQL_RELEASE_SOURCE", where, "source identity manifest must be retained")
     verdict = steps.get("Reject invalid or High/Critical exact-main SARIF") or {}
     verdict_run = str(verdict.get("run") or "")
     if ("if" in verdict
         or "python3 scripts/release_codeql_verdict.py" not in verdict_run
-        or '[[ "$remote_main" == "$EXPECTED_SHA" ]]' not in verdict_run):
+        or '.merge_base_commit.sha == $sha' not in verdict_run):
         findings.add("CODEQL_RELEASE_VERDICT", where, "full scan must fail closed on SARIF and main drift")
     release = (workflows.get("release.yml") or {}).get("jobs", {}).get("dmg") or {}
     release_steps = steps_of(release)
@@ -804,10 +827,34 @@ def check_release_codeql_security(root, workflows, policy, findings):
             or "scripts/release_codeql_gate.py" not in gate_run
             or "mode=new" not in state_run or "mode=recovery" not in state_run
             or "new:HTTP*" not in pub_run or "recovery:HTTP*" not in pub_run
-            or "RELEASE_MODE" not in (publish_step.get("env") or {})):
+            or "RELEASE_MODE" not in (publish_step.get("env") or {})
+            or (publish_step.get("env") or {}).get("SOURCE_COMMIT") != "${{ steps.source.outputs.commit }}"
+            or 'live_tag_commit="$(gh api' not in pub_run
+            or '[[ "$live_tag_commit" == "$SOURCE_COMMIT" ]]' not in pub_run):
             findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
-    if (release.get("permissions") or {}).get("actions") != "read":
-        findings.add("RELEASE_CODEQL_GATE", "release.yml", "release verifier needs actions:read")
+    if (release.get("permissions") or {}).get("actions") != "write":
+        findings.add("RELEASE_CODEQL_GATE", "release.yml", "trusted release scanner dispatch requires actions:write")
+    # Exact-SHA Ready-for-review Fast reuse is safe for a packaged consumer
+    # only when both the native producer and macOS 15 smoke previously passed.
+    ci_jobs = (workflows.get("ci.yml") or {}).get("jobs") or {}
+    macos = ci_jobs.get("macos-app") or {}
+    compat = ci_jobs.get("macos-15-compat") or {}
+    native_steps = {v.get("name"): v for v in steps_of(macos) if isinstance(v, dict)}
+    fast = native_steps.get("Reuse exact-SHA Fast evidence") or {}
+    fast_run = str(fast.get("run") or "")
+    if ((macos.get("outputs") or {}).get("reused_compat") != "${{ steps.fast-evidence.outputs.reuse }}"
+        or 'EXPECTED_JOB="macOS 15 Packaged App Compatibility"' not in fast_run
+        or 'cat "$compat_output" >> "$GITHUB_OUTPUT"' not in fast_run):
+        findings.add("CI_FAST_COMPAT_REUSE", "ci.yml:macos-app",
+                     "native Fast reuse must also verify exact-SHA macOS 15 consumer evidence")
+    consumer_steps = {v.get("name"): v for v in steps_of(compat) if isinstance(v, dict)}
+    for name in ("Download macOS 27 packaged candidate", "Extract packaged candidate",
+                 "Launch Xcode 27 packaged app on macOS 15"):
+        step = consumer_steps.get(name) or {}
+        if (step.get("if") != "${{ needs.macos-app.outputs.docs_only != 'true' && needs.macos-app.outputs.reused_compat != 'true' }}"):
+            findings.add("CI_FAST_COMPAT_REUSE", "ci.yml:macos-15-compat",
+                         "packaged consumer must not download omitted reused producer artifact")
+
     scripts = (workflows.get("ci.yml") or {}).get("jobs", {}).get("scripts") or {}
     commands = {str(s.get("run") or "").strip() for s in steps_of(scripts) if isinstance(s, dict)}
     for cmd in ("python3 scripts/release_codeql_verdict.py --self-test",

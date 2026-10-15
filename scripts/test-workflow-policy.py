@@ -432,9 +432,9 @@ def main():
 
     case("CodeQL PR classifier job must stay retired",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           "jobs:\n  analyze:",
+                           "jobs:\n  scan-guard:",
                            "jobs:\n  scope:\n    runs-on: ubuntu-24.04-arm\n"
-                           "    steps:\n      - run: echo obsolete\n  analyze:"),
+                           "    steps:\n      - run: echo obsolete\n  scan-guard:"),
          "CODEQL_SCOPE_RETIRED")
 
     case("Swift CodeQL still requires macOS",
@@ -448,6 +448,20 @@ def main():
                            "        if: matrix.language == 'java-kotlin'\n"),
          "CODEQL_FULL_MATRIX")
 
+    case("Ready compatibility cannot download omitted reused artifact",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           "      - name: Download macOS 27 packaged candidate\n"
+                           "        if: ${{ needs.macos-app.outputs.docs_only != 'true' && needs.macos-app.outputs.reused_compat != 'true' }}",
+                           "      - name: Download macOS 27 packaged candidate\n"
+                           "        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}"),
+         "CI_FAST_COMPAT_REUSE")
+
+    case("Native reuse requires proven consumer evidence",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           'EXPECTED_JOB="macOS 15 Packaged App Compatibility"',
+                           'EXPECTED_JOB="unrelated job"'),
+         "CI_FAST_COMPAT_REUSE")
+
     # Stage B exact-SHA security evidence and new-Release gate must be regressible.
     case("manual CodeQL trigger is mandatory",
          lambda root: edit(workflow(root, "codeql.yml"),
@@ -456,8 +470,8 @@ def main():
 
     case("main exact SHA proof cannot be removed",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           '[[ "$remote_main" == "$EXPECTED_SHA" ]]',
-                           '[[ "1" == "1" ]]', 1),
+                           '.merge_base_commit.sha == $sha',
+                           '.merge_base_commit.sha == "wrong"', 1),
          "CODEQL_RELEASE_SOURCE")
 
     case("raw CodeQL SARIF retention cannot be removed",
