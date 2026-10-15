@@ -432,9 +432,9 @@ def main():
 
     case("CodeQL PR classifier job must stay retired",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           "jobs:\n  analyze:",
+                           "jobs:\n  scan-guard:",
                            "jobs:\n  scope:\n    runs-on: ubuntu-24.04-arm\n"
-                           "    steps:\n      - run: echo obsolete\n  analyze:"),
+                           "    steps:\n      - run: echo obsolete\n  scan-guard:"),
          "CODEQL_SCOPE_RETIRED")
 
     case("Swift CodeQL still requires macOS",
@@ -456,8 +456,8 @@ def main():
 
     case("main exact SHA proof cannot be removed",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           '[[ "$remote_main" == "$EXPECTED_SHA" ]]',
-                           '[[ "1" == "1" ]]', 1),
+                           '.merge_base_commit.sha == $sha',
+                           '.merge_base_commit.sha == "wrong"', 1),
          "CODEQL_RELEASE_SOURCE")
 
     case("raw CodeQL SARIF retention cannot be removed",
