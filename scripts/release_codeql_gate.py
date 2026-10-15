@@ -363,6 +363,9 @@ def self_test():
     exercise(candidate("in_progress"), candidate("completed", "success"), False)
     exercise(None, candidate("completed", "success"), True)
     exercise(candidate("in_progress"), candidate("completed", "failure"), False, "ended failure")
+    exercise(candidate("completed", "failure"), None, False, "ended failure")
+    exercise(dict(candidate("completed", "success"), run_attempt=2), None,
+             False, "ambiguous rerun")
     with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
           mock.patch.object(sys.modules[__name__], "check_repo_sha"),
           mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
