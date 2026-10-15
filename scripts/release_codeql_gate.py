@@ -7,6 +7,7 @@ GitHub Release publication, NOT initial GitHub Release visibility.
 import argparse
 import datetime as dt
 import time
+from unittest import mock
 import json
 import os
 from pathlib import Path
@@ -318,6 +319,56 @@ def self_test():
                 assert "provenance mismatch" in str(exc)
             else:
                 raise AssertionError(f"accepted malformed source manifest {key}")
+    # Offline preflight lifecycle: valid reuse, active join, automatic dispatch,
+    # scanner failure and bounded timeout. No GitHub writes are performed.
+    def candidate(state, conclusion=None):
+        return {"id": 71, "workflow_id": 42,
+                "path": ".github/workflows/codeql.yml",
+                "event": "workflow_dispatch", "head_branch": "main",
+                "head_repository": {"full_name": repo},
+                "run_attempt": 1, "display_title": f"CodeQL source {sha}",
+                "status": state, "conclusion": conclusion,
+                "created_at": "2026-10-14T00:00:00Z"}
+
+    def exercise(initial, later, should_dispatch, error=None):
+        sources = [initial, later] if later is not None else [initial]
+        source_sets = [[x] if x is not None else [] for x in sources]
+        with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
+              mock.patch.object(sys.modules[__name__], "check_repo_sha"),
+              mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
+              mock.patch.object(sys.modules[__name__], "run_candidates",
+                                side_effect=source_sets),
+              mock.patch.object(sys.modules[__name__], "inspect_run", return_value=True) as inspect,
+              mock.patch.object(sys.modules[__name__], "gh", return_value="") as dispatch,
+              mock.patch.object(time, "sleep", return_value=None)):
+            if error:
+                try:
+                    verify_live(repo, sha, Path("fake-verdict.py"))
+                except ValueError as exc:
+                    assert error in str(exc), str(exc)
+                else:
+                    raise AssertionError(f"expected lifecycle rejection: {error}")
+            else:
+                verify_live(repo, sha, Path("fake-verdict.py"))
+                assert inspect.call_count == 1
+            assert dispatch.called == should_dispatch
+
+    exercise(candidate("completed", "success"), None, False)
+    exercise(candidate("in_progress"), candidate("completed", "success"), False)
+    exercise(None, candidate("completed", "success"), True)
+    exercise(candidate("in_progress"), candidate("completed", "failure"), False, "ended failure")
+    with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
+          mock.patch.object(sys.modules[__name__], "check_repo_sha"),
+          mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
+          mock.patch.object(sys.modules[__name__], "run_candidates", return_value=[]),
+          mock.patch.object(sys.modules[__name__], "gh", return_value=""),
+          mock.patch.object(time, "monotonic", side_effect=[0, 3600])):
+        try:
+            verify_live(repo, sha, Path("fake-verdict.py"))
+        except ValueError as exc:
+            assert "timed out" in str(exc)
+        else:
+            raise AssertionError("bounded scan timeout did not fail closed")
     print("exact-SHA GitHub Release CodeQL evidence negative controls passed")
 
 
