@@ -672,13 +672,14 @@ def check_codeql_authority(root, workflows, policy, findings):
                     findings.add("CODEQL_TOOLS_OVERRIDE", f"codeql.yml:{job_id}",
                                  "pinned CodeQL bundle must not be replaced by custom tools")
 
-    if set(jobs) != {"analyze"}:
+    if set(jobs) != {"scan-guard", "analyze"}:
         findings.add("CODEQL_SCOPE_RETIRED", where,
                      "PR scope/classifier and extra CodeQL jobs must stay retired")
     analyze = jobs.get("analyze") or {}
-    if "needs" in analyze or "if" in analyze:
+    if (analyze.get("needs") != "scan-guard"
+        or analyze.get("if") != "needs.scan-guard.outputs.should_scan == 'true'"):
         findings.add("CODEQL_FULL_MATRIX", where,
-                     "analyze must run every scheduled/manual language without skip or dependency")
+                     "full matrix must run on explicit dispatch and changed scheduled main SHA")
     if analyze.get("runs-on") != "${{ matrix.os }}":
         findings.add("CODEQL_FULL_MATRIX", where,
                      "matrix runner must not selectively avoid the Swift macOS analysis")
