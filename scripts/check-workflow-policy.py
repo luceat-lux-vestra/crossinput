@@ -36,6 +36,18 @@ UNTRUSTED_EXPRESSION = re.compile(
     r"\$\{\{\s*(github\.event\.|github\.head_ref|inputs\.|github\.actor|env\.GITHUB_HEAD_REF)"
 )
 READ_ONLY_PERMISSIONS = {"read", "none", None}
+EPHEMERAL_WORKFLOW = re.compile(
+    r"^(?:research|temporary|tmp|experiment)(?:[-_].*)?\.ya?ml$",
+    re.IGNORECASE,
+)
+LIFECYCLE_OWNER = re.compile(
+    r"^\s*#\s*lifecycle-owner:\s*(\S.*)$",
+    re.IGNORECASE,
+)
+LIFECYCLE_RETIRE = re.compile(
+    r"^\s*#\s*lifecycle-retire:\s*(\S.*)$",
+    re.IGNORECASE,
+)
 
 
 class Findings:
@@ -72,6 +84,40 @@ def load_workflows(root):
             print(f"AUDIT ABORTED: {path}: {error}", file=sys.stderr)
             raise SystemExit(2)
     return workflows
+
+
+def check_workflow_lifecycle(root, findings):
+    """Require explicit ownership and retirement for ephemeral default-branch workflows."""
+    directory = os.path.join(root, ".github", "workflows")
+    for name in sorted(os.listdir(directory)):
+        if not EPHEMERAL_WORKFLOW.fullmatch(name):
+            continue
+        path = os.path.join(directory, name)
+        with open(path, "r", encoding="utf-8") as handle:
+            header = handle.read().splitlines()[:20]
+
+        owner = next(
+            (match.group(1).strip() for line in header
+             if (match := LIFECYCLE_OWNER.match(line))),
+            "",
+        )
+        retire = next(
+            (match.group(1).strip() for line in header
+             if (match := LIFECYCLE_RETIRE.match(line))),
+            "",
+        )
+        if not owner:
+            findings.add(
+                "WORKFLOW_LIFECYCLE",
+                name,
+                "ephemeral workflow requires non-empty # lifecycle-owner: header metadata",
+            )
+        if not retire:
+            findings.add(
+                "WORKFLOW_LIFECYCLE",
+                name,
+                "ephemeral workflow requires non-empty # lifecycle-retire: header metadata",
+            )
 
 
 def triggers(workflow):
@@ -1272,6 +1318,7 @@ def main():
     workflows = load_workflows(args.root)
     findings = Findings()
 
+    check_workflow_lifecycle(args.root, findings)
     check_required_gates(workflows, policy, findings)
     check_staged_gates(workflows, policy, findings)
     check_docs_only_fast_path(workflows, findings)

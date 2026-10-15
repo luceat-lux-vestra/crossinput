@@ -22,6 +22,17 @@ those five internal component jobs and succeeds only when all five succeed.
 Mixed or unprovable scope runs the full validation set. Protocol, workflow,
 tooling, source, and build files are never treated as documentation-only.
 
+## GitHub Actions lifecycle
+
+Research and temporary workflows should stay off the protected default branch
+where practical. If an exceptional ephemeral workflow is checked in under
+`.github/workflows`, filenames beginning with `research-`, `temporary-`,
+`tmp-`, or `experiment-` must include non-empty `# lifecycle-owner:` and
+`# lifecycle-retire:` header comments.
+
+Historical Actions runs and artifacts are retained as evidence; they do not
+require obsolete workflow source to remain on the default branch.
+
 ## PR checklist
 
 - [ ] build + lint + related tests pass
