@@ -280,7 +280,7 @@ def self_test():
     probe("mismatched", lambda r, w, j, a: r.update(event="push"))
     probe("mismatched", lambda r, w, j, a: r.update(event="pull_request"))
     probe("mismatched", lambda r, w, j, a: r.update(head_branch="feature"))
-    probe(None, lambda r, w, j, a: r.update(head_sha="b" * 40))
+    probe(None, lambda r, w, j, a: (r.update(head_sha="b" * 40), [v["workflow_run"].update(head_sha="b" * 40) for v in a["artifacts"]]))
     probe("mismatched", lambda r, w, j, a: r.update(conclusion="cancelled"))
     probe("mismatched", lambda r, w, j, a: r.update(run_attempt=2))
     probe("mismatched", lambda r, w, j, a: r.update(path=".github/workflows/unsafe.yml"))
