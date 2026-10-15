@@ -834,6 +834,27 @@ def check_release_codeql_security(root, workflows, policy, findings):
             findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
     if (release.get("permissions") or {}).get("actions") != "write":
         findings.add("RELEASE_CODEQL_GATE", "release.yml", "trusted release scanner dispatch requires actions:write")
+    # Exact-SHA Ready-for-review Fast reuse is safe for a packaged consumer
+    # only when both the native producer and macOS 15 smoke previously passed.
+    ci_jobs = (workflows.get("ci.yml") or {}).get("jobs") or {}
+    macos = ci_jobs.get("macos-app") or {}
+    compat = ci_jobs.get("macos-15-compat") or {}
+    native_steps = {v.get("name"): v for v in steps_of(macos) if isinstance(v, dict)}
+    fast = native_steps.get("Reuse exact-SHA Fast evidence") or {}
+    fast_run = str(fast.get("run") or "")
+    if ((macos.get("outputs") or {}).get("reused_compat") != "${{ steps.fast-evidence.outputs.reuse }}"
+        or 'EXPECTED_JOB="macOS 15 Packaged App Compatibility"' not in fast_run
+        or 'cat "$compat_output" >> "$GITHUB_OUTPUT"' not in fast_run):
+        findings.add("CI_FAST_COMPAT_REUSE", "ci.yml:macos-app",
+                     "native Fast reuse must also verify exact-SHA macOS 15 consumer evidence")
+    consumer_steps = {v.get("name"): v for v in steps_of(compat) if isinstance(v, dict)}
+    for name in ("Download macOS 27 packaged candidate", "Extract packaged candidate",
+                 "Launch Xcode 27 packaged app on macOS 15"):
+        step = consumer_steps.get(name) or {}
+        if (step.get("if") != "${{ needs.macos-app.outputs.docs_only != 'true' && needs.macos-app.outputs.reused_compat != 'true' }}"):
+            findings.add("CI_FAST_COMPAT_REUSE", "ci.yml:macos-15-compat",
+                         "packaged consumer must not download omitted reused producer artifact")
+
     scripts = (workflows.get("ci.yml") or {}).get("jobs", {}).get("scripts") or {}
     commands = {str(s.get("run") or "").strip() for s in steps_of(scripts) if isinstance(s, dict)}
     for cmd in ("python3 scripts/release_codeql_verdict.py --self-test",
