@@ -27,7 +27,8 @@ env:
 jobs:
   dmg:
     runs-on: xcode-27
-    timeout-minutes: 30
+    # CodeQL preflight may dispatch and join a bounded full four-language scan.
+    timeout-minutes: 60
     permissions:
       actions: write # Trusted candidate CodeQL dispatch and evidence retrieval; job-local only.
       contents: write
