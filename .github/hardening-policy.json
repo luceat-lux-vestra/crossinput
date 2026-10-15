@@ -74,7 +74,8 @@
     "release.yml": [
       "contents",
       "id-token",
-      "attestations"
+      "attestations",
+      "actions"
     ],
     "codeql.yml": [
       "security-events"
@@ -113,7 +114,7 @@
       "swift"
     ],
     "exceptions": [],
-    "scan_timing": "Weekly and exact protected-main manual only; no PR or push CodeQL. PR security discovery latency is deliberately increased."
+    "scan_timing": "Weekly exact-SHA scheduled detector (skip unchanged main) and protected-main ancestor explicit/release full scans; no PR/push CodeQL."
   },
   "release_provenance": {
     "workflow": "release.yml",
@@ -145,9 +146,10 @@
       "swift"
     ],
     "sarif_retention_days": 90,
-    "first_publication": "exact-tag SHA full SARIF validated before new automated GitHub Release",
+    "first_publication": "Reuses trustworthy exact-source four-language SARIF or dispatches and joins a bounded trusted scan before new automated GitHub Release",
     "existing_release_recovery": "legacy existing-release asset upload preserved; does not prove first-publication security",
     "owner_direct_release": "out-of-band owner GitHub UI/API publication cannot be blocked by this workflow",
-    "pr_detection_tradeoff": "CodeQL is no longer executed for PRs. Vulnerabilities may be found only at the next weekly or manually dispatched full scan."
+    "pr_detection_tradeoff": "CodeQL is no longer executed for PRs. Vulnerabilities may be found only at the next weekly or manually dispatched full scan.",
+    "scheduled_unchanged_main": "Exact main SHA only; successful schedule guard-only runs are not release evidence"
   }
 }
