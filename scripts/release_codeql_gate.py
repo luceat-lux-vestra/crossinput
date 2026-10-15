@@ -169,8 +169,8 @@ def run_candidates(repo, sha, workflow, script):
         for run in result["workflow_runs"]:
             if (isinstance(run, dict) and run.get("workflow_id") == workflow["id"]
                 and run.get("path") == ".github/workflows/codeql.yml"
-                and run.get("head_branch") == "main" and run.get("run_attempt") == 1
-                and run.get("head_repository", {}).get("full_name") == repo):
+                and run.get("head_branch") == "main"
+                and (run.get("head_repository") or {}).get("full_name") == repo):
                 found.append(run)
     found.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return found
@@ -187,6 +187,10 @@ def verify_live(repo, sha, script):
     active = []
     for run in candidates:
         run_id = run["id"]
+        exact_request = (run.get("event") == "workflow_dispatch"
+                         and run.get("display_title") == f"CodeQL source {sha}")
+        if exact_request and run.get("run_attempt") != 1:
+            reject(f"ambiguous rerun attempt for exact candidate {run_id}")
         if run.get("status") != "completed":
             # Exact candidate dispatch is signaled in GitHub's run-name.
             if (run.get("event") == "workflow_dispatch"
@@ -194,6 +198,8 @@ def verify_live(repo, sha, script):
                 active.append(run_id)
             continue
         if run.get("conclusion") != "success":
+            if exact_request:
+                reject(f"existing exact candidate CodeQL run {run_id} ended {run.get('conclusion')}")
             continue
         try:
             if inspect_run(repo, sha, workflow, run_id, script):
