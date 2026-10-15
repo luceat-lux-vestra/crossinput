@@ -18,6 +18,99 @@ LANGUAGES = {"actions", "java-kotlin", "python", "swift"}
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 
+EXTRACTION = {
+    "actions": {
+        "actual": {"actions/diagnostics/successfully-extracted-files"},
+        "expected": {"cli/expected-extracted-files/actions"},
+        "warnings": set(),
+    },
+    "java-kotlin": {
+        "actual": {"java/diagnostics/successfully-extracted-files"},
+        "expected": {"cli/expected-extracted-files/java", "cli/expected-extracted-files/kotlin"},
+        "warnings": {"java/diagnostics/extraction-warnings"},
+    },
+    "python": {
+        "actual": {"py/diagnostics/successfully-extracted-files"},
+        "expected": {"cli/expected-extracted-files/python"},
+        "warnings": {"py/diagnostics/extraction-warnings"},
+    },
+    "swift": {
+        "actual": {"swift/diagnostics/successfully-extracted-files"},
+        "expected": {"cli/expected-extracted-files/swift"},
+        "warnings": {"swift/diagnostics/extraction-warnings"},
+    },
+}
+
+
+def _notification_paths(notes, ids):
+    paths = set()
+    for note in notes:
+        if not isinstance(note, dict):
+            raise ValueError("malformed CodeQL tool notification")
+        descriptor = note.get("descriptor", {})
+        if not isinstance(descriptor, dict):
+            raise ValueError("malformed CodeQL notification descriptor")
+        if descriptor.get("id") not in ids:
+            continue
+        locations = note.get("locations")
+        if not isinstance(locations, list) or not locations:
+            raise ValueError("extraction diagnostic has no source location")
+        for location in locations:
+            if not isinstance(location, dict):
+                raise ValueError("malformed extraction source location")
+            physical = location.get("physicalLocation", {})
+            artifact = physical.get("artifactLocation", {}) if isinstance(physical, dict) else {}
+            uri = artifact.get("uri") if isinstance(artifact, dict) else None
+            if not isinstance(uri, str) or not uri:
+                raise ValueError("extraction diagnostic has invalid source URI")
+            paths.add(uri)
+    return paths
+
+
+def _expected_source(path, language):
+    if language == "actions":
+        return path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+    if language == "java-kotlin":
+        return path.endswith((".java", ".kt"))
+    if language == "python":
+        return path.endswith(".py")
+    if language == "swift":
+        return path.endswith(".swift") and "/Tests/" not in path
+    raise ValueError("unexpected language")
+
+
+def extraction_coverage(run, language):
+    spec = EXTRACTION[language]
+    notes = []
+    for invocation in run.get("invocations", []):
+        current = invocation.get("toolExecutionNotifications", [])
+        if not isinstance(current, list):
+            raise ValueError("malformed CodeQL tool notifications")
+        notes.extend(current)
+    for note in notes:
+        descriptor = note.get("descriptor", {}) if isinstance(note, dict) else {}
+        notification_id = descriptor.get("id") if isinstance(descriptor, dict) else None
+        if isinstance(note, dict) and note.get("level") == "error":
+            raise ValueError(f"CodeQL tool execution error: {notification_id or 'unknown'}")
+        if notification_id in spec["warnings"]:
+            raise ValueError(f"CodeQL extraction warning: {notification_id}")
+
+    actual = _notification_paths(notes, spec["actual"])
+    expected_all = _notification_paths(notes, spec["expected"])
+    expected = {path for path in expected_all if _expected_source(path, language)}
+    if not expected:
+        raise ValueError("no expected repository source files for CodeQL language")
+    if not actual:
+        raise ValueError("no successfully extracted source files")
+    missing = sorted(expected - actual)
+    if missing:
+        preview = ", ".join(missing[:8])
+        raise ValueError(
+            f"CodeQL did not extract {len(missing)} expected source file(s): {preview}"
+        )
+    return {"extracted_files": len(actual), "expected_source_files": len(expected)}
+
+
 def check(directory: Path, language: str, candidate_sha: str) -> dict:
     if language not in LANGUAGES:
         raise ValueError("unexpected language")
@@ -48,6 +141,7 @@ def check(directory: Path, language: str, candidate_sha: str) -> dict:
         not isinstance(x, dict) or x.get("executionSuccessful") is False for x in invocations
     ):
         raise ValueError("CodeQL analysis reports an unsuccessful invocation")
+    coverage = extraction_coverage(run, language)
     # CodeQL SARIF puts query rules in tool.extensions[].rules, not in
     # tool.driver.rules. A clean scan may contain zero results and no driver rules.
     tool = run.get("tool", {})
@@ -128,7 +222,9 @@ def check(directory: Path, language: str, candidate_sha: str) -> dict:
         raise ValueError(f"High/Critical CodeQL findings ({len(high)}): {findings}")
     return {"candidate_sha": candidate_sha, "language": language,
             "sarif_sha256": hashlib.sha256(raw).hexdigest(), "results": len(results),
-            "rules": len(rules), "high_or_critical": 0}
+            "rules": len(rules), "high_or_critical": 0,
+            "extracted_files": coverage["extracted_files"],
+            "expected_source_files": coverage["expected_source_files"]}
 
 
 def self_test() -> None:
@@ -142,7 +238,32 @@ def self_test() -> None:
             "tool": {"driver": {"name": "CodeQL"}, "extensions": [
                 {"name": "codeql/java-queries", "rules": [rule]}]},
             "automationDetails": {"id": "/language:" + language + "/"},
-            "invocations": [{"executionSuccessful": True}],
+            "invocations": [{"executionSuccessful": True, "toolExecutionNotifications": [
+                {"descriptor": {"id": {
+                    "actions": "actions/diagnostics/successfully-extracted-files",
+                    "java-kotlin": "java/diagnostics/successfully-extracted-files",
+                    "python": "py/diagnostics/successfully-extracted-files",
+                    "swift": "swift/diagnostics/successfully-extracted-files",
+                }[language]}, "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": {
+                        "actions": ".github/workflows/ci.yml",
+                        "java-kotlin": "src/main/kotlin/App.kt",
+                        "python": "scripts/tool.py",
+                        "swift": "Sources/App.swift",
+                    }[language]}}}]},
+                {"descriptor": {"id": {
+                    "actions": "cli/expected-extracted-files/actions",
+                    "java-kotlin": "cli/expected-extracted-files/kotlin",
+                    "python": "cli/expected-extracted-files/python",
+                    "swift": "cli/expected-extracted-files/swift",
+                }[language]}, "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": {
+                        "actions": ".github/workflows/ci.yml",
+                        "java-kotlin": "src/main/kotlin/App.kt",
+                        "python": "scripts/tool.py",
+                        "swift": "Sources/App.swift",
+                    }[language]}}}]},
+            ]}],
             "results": [{"ruleId": "java/test", "rule": {
                 "id": "java/test", "index": 0, "toolComponent": {"index": 0}
             }}] if results else []}]}
@@ -160,6 +281,7 @@ def self_test() -> None:
                 if expected_failure is not None:
                     raise AssertionError(f"failure not detected: {expected_failure}")
                 assert verdict["high_or_critical"] == 0
+                assert verdict["extracted_files"] >= verdict["expected_source_files"] >= 1
 
         probe(fixture())
         # Real CodeQL 2.27.2 clean SARIF has zero driver rules/results but
@@ -192,6 +314,30 @@ def self_test() -> None:
         bad = fixture()
         bad["runs"][0]["invocations"][0]["executionSuccessful"] = False
         probe(bad, "unsuccessful invocation")
+        bad = fixture()
+        bad["runs"][0]["invocations"][0]["toolExecutionNotifications"] = [
+            bad["runs"][0]["invocations"][0]["toolExecutionNotifications"][1]
+        ]
+        probe(bad, "no successfully extracted source files")
+        bad = fixture()
+        bad["runs"][0]["invocations"][0]["toolExecutionNotifications"][0]["locations"][0][
+            "physicalLocation"]["artifactLocation"]["uri"] = "src/main/kotlin/Other.kt"
+        probe(bad, "did not extract")
+        bad = fixture()
+        bad["runs"][0]["invocations"][0]["toolExecutionNotifications"].append({
+            "descriptor": {"id": "java/diagnostics/extraction-warnings"},
+            "locations": [{"physicalLocation": {"artifactLocation": {
+                "uri": "src/main/kotlin/App.kt"}}}],
+        })
+        probe(bad, "extraction warning")
+        bad = fixture()
+        bad["runs"][0]["invocations"][0]["toolExecutionNotifications"].append({
+            "level": "error",
+            "descriptor": {"id": "cli/extractor-error"},
+            "locations": [{"physicalLocation": {"artifactLocation": {
+                "uri": "src/main/kotlin/App.kt"}}}],
+        })
+        probe(bad, "tool execution error")
         bad = fixture()
         bad["runs"][0]["results"][0]["ruleId"] = "missing"
         probe(bad, "unknown rule")
