@@ -29,7 +29,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 30
     permissions:
-      actions: read # Inspect exact-tag CodeQL workflow runs and raw SARIF.
+      actions: write # Trusted candidate CodeQL dispatch and evidence retrieval; job-local only.
       contents: write
       id-token: write
       attestations: write
