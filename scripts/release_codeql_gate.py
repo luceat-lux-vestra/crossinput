@@ -292,6 +292,32 @@ def self_test():
     probe("SARIF artifacts", lambda r, w, j, a: a["artifacts"].pop())
     probe("wrong-SHA", lambda r, w, j, a: a["artifacts"][0]["workflow_run"].update(head_sha="b" * 40))
     probe("ambiguous", lambda r, w, j, a: a["artifacts"][1].update(expired=True))
+    # The successful guard-only scheduled workflow is an intentional no-op,
+    # never evidence for publication even though GitHub reports SUCCESS.
+    schedule = dict(run, event="schedule")
+    skipped_jobs = {"jobs": [{"name": "CodeQL schedule guard", "conclusion": "success"}] + [
+        {"name": f"Analyze ({lang})", "conclusion": "skipped"} for lang in LANGUAGES]}
+    assert intentional_schedule_skip(schedule, skipped_jobs)
+    assert not intentional_schedule_skip(run, skipped_jobs)
+    assert not intentional_schedule_skip(schedule, jobs)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp, "source-identity.json")
+        manifest = {"schema": 1, "candidate_sha": sha, "checkout_sha": sha,
+                    "event_sha": sha, "run_id": run["id"],
+                    "run_attempt": 1, "language": "swift"}
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        verify_manifest(Path(tmp), repo, run, sha, "swift")
+        for key, bad in (("candidate_sha", "b" * 40), ("checkout_sha", "b" * 40),
+                         ("event_sha", "b" * 40), ("run_id", 10),
+                         ("run_attempt", 2), ("language", "actions")):
+            changed = dict(manifest, **{key: bad})
+            path.write_text(json.dumps(changed), encoding="utf-8")
+            try:
+                verify_manifest(Path(tmp), repo, run, sha, "swift")
+            except ValueError as exc:
+                assert "provenance mismatch" in str(exc)
+            else:
+                raise AssertionError(f"accepted malformed source manifest {key}")
     print("exact-SHA GitHub Release CodeQL evidence negative controls passed")
 
 
