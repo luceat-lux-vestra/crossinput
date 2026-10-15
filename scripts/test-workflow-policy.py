@@ -448,6 +448,18 @@ def main():
                            "        if: matrix.language == 'java-kotlin'\n"),
          "CODEQL_FULL_MATRIX")
 
+    case("Ready compatibility cannot download omitted reused artifact",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           "needs.macos-app.outputs.docs_only != 'true' && needs.macos-app.outputs.reused_compat != 'true'",
+                           "needs.macos-app.outputs.docs_only != 'true'"),
+         "CI_FAST_COMPAT_REUSE")
+
+    case("Native reuse requires proven consumer evidence",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           'EXPECTED_JOB="macOS 15 Packaged App Compatibility"',
+                           'EXPECTED_JOB="unrelated job"'),
+         "CI_FAST_COMPAT_REUSE")
+
     # Stage B exact-SHA security evidence and new-Release gate must be regressible.
     case("manual CodeQL trigger is mandatory",
          lambda root: edit(workflow(root, "codeql.yml"),
