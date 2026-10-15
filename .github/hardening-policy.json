@@ -123,7 +123,7 @@
     "artifact": "DMG",
     "attestation": "GitHub artifact build provenance",
     "attestation_action": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
-    "mutation_order": "verify source/artifact -> attest -> publish -> readback",
+    "mutation_order": "trusted CodeQL preflight -> exact tag/source build -> attest -> publish -> readback",
     "consumer_verification": "gh attestation verify <DMG> -R luceat-lux-vestra/crossinput"
   },
   "manual_live_readbacks": {
@@ -150,6 +150,11 @@
     "existing_release_recovery": "legacy existing-release asset upload preserved; does not prove first-publication security",
     "owner_direct_release": "out-of-band owner GitHub UI/API publication cannot be blocked by this workflow",
     "pr_detection_tradeoff": "CodeQL is no longer executed for PRs. Vulnerabilities may be found only at the next weekly or manually dispatched full scan.",
-    "scheduled_unchanged_main": "Exact main SHA only; successful schedule guard-only runs are not release evidence"
+    "scheduled_unchanged_main": "Exact main SHA only; successful schedule guard-only runs are not release evidence",
+    "scanner_job": "codeql-preflight",
+    "publisher_job": "dmg",
+    "trusted_verifier_ref": "main",
+    "privilege_boundary": "actions:write is isolated to read-only CodeQL preflight; DMG publisher retains contents/attestation writes without actions:write",
+    "extraction_contract": "Original SARIF must prove all expected production source files for each retained language were actually extracted, with no extraction warnings/errors"
   }
 }

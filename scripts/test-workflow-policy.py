@@ -492,6 +492,34 @@ def main():
                            "scripts/removed-security-gate.py"),
          "RELEASE_CODEQL_GATE")
 
+    case("release scanner cannot gain publication authority",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "      contents: read\n",
+                           "      contents: write\n", 1),
+         "RELEASE_CODEQL_PRIVILEGE")
+
+    case("DMG publisher cannot gain actions write",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "    permissions:\n"
+                           "      contents: write\n"
+                           "      id-token: write\n",
+                           "    permissions:\n"
+                           "      actions: write\n"
+                           "      contents: write\n"
+                           "      id-token: write\n", 1),
+         "RELEASE_CODEQL_PRIVILEGE")
+
+    case("release publisher cannot bypass CodeQL preflight dependency",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "    needs: codeql-preflight\n", ""),
+         "RELEASE_CODEQL_PRIVILEGE")
+
+    case("release verifier must come from trusted main",
+         lambda root: edit(workflow(root, "release.yml"),
+                           "          ref: main\n",
+                           "          ref: ${{ env.RELEASE_TAG }}\n", 1),
+         "RELEASE_CODEQL_GATE")
+
     case("recovery classification cannot bypass first-publication check",
          lambda root: edit(workflow(root, "release.yml"),
                            "new:HTTP*\\ 404*)", "recovery:HTTP*\\ 404*)"),

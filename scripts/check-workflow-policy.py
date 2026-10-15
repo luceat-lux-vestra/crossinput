@@ -802,38 +802,107 @@ def check_release_codeql_security(root, workflows, policy, findings):
         or "python3 scripts/release_codeql_verdict.py" not in verdict_run
         or '.merge_base_commit.sha == $sha' not in verdict_run):
         findings.add("CODEQL_RELEASE_VERDICT", where, "full scan must fail closed on SARIF and main drift")
-    release = (workflows.get("release.yml") or {}).get("jobs", {}).get("dmg") or {}
-    release_steps = steps_of(release)
-    named = {s.get("name"): (i, s) for i, s in enumerate(release_steps) if isinstance(s, dict)}
-    state = named.get("Classify existing release recovery")
-    gate = named.get("Verify exact-tag CodeQL before first GitHub Release publication")
-    build = named.get("Build DMG")
-    publish = named.get("Create or refresh GitHub Release")
-    source = named.get("Verify checked-out tag identity")
-    if not all((state, gate, build, publish, source)):
-        findings.add("RELEASE_CODEQL_ORDER", "release.yml", "missing source, recovery state, CodeQL gate or publish step")
+    release_jobs = (workflows.get("release.yml") or {}).get("jobs") or {}
+    preflight = release_jobs.get("codeql-preflight") or {}
+    publisher = release_jobs.get("dmg") or {}
+    if (spec.get("scanner_job") != "codeql-preflight"
+        or spec.get("publisher_job") != "dmg"
+        or spec.get("trusted_verifier_ref") != "main"):
+        findings.add("CODEQL_RELEASE_POLICY", ".github/hardening-policy.json",
+                     "release scanner/publisher trust-boundary policy drift")
+
+    preflight_steps = steps_of(preflight)
+    pn = {step.get("name"): (i, step) for i, step in enumerate(preflight_steps)
+          if isinstance(step, dict)}
+    required_preflight = (
+        "Validate release tag input",
+        "Resolve immutable release source",
+        "Classify existing release recovery",
+        "Checkout trusted release verifier",
+        "Verify trusted release verifier ancestry",
+        "Verify exact-tag CodeQL before first GitHub Release publication",
+    )
+    if any(name not in pn for name in required_preflight):
+        findings.add("RELEASE_CODEQL_ORDER", "release.yml:codeql-preflight",
+                     "trusted source, recovery classification, verifier checkout or CodeQL gate missing")
     else:
-        si, state_step = state
-        gi, gate_step = gate
-        bi, _ = build
-        pi, publish_step = publish
-        if not (source[0] < si < gi < bi < pi):
-            findings.add("RELEASE_CODEQL_ORDER", "release.yml", "pre-publication CodeQL gate must precede all builds and release mutation")
-        gate_run = str(gate_step.get("run") or "")
+        vi = pn["Validate release tag input"][0]
+        si, source_step = pn["Resolve immutable release source"]
+        ri, state_step = pn["Classify existing release recovery"]
+        ci, checkout_step = pn["Checkout trusted release verifier"]
+        ai, ancestry_step = pn["Verify trusted release verifier ancestry"]
+        gi, gate_step = pn["Verify exact-tag CodeQL before first GitHub Release publication"]
+        if not (vi < si < ri < ci < ai < gi):
+            findings.add("RELEASE_CODEQL_ORDER", "release.yml:codeql-preflight",
+                         "source trust and CodeQL gate order drifted")
+        source_run = str(source_step.get("run") or "")
         state_run = str(state_step.get("run") or "")
-        pub_run = str(publish_step.get("run") or "")
-        if (gate_step.get("if") != "steps.release_state.outputs.mode == 'new'"
-            or "--candidate-sha" not in gate_run
-            or "scripts/release_codeql_gate.py" not in gate_run
+        gate_run = str(gate_step.get("run") or "")
+        checkout_with = checkout_step.get("with") or {}
+        if (source_step.get("id") != "source"
+            or 'compare/${tag_commit}...${remote_main}' not in source_run
+            or '.merge_base_commit.sha == $sha' not in source_run
             or "mode=new" not in state_run or "mode=recovery" not in state_run
+            or checkout_step.get("if") != "steps.release_state.outputs.mode == 'new'"
+            or checkout_with.get("ref") != "main"
+            or checkout_with.get("persist-credentials") is not False
+            or ancestry_step.get("if") != "steps.release_state.outputs.mode == 'new'"
+            or "git merge-base --is-ancestor" not in str(ancestry_step.get("run") or "")
+            or gate_step.get("if") != "steps.release_state.outputs.mode == 'new'"
+            or "scripts/release_codeql_gate.py" not in gate_run
+            or "--candidate-sha" not in gate_run):
+            findings.add("RELEASE_CODEQL_GATE", "release.yml:codeql-preflight",
+                         "trusted-main release preflight or first-publication gate drift")
+
+    preflight_permissions = preflight.get("permissions") or {}
+    if (preflight_permissions.get("actions") != "write"
+        or preflight_permissions.get("contents") != "read"
+        or any(scope not in {"actions", "contents"} for scope in preflight_permissions)):
+        findings.add("RELEASE_CODEQL_PRIVILEGE", "release.yml:codeql-preflight",
+                     "scanner dispatch must have only actions:write + contents:read")
+    outputs = preflight.get("outputs") or {}
+    if (outputs.get("source_commit") != "${{ steps.source.outputs.commit }}"
+        or outputs.get("release_mode") != "${{ steps.release_state.outputs.mode }}"):
+        findings.add("RELEASE_CODEQL_GATE", "release.yml:codeql-preflight",
+                     "preflight source/recovery outputs drifted")
+
+    publisher_permissions = publisher.get("permissions") or {}
+    if (publisher.get("needs") != "codeql-preflight"
+        or publisher_permissions.get("actions") not in (None, "read")
+        or publisher_permissions.get("contents") != "write"
+        or publisher_permissions.get("id-token") != "write"
+        or publisher_permissions.get("attestations") != "write"):
+        findings.add("RELEASE_CODEQL_PRIVILEGE", "release.yml:dmg",
+                     "publisher must depend on preflight and must not retain actions:write")
+
+    publisher_steps = steps_of(publisher)
+    dn = {step.get("name"): (i, step) for i, step in enumerate(publisher_steps)
+          if isinstance(step, dict)}
+    source = dn.get("Verify checked-out tag identity")
+    build = dn.get("Build DMG")
+    publish = dn.get("Create or refresh GitHub Release")
+    if not all((source, build, publish)):
+        findings.add("RELEASE_CODEQL_ORDER", "release.yml:dmg",
+                     "publisher source verification, build or mutation step missing")
+    else:
+        pi, publish_step = publish
+        if not (source[0] < build[0] < pi):
+            findings.add("RELEASE_CODEQL_ORDER", "release.yml:dmg",
+                         "verified source/build must precede publication")
+        source_run = str(source[1].get("run") or "")
+        pub_run = str(publish_step.get("run") or "")
+        publish_env = publish_step.get("env") or {}
+        if ('test "$head_commit" = "$SOURCE_COMMIT"' not in source_run
+            or publish_env.get("SOURCE_COMMIT")
+               != "${{ needs.codeql-preflight.outputs.source_commit }}"
+            or publish_env.get("RELEASE_MODE")
+               != "${{ needs.codeql-preflight.outputs.release_mode }}"
             or "new:HTTP*" not in pub_run or "recovery:HTTP*" not in pub_run
-            or "RELEASE_MODE" not in (publish_step.get("env") or {})
-            or (publish_step.get("env") or {}).get("SOURCE_COMMIT") != "${{ steps.source.outputs.commit }}"
             or 'live_tag_commit="$(gh api' not in pub_run
             or '[[ "$live_tag_commit" == "$SOURCE_COMMIT" ]]' not in pub_run):
-            findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
-    if (release.get("permissions") or {}).get("actions") != "write":
-        findings.add("RELEASE_CODEQL_GATE", "release.yml", "trusted release scanner dispatch requires actions:write")
+            findings.add("RELEASE_CODEQL_GATE", "release.yml:dmg",
+                         "fail-closed source/recovery publication fence drift")
+
     # Exact-SHA Ready-for-review Fast reuse is safe for a packaged consumer
     # only when both the native producer and macOS 15 smoke previously passed.
     ci_jobs = (workflows.get("ci.yml") or {}).get("jobs") or {}
