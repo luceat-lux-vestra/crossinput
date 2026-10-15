@@ -450,9 +450,9 @@ def main():
 
     case("Ready compatibility cannot download omitted reused artifact",
          lambda root: edit(workflow(root, "ci.yml"),
-                           "      - name: Download macOS 27 packaged candidate\\n"
+                           "      - name: Download macOS 27 packaged candidate\n"
                            "        if: ${{ needs.macos-app.outputs.docs_only != 'true' && needs.macos-app.outputs.reused_compat != 'true' }}",
-                           "      - name: Download macOS 27 packaged candidate\\n"
+                           "      - name: Download macOS 27 packaged candidate\n"
                            "        if: ${{ needs.macos-app.outputs.docs_only != 'true' }}"),
          "CI_FAST_COMPAT_REUSE")
 
