@@ -297,7 +297,7 @@ def self_test():
     probe("future timestamp", lambda r, w, j, a: r.update(created_at="2026-10-15T00:00:00Z"))
     probe("language jobs", lambda r, w, j, a: j["jobs"][0].update(conclusion="failure"))
     probe("language jobs", lambda r, w, j, a: j["jobs"].pop())
-    probe("SARIF artifacts", lambda r, w, j, a: a["artifacts"].pop())
+    probe("four SARIF plus four source-provenance", lambda r, w, j, a: a["artifacts"].pop())
     probe("wrong-SHA", lambda r, w, j, a: a["artifacts"][0]["workflow_run"].update(head_sha="b" * 40))
     probe("ambiguous", lambda r, w, j, a: a["artifacts"][1].update(expired=True))
     # Candidate ancestry: current main and a historical protected-main ancestor
