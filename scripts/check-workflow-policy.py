@@ -827,7 +827,10 @@ def check_release_codeql_security(root, workflows, policy, findings):
             or "scripts/release_codeql_gate.py" not in gate_run
             or "mode=new" not in state_run or "mode=recovery" not in state_run
             or "new:HTTP*" not in pub_run or "recovery:HTTP*" not in pub_run
-            or "RELEASE_MODE" not in (publish_step.get("env") or {})):
+            or "RELEASE_MODE" not in (publish_step.get("env") or {})
+            or (publish_step.get("env") or {}).get("SOURCE_COMMIT") != "${{ steps.source.outputs.commit }}"
+            or 'live_tag_commit="$(gh api' not in pub_run
+            or '[[ "$live_tag_commit" == "$SOURCE_COMMIT" ]]' not in pub_run):
             findings.add("RELEASE_CODEQL_GATE", "release.yml", "fail-closed first publication vs recovery fence drift")
     if (release.get("permissions") or {}).get("actions") != "write":
         findings.add("RELEASE_CODEQL_GATE", "release.yml", "trusted release scanner dispatch requires actions:write")
