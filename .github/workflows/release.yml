@@ -25,15 +25,16 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
-  dmg:
-    runs-on: xcode-27
-    # CodeQL preflight may dispatch and join a bounded full four-language scan.
-    timeout-minutes: 60
+  codeql-preflight:
+    name: Release CodeQL preflight
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
     permissions:
-      actions: write # Trusted candidate CodeQL dispatch and evidence retrieval; job-local only.
-      contents: write
-      id-token: write
-      attestations: write
+      actions: write
+      contents: read
+    outputs:
+      source_commit: ${{ steps.source.outputs.commit }}
+      release_mode: ${{ steps.release_state.outputs.mode }}
     steps:
       - name: Validate release tag input
         shell: bash
@@ -50,32 +51,27 @@ jobs:
             exit 1
           }
 
-      - name: Checkout immutable release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify checked-out tag identity
+      - name: Resolve immutable release source
         id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          tag_commit="$(git rev-list -n 1 "${RELEASE_TAG}")"
-          head_commit="$(git rev-parse HEAD)"
-          test "${head_commit}" = "${tag_commit}"
-          test -z "$(git status --porcelain)"
-
-          # Tag immutability alone does not prove the source was reviewed. Refuse
-          # publication unless the tagged commit is already reachable from main.
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "${head_commit}" origin/main || {
-            echo "release tag ${RELEASE_TAG} points to ${head_commit}, which is not reviewed main history" >&2
-            exit 1
+          tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          [[ "$tag_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Release tag did not resolve to an immutable commit"; exit 1;
           }
-
-          echo "commit=${head_commit}" >> "${GITHUB_OUTPUT}"
+          remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${remote_main}")"
+          jq -e --arg sha "$tag_commit" '
+            (.status == "ahead" or .status == "identical")
+            and .base_commit.sha == $sha
+            and .merge_base_commit.sha == $sha
+          ' <<<"$compare" >/dev/null || {
+            echo "::error::Release tag source is not reviewed protected-main history"; exit 1;
+          }
+          echo "commit=$tag_commit" >> "$GITHUB_OUTPUT"
 
       - name: Classify existing release recovery
         id: release_state
@@ -93,6 +89,22 @@ jobs:
             *) echo "::error::Inconclusive release lookup: $lookup"; exit 1 ;;
           esac
 
+      - name: Checkout trusted release verifier
+        if: steps.release_state.outputs.mode == 'new'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify trusted release verifier ancestry
+        if: steps.release_state.outputs.mode == 'new'
+        run: |
+          set -euo pipefail
+          verifier_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$verifier_sha" FETCH_HEAD
+
       # Existing *published* release asset recovery is a legacy operation,
       # not a first publication. Never treat an owner-created release as
       # evidence of a secured first publication.
@@ -106,6 +118,46 @@ jobs:
           python3 scripts/release_codeql_gate.py \
             --repository "$GITHUB_REPOSITORY" \
             --candidate-sha "$RELEASE_COMMIT"
+
+  dmg:
+    name: Build and publish verified DMG
+    needs: codeql-preflight
+    runs-on: xcode-27
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Validate preflight source
+        env:
+          SOURCE_COMMIT: ${{ needs.codeql-preflight.outputs.source_commit }}
+          RELEASE_MODE: ${{ needs.codeql-preflight.outputs.release_mode }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [[ "$RELEASE_MODE" == new || "$RELEASE_MODE" == recovery ]] || exit 1
+
+      - name: Checkout immutable release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checked-out tag identity
+        env:
+          SOURCE_COMMIT: ${{ needs.codeql-preflight.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-list -n 1 "${RELEASE_TAG}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "$head_commit" = "$tag_commit"
+          test "$head_commit" = "$SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$head_commit" origin/main
 
       - name: Build DMG
         run: bash scripts/package-macos.sh dmg
@@ -154,8 +206,8 @@ jobs:
       - name: Create or refresh GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
-          RELEASE_MODE: ${{ steps.release_state.outputs.mode }}
+          SOURCE_COMMIT: ${{ needs.codeql-preflight.outputs.source_commit }}
+          RELEASE_MODE: ${{ needs.codeql-preflight.outputs.release_mode }}
           VERSION: ${{ steps.artifact.outputs.version }}
           DMG: ${{ steps.artifact.outputs.dmg }}
           CHECKSUM: ${{ steps.artifact.outputs.checksum }}
@@ -200,7 +252,7 @@ jobs:
       - name: Verify published release identity
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_COMMIT: ${{ needs.codeql-preflight.outputs.source_commit }}
           VERSION: ${{ steps.artifact.outputs.version }}
         shell: bash
         run: |
