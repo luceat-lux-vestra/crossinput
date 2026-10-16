@@ -30,8 +30,7 @@ where practical. If an exceptional ephemeral workflow is checked in under
 `tmp-`, or `experiment-` must include non-empty `# lifecycle-owner:` and
 `# lifecycle-retire:` header comments.
 
-Historical Actions runs and artifacts are retained as evidence; they do not
-require obsolete workflow source to remain on the default branch.
+Historical Actions runs/artifacts are not automatically evidence. Preserve them when a concrete issue, PR, R2A campaign, security/release decision, benchmark, or migration record consumes them as immutable proof. Orphaned temporary/research/one-off history with no such consumer may be deleted after exact workflow-ID/path/run-count validation; never delete evidence-bearing history solely for sidebar cosmetics. Old run history is not a reason to keep or recreate obsolete workflow source.
 
 ## PR checklist
 
