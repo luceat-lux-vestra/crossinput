@@ -415,6 +415,81 @@ def self_test():
                 assert inspect.call_count == 1
             assert dispatch.called == should_dispatch
 
+    # A completed green scanner whose authentic source/SARIF archives aged
+    # out is missing proof, unlike forged, empty or contradictory evidence.
+    stale = json.loads(json.dumps(artifacts))
+    stale["artifacts"][0]["expired"] = True
+    assert metadata_ok(run, workflow, jobs, stale, repo, sha,
+                       dt.datetime.now(dt.timezone.utc),
+                       allow_missing=True) is None
+    gone = {"total_count": 0, "artifacts": []}
+    assert metadata_ok(run, workflow, jobs, gone, repo, sha,
+                       dt.datetime.now(dt.timezone.utc),
+                       allow_missing=True) is None
+    bad = json.loads(json.dumps(stale))
+    bad["artifacts"][0]["size_in_bytes"] = 0
+    try:
+        metadata_ok(run, workflow, jobs, bad, repo, sha,
+                    dt.datetime.now(dt.timezone.utc), allow_missing=True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid expired artifact was refreshable")
+
+    # Verify both independently complete same-source scans before reuse.
+    with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
+          mock.patch.object(sys.modules[__name__], "check_repo_sha"),
+          mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
+          mock.patch.object(sys.modules[__name__], "run_candidates", return_value=[
+              candidate("completed", "success"),
+              dict(candidate("completed", "success"), id=72)]),
+          mock.patch.object(sys.modules[__name__], "inspect_run", return_value=True) as inspected,
+          mock.patch.object(sys.modules[__name__], "gh") as dispatched):
+        verify_live(repo, sha, Path("fake-verdict.py"))
+        assert inspected.call_count == 2 and not dispatched.called
+
+    # Expired-only evidence starts exactly one canonical scanner;
+    # an older completed run must not be mistaken for the new one.
+    old = candidate("completed", "success")
+    new = dict(candidate("completed", "success"), id=72)
+    with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
+          mock.patch.object(sys.modules[__name__], "check_repo_sha"),
+          mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
+          mock.patch.object(sys.modules[__name__], "run_candidates",
+                            side_effect=[[old], [old, new]]),
+          mock.patch.object(sys.modules[__name__], "inspect_run",
+                            side_effect=[None, True]) as inspected,
+          mock.patch.object(sys.modules[__name__], "gh", return_value="") as dispatched,
+          mock.patch.object(time, "sleep", return_value=None)):
+        verify_live(repo, sha, Path("fake-verdict.py"))
+        assert inspected.call_count == 2 and dispatched.call_count == 1
+
+    # A later good scan may not hide an earlier failed exact-SHA scan.
+    with (mock.patch.dict(os.environ, {"GH_TOKEN": "offline-fixture"}),
+          mock.patch.object(sys.modules[__name__], "check_repo_sha"),
+          mock.patch.object(sys.modules[__name__], "api", return_value={"id": 42}),
+          mock.patch.object(sys.modules[__name__], "run_candidates", return_value=[
+              candidate("completed", "success"),
+              dict(candidate("completed", "failure"), id=72)]),
+          mock.patch.object(sys.modules[__name__], "inspect_run", return_value=True),
+          mock.patch.object(sys.modules[__name__], "gh") as dispatched):
+        try:
+            verify_live(repo, sha, Path("fake-verdict.py"))
+        except ValueError as exc:
+            assert "ended failure" in str(exc)
+        else:
+            raise AssertionError("historical failed CodeQL was hidden")
+        assert not dispatched.called
+
+    one_hundred = [dict(candidate("completed", "success"), id=100 + i) for i in range(100)]
+    with mock.patch.object(sys.modules[__name__], "api", side_effect=[
+        {"workflow_runs": one_hundred},
+        {"workflow_runs": [candidate("completed", "success")]},
+        {"workflow_runs": []}
+    ]) as discovery:
+        assert len(run_candidates(repo, sha, {"id": 42}, Path("fake-verdict.py"))) == 101
+        assert discovery.call_count == 3
+
     exercise(candidate("completed", "success"), None, False)
     exercise(candidate("in_progress"), candidate("completed", "success"), False)
     exercise(None, candidate("completed", "success"), True)
