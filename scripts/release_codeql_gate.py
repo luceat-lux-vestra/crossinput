@@ -493,7 +493,8 @@ def self_test():
     exercise(candidate("completed", "success"), None, False)
     exercise(candidate("in_progress"), candidate("completed", "success"), False)
     exercise(None, candidate("completed", "success"), True)
-    exercise(candidate("in_progress"), candidate("completed", "failure"), False, "ended failure")
+    exercise(candidate("in_progress"), candidate("completed", "failure"), False,
+             "failed exact candidate scan")
     exercise(candidate("completed", "failure"), None, False, "ended failure")
     exercise(dict(candidate("completed", "success"), run_attempt=2), None,
              False, "ambiguous rerun")
