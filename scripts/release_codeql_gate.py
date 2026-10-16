@@ -26,7 +26,7 @@ def reject(message):
     raise ValueError(message)
 
 
-def metadata_ok(run, workflow, jobs, artifacts, repo, sha, now):
+def metadata_ok(run, workflow, jobs, artifacts, repo, sha, now, allow_missing=False):
     """Validate API evidence; no CI conclusion alone is accepted as SARIF proof."""
     if not REPO.fullmatch(repo) or not SHA.fullmatch(sha):
         reject("invalid repository or SHA")
@@ -73,19 +73,29 @@ def metadata_ok(run, workflow, jobs, artifacts, repo, sha, now):
     expected_names = ({f"release-codeql-{sha}-{lang}" for lang in LANGUAGES}
                       | {f"release-codeql-source-{sha}-{lang}" for lang in LANGUAGES})
     if (not isinstance(artifacts, dict)
-        or artifacts.get("total_count") != 2 * len(LANGUAGES)
         or not isinstance(artifacts.get("artifacts"), list)
-        or len(artifacts["artifacts"]) != 2 * len(LANGUAGES)):
+        or artifacts.get("total_count") != len(artifacts["artifacts"])
+        or len(artifacts["artifacts"]) > 2 * len(LANGUAGES)):
         reject("expected four SARIF plus four source-provenance artifacts")
     items = artifacts["artifacts"]
-    if ({a.get("name") for a in items if isinstance(a, dict)} != expected_names
-        or any(not isinstance(a, dict)
-               or a.get("expired") is not False
-               or not isinstance(a.get("id"), int)
-               or not isinstance(a.get("size_in_bytes"), int)
-               or a["size_in_bytes"] <= 0
-               or a.get("workflow_run", {}).get("head_sha") not in (None, run["head_sha"])
-               for a in items)):
+    names = [a.get("name") for a in items if isinstance(a, dict)]
+    if (len(names) != len(items) or len(names) != len(set(names))
+        or not set(names) <= expected_names):
+        reject("missing, ambiguous, expired or wrong-SHA SARIF artifacts")
+    expired = False
+    for a in items:
+        if (not isinstance(a.get("id"), int)
+            or not isinstance(a.get("size_in_bytes"), int)
+            or a["size_in_bytes"] <= 0
+            or (a.get("workflow_run") or {}).get("head_sha") not in (None, run["head_sha"])):
+            reject("missing, ambiguous, expired or wrong-SHA SARIF artifacts")
+        if a.get("expired") is True:
+            expired = True
+        elif a.get("expired") is not False:
+            reject("unknown original CodeQL artifact expiration state")
+    if expired or len(items) < 2 * len(LANGUAGES):
+        if allow_missing:
+            return None
         reject("missing, ambiguous, expired or wrong-SHA SARIF artifacts")
     return run["id"]
 
@@ -135,13 +145,17 @@ def verify_manifest(directory, repo, run, sha, lang):
         reject("CodeQL source provenance mismatch")
 
 
-def inspect_run(repo, sha, workflow, run_id, script):
+def inspect_run(repo, sha, workflow, run_id, script, allow_missing=False):
     run = api(repo, f"actions/runs/{run_id}")
     jobs = api(repo, f"actions/runs/{run_id}/jobs?per_page=100")
     if intentional_schedule_skip(run, jobs):
         return False
     artifacts = api(repo, f"actions/runs/{run_id}/artifacts?per_page=100")
-    metadata_ok(run, workflow, jobs, artifacts, repo, sha, dt.datetime.now(dt.timezone.utc))
+    usable = metadata_ok(run, workflow, jobs, artifacts, repo, sha,
+                         dt.datetime.now(dt.timezone.utc),
+                         allow_missing=allow_missing)
+    if usable is None:
+        return None
     with tempfile.TemporaryDirectory(prefix="crossinput-release-codeql-") as tmp:
         for lang in LANGUAGES:
             for prefix in ("release-codeql-", "release-codeql-source-"):
@@ -164,16 +178,23 @@ def inspect_run(repo, sha, workflow, run_id, script):
 def run_candidates(repo, sha, workflow, script):
     found = []
     for event in ("workflow_dispatch", "schedule"):
-        result = api(repo, f"actions/workflows/codeql.yml/runs?event={event}&branch=main&per_page=100")
-        if not isinstance(result.get("workflow_runs"), list):
-            reject("CodeQL discovery returned invalid run array")
-        for run in result["workflow_runs"]:
-            if (isinstance(run, dict) and run.get("workflow_id") == workflow["id"]
-                and run.get("path") == ".github/workflows/codeql.yml"
-                and run.get("head_branch") == "main"
-                and (run.get("head_repository") or {}).get("full_name") == repo):
-                found.append(run)
-    found.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+        # Search sufficiently deeply to rule out conflicting attempts.
+        # A saturated upper bound is a security NO-GO, never silent evidence reuse.
+        for page in range(1, 11):
+            result = api(repo, f"actions/workflows/codeql.yml/runs?event={event}&branch=main&per_page=100&page={page}")
+            rows = result.get("workflow_runs")
+            if not isinstance(rows, list) or len(rows) > 100 or any(not isinstance(row, dict) for row in rows):
+                reject("CodeQL discovery returned invalid run array")
+            found.extend(run for run in rows
+                         if run.get("workflow_id") == workflow["id"]
+                         and run.get("path") == ".github/workflows/codeql.yml"
+                         and run.get("head_branch") == "main"
+                         and (run.get("head_repository") or {}).get("full_name") == repo)
+            if len(rows) < 100:
+                break
+        else:
+            reject("CodeQL discovery exhausted safe 1000-run bound")
+    found.sort(key=lambda r: (r.get("created_at", ""), r.get("id", 0)), reverse=True)
     return found
 
 
@@ -184,42 +205,46 @@ def verify_live(repo, sha, script):
     workflow = api(repo, "actions/workflows/codeql.yml")
     if not isinstance(workflow.get("id"), int):
         reject("untrusted CodeQL workflow")
+
     candidates = run_candidates(repo, sha, workflow, script)
+    before = {row.get("id") for row in candidates if isinstance(row.get("id"), int)}
     active = []
+    good = 0
     for run in candidates:
+        exact = ((run.get("event") == "workflow_dispatch"
+                  and run.get("display_title") == f"CodeQL source {sha}")
+                 or (run.get("event") == "schedule" and run.get("head_sha") == sha))
+        if not exact:
+            continue
         run_id = run["id"]
-        exact_request = (run.get("event") == "workflow_dispatch"
-                         and run.get("display_title") == f"CodeQL source {sha}")
-        if exact_request and run.get("run_attempt") != 1:
+        if run.get("run_attempt") != 1:
             reject(f"ambiguous rerun attempt for exact candidate {run_id}")
         if run.get("status") != "completed":
-            # Exact candidate dispatch is signaled in GitHub's run-name.
-            if (run.get("event") == "workflow_dispatch"
-                and run.get("display_title") == f"CodeQL source {sha}"):
-                active.append(run_id)
+            active.append(run_id)
             continue
         if run.get("conclusion") != "success":
-            if exact_request:
-                reject(f"existing exact candidate CodeQL run {run_id} ended {run.get('conclusion')}")
-            continue
+            reject(f"existing exact candidate CodeQL run {run_id} ended {run.get('conclusion')}")
         try:
-            if inspect_run(repo, sha, workflow, run_id, script):
-                return
+            valid = inspect_run(repo, sha, workflow, run_id, script,
+                                allow_missing=True)
         except (ValueError, subprocess.CalledProcessError, OSError, KeyError, TypeError) as exc:
-            # A completed run with manifest/provenance or SARIF problems must
-            # not be turned into a fresh scan that masks a security failure.
-            if run.get("event") == "workflow_dispatch" and run.get("display_title") == f"CodeQL source {sha}":
-                reject(f"invalid completed exact candidate scan {run_id}: {exc}")
-            # A run for a different candidate or a guard-only schedule is ineligible.
-            continue
+            reject(f"invalid completed exact candidate scan {run_id}: {exc}")
+        if valid is True:
+            good += 1
+        # False means an authenticated scheduled guard-only no-op.
+        # None means authentic success whose original archives expired/vanished.
+
     if len(active) > 1:
         reject("ambiguous active exact-source CodeQL scans")
+    if active and good:
+        reject("ambiguous active and completed exact candidate scans")
+    if good:
+        print(f"Reused {good} independently verified same-source CodeQL run(s)", flush=True)
+        return
     if active:
         selected = active[0]
         print(f"Joining active exact-source CodeQL {selected}", flush=True)
     else:
-        # Never dispatch from tag or feature refs; the workflow file is selected
-        # from the trusted current default branch, candidate is an immutable SHA.
         gh("api", "-X", "POST", f"repos/{repo}/actions/workflows/codeql.yml/dispatches",
            "-f", "ref=main", "-f", f"inputs[candidate_sha]={sha}")
         selected = None
@@ -229,27 +254,37 @@ def verify_live(repo, sha, script):
     while time.monotonic() < deadline:
         check_repo_sha(repo, sha)
         recent = run_candidates(repo, sha, workflow, script)
-        matches = [r for r in recent if r.get("event") == "workflow_dispatch"
-                   and r.get("display_title") == f"CodeQL source {sha}"
-                   and r.get("run_attempt") == 1]
+        exact_runs = [r for r in recent
+                      if (r.get("event") == "workflow_dispatch"
+                          and r.get("display_title") == f"CodeQL source {sha}")
+                      or (r.get("event") == "schedule" and r.get("head_sha") == sha)]
+        if any(r.get("run_attempt") != 1 for r in exact_runs):
+            reject("ambiguous rerun attempt for exact candidate")
+        if any(r.get("status") == "completed" and r.get("conclusion") != "success"
+               for r in exact_runs):
+            reject("failed exact candidate scan encountered while waiting")
         if selected is None:
+            matches = [r for r in exact_runs if r.get("event") == "workflow_dispatch"
+                       and r.get("id") not in before]
             if len(matches) > 1:
                 reject("ambiguous auto-dispatched CodeQL runs")
             if matches:
                 selected = matches[0]["id"]
         if selected is not None:
-            matched = [r for r in matches if r["id"] == selected]
-            if matched:
-                state = matched[0]
-                if state.get("status") == "completed":
-                    if state.get("conclusion") != "success":
-                        reject(f"CodeQL run {selected} ended {state.get('conclusion')}")
-                    if inspect_run(repo, sha, workflow, selected, script):
-                        return
-                    reject("CodeQL finished without complete language evidence")
+            matches = [r for r in exact_runs if r.get("id") == selected]
+            if len(matches) != 1:
+                reject(f"selected CodeQL run {selected} disappeared or became ambiguous")
+            state = matches[0]
+            if state.get("status") == "completed":
+                if state.get("conclusion") != "success":
+                    reject(f"CodeQL run {selected} ended {state.get('conclusion')}")
+                if inspect_run(repo, sha, workflow, selected, script) is True:
+                    return
+                reject("CodeQL finished without complete original language evidence")
         time.sleep(15)
-    reject(f"timed out waiting for exact-source CodeQL run {selected}" if selected else
-           "timed out discovering auto-dispatched CodeQL run")
+    reject(f"timed out waiting for exact-source CodeQL run {selected}" if selected
+           else "timed out discovering auto-dispatched CodeQL run")
+
 
 def self_test():
     repo = "owner/repo"
