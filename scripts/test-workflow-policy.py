@@ -540,6 +540,24 @@ def main():
                            '.merge_base_commit.sha == "wrong"', 1),
          "CODEQL_RELEASE_SOURCE")
 
+    case("CodeQL exact checkout cannot regress to full-history fetch",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "          fetch-depth: 1\n",
+                           "          fetch-depth: 0\n"),
+         "CODEQL_RELEASE_CHECKOUT")
+
+    case("post-checkout main ancestry check cannot vanish",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           "      - name: Verify scanned source checkout and ancestry",
+                           "      - name: Removed post-checkout ancestry check"),
+         "CODEQL_RELEASE_CHECKOUT")
+
+    case("post-checkout exact source identity cannot vanish",
+         lambda root: edit(workflow(root, "codeql.yml"),
+                           '[[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1',
+                           'true # intentionally broken exact checkout assertion'),
+         "CODEQL_RELEASE_CHECKOUT")
+
     case("raw CodeQL SARIF retention cannot be removed",
          lambda root: edit(workflow(root, "codeql.yml"),
                            "      - name: Retain exact-main raw CodeQL SARIF",

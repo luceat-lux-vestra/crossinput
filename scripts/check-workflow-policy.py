@@ -819,8 +819,28 @@ def check_release_codeql_security(root, workflows, policy, findings):
     if env.get("EXPECTED_SHA") != "${{ github.event_name == 'workflow_dispatch' && inputs.candidate_sha || github.sha }}":
         findings.add("CODEQL_RELEASE_SOURCE", where, "wrong expected candidate SHA selection")
     checkout = steps.get("Checkout repository") or {}
-    if (checkout.get("with") or {}).get("ref") != "${{ env.EXPECTED_SHA }}":
+    checkout_opts = checkout.get("with") or {}
+    if checkout_opts.get("ref") != "${{ env.EXPECTED_SHA }}":
         findings.add("CODEQL_RELEASE_SOURCE", where, "full scan checkout must pin expected exact SHA")
+    # A full-history checkout previously timed out for ~20 minutes on macOS.
+    # Use a single exact-SHA tree and preserve ancestry proof via the API.
+    if (checkout_opts.get("fetch-depth") != 1
+        or checkout_opts.get("persist-credentials") is not False):
+        findings.add("CODEQL_RELEASE_CHECKOUT", where,
+                     "immutable scan checkout must be shallow and credential-free")
+    scanned = steps.get("Verify scanned source checkout and ancestry") or {}
+    scanned_run = str(scanned.get("run") or "")
+    if ("if" in scanned
+        or (scanned.get("env") or {}).get("GH_TOKEN") != "${{ github.token }}"
+        or not all(x in scanned_run for x in (
+            '[[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]',
+            'remote_main="$(gh api',
+            'compare/${EXPECTED_SHA}...',
+            '.base_commit.sha == $sha',
+            '.merge_base_commit.sha == $sha',
+        ))):
+        findings.add("CODEQL_RELEASE_CHECKOUT", where,
+                     "post-checkout exact SHA and protected-main ancestry verification missing")
     operation = steps.get("Perform CodeQL Analysis") or {}
     analysis_options = operation.get("with") or {}
     if (operation.get("id") != "analyze"

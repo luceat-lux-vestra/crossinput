@@ -107,15 +107,28 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
+          # Only the immutable candidate tree is required; protected-main
+          # ancestry is independently verified with the GitHub Compare API.
+          fetch-depth: 1
           ref: ${{ env.EXPECTED_SHA }}
 
       - name: Verify scanned source checkout and ancestry
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$EXPECTED_SHA" FETCH_HEAD
+          # Repeat the authenticated main-ancestry check after checkout. Unlike
+          # local merge-base, this also proves older protected-main candidates
+          # without fetching the whole repository history.
+          remote_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          compare="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${EXPECTED_SHA}...${remote_main}")"
+          jq -e --arg sha "$EXPECTED_SHA" '
+            (.status == "ahead" or .status == "identical")
+            and .base_commit.sha == $sha and .merge_base_commit.sha == $sha
+          ' <<<"$compare" >/dev/null || {
+            echo "::error::Checked-out source is not a protected-main ancestor"; exit 1;
+          }
 
       - name: Record exact source identity
         env:
