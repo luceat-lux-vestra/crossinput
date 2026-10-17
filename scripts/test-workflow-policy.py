@@ -542,8 +542,8 @@ def main():
 
     case("CodeQL exact checkout cannot regress to full-history fetch",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           "          fetch-depth: 1\\n",
-                           "          fetch-depth: 0\\n"),
+                           "          fetch-depth: 1\n",
+                           "          fetch-depth: 0\n"),
          "CODEQL_RELEASE_CHECKOUT")
 
     case("post-checkout main ancestry check cannot vanish",
