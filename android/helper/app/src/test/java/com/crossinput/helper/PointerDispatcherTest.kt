@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mockito.Mockito
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
@@ -23,6 +24,7 @@ class PointerDispatcherTest {
     private fun auto(desktopSink: Boolean): PointerDispatcher {
         whenever(uhid.routing).thenReturn(PointerRouting.SYSTEM_ROUTED)
         whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.releaseForTargetChange()).thenReturn(true)
         return PointerDispatcher(log, uhid, inputManager) { desktopSink }
     }
 
@@ -106,6 +108,47 @@ class PointerDispatcherTest {
         assertTrue(dispatcher.selectDisplay(display))
         verify(uhid).close()
         verify(inputManager).selectDisplay(display)
+    }
+
+    @Test
+    fun targetChangeFromInputManagerToUhidReleasesOldTargetFirst() {
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
+        whenever(inputManager.releaseForTargetChange()).thenReturn(true)
+        whenever(uhid.selectSystemRoute()).thenReturn(true)
+
+        var desktopSink = false
+        val dispatcher = PointerDispatcher(log, uhid, inputManager) { desktopSink }
+        assertTrue(dispatcher.selectDisplay(display))
+        desktopSink = true
+        assertTrue(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.COMPOSITOR, dispatcher.boundaryAuthority())
+
+        val order = Mockito.inOrder(inputManager, uhid)
+        order.verify(inputManager).releaseForTargetChange()
+        order.verify(inputManager).close()
+        order.verify(uhid).selectSystemRoute()
+    }
+
+    @Test
+    fun rejectedOldTargetReleaseBlocksBackendSwitch() {
+        whenever(inputManager.routing).thenReturn(PointerRouting.EXPLICIT_DISPLAY)
+        whenever(inputManager.selectDisplay(any())).thenReturn(true)
+        whenever(inputManager.releaseForTargetChange()).thenReturn(false)
+
+        var desktopSink = false
+        val dispatcher = PointerDispatcher(log, uhid, inputManager) { desktopSink }
+        assertTrue(dispatcher.selectDisplay(display))
+        desktopSink = true
+        assertFalse(dispatcher.selectDisplay(display))
+        assertEquals(PointerBoundaryAuthority.UNAVAILABLE, dispatcher.boundaryAuthority())
+
+        // A second SELECT_DISPLAY cannot bypass the old uncertain state even
+        // when the backend would succeed on a new cleanup attempt.
+        whenever(inputManager.releaseForTargetChange()).thenReturn(true)
+        assertFalse(dispatcher.selectDisplay(display))
+        verify(inputManager, times(1)).releaseForTargetChange()
+        verify(uhid, never()).selectSystemRoute()
     }
 
     @Test
