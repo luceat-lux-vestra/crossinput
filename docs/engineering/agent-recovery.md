@@ -92,6 +92,61 @@ For create operations, search/read before retrying. For ref movement, re-read an
 
 Current PR HEAD is authoritative. Any HEAD movement invalidates prior HEAD-specific CI/review/runtime evidence unless repository policy explicitly permits same-SHA reuse. Branch-history cleanup or another rewrite therefore requires fresh evidence for the new exact final HEAD.
 
+## Base advancement with unchanged HEAD
+
+A protected-base advance does not by itself erase every fact established for an
+unchanged PR HEAD. Evidence reuse is claim-scoped: prior exact-HEAD evidence may
+still support facts that depend only on that unchanged source and on a producer
+whose inputs, policy, and provenance remain valid.
+
+Classify movement before using prior evidence:
+
+1. **PR HEAD moved** — prior HEAD-specific CI/review/runtime/device evidence is
+   invalid. Validate the new exact final HEAD.
+2. **PR HEAD unchanged; base unchanged** — apply the ordinary CrossInput
+   exact-HEAD review, evidence, and merge rules.
+3. **PR HEAD unchanged; base advanced** — prior exact-HEAD evidence may remain
+   useful for unchanged-HEAD claims, but it does not by itself prove the newly
+   composed base+HEAD result or authorize merge.
+4. **Evidence tied to an old synthetic merge/base composition** — do not reuse
+   it as proof for the new composition.
+5. **Material interaction or required authority is `UNKNOWN`, `UNVERIFIED`,
+   or `INSUFFICIENT EVIDENCE`** — fail closed and revalidate.
+
+CrossInput already has bounded exact-SHA Fast-evidence reuse in CI for selected
+ready-for-review transitions. Preserve that mechanism: its resolver is loaded
+from the trusted base and may reuse only the exact producer/claim it validates.
+It is not a general exemption from protected-base advancement, branch
+up-to-date requirements, or current merge-gate validation.
+
+CrossInput has a stricter latest-base/current-composition merge requirement.
+The live `Protect main` ruleset remains authoritative: required status checks
+are strict and the sole required context is `Merge Gate`. If `main` advances,
+never treat an earlier `Merge Gate`, Fast-evidence result, review, runtime
+result, or device observation as blanket merge authorization merely because the
+PR HEAD SHA is unchanged. Fresh-read the current PR HEAD, protected `main`,
+merge-base, live ruleset, required checks, reviews/threads, and mergeability,
+then refresh or revalidate the current composition whenever live policy or a
+material interaction requires it.
+
+Different filenames alone are not proof of semantic independence. Treat base
+movement as materially interaction-relevant when it may affect a proof premise,
+including:
+
+- `.github/**` workflow/action/policy or CI-component/`Merge Gate` changes;
+- trusted-base `scripts/resolve-fast-evidence.py` behavior;
+- Swift/Android dependencies, build configuration, SDK/toolchain state, or
+  generated/fixture inputs;
+- protocol, release, security, CodeQL, or other evidence-producing contracts;
+- architecture/ADR, device-capability, routing, lifecycle, or safety premises
+  used by the claim being reused.
+
+Same-HEAD evidence reuse never weakens CrossInput's device/safety requirements,
+physical Samsung/DeX verification boundaries, protocol rules, security/release
+evidence, architecture/ADR authority, review requirements, or fail-closed
+handling. Automated CI remains insufficient proof for claims that repository
+policy requires to be established on real hardware.
+
 ## Failure handling
 
 - Read-only interruption: fresh-read and continue.
