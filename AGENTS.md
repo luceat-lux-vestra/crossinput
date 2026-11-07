@@ -91,7 +91,8 @@ file under `docs/**`. This is not semantic classification. In that case the
 internal macOS and Android component jobs remain present but skip product runtime
 build/test/toolchain work; Documentation Validation, Evidence & Tooling
 Validation, and Dependency Review still run. The live ruleset requires only
-`Merge Gate`, which fails unless all five internal components conclude successfully.
+`Merge Gate`, which fails unless every direct merge-gate component declared in
+`.github/workflows/ci.yml` concludes successfully.
 CodeQL is not scheduled for that docs-only change. Any mixed, empty, unreadable,
 or unlisted changed-file set falls back to full validation. Changes under
 `protocol/**`, `.github/**`, `scripts/**`, source trees, or build configuration
