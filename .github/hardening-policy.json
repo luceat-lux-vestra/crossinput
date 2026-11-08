@@ -32,6 +32,10 @@
           "name": "Evidence & Tooling Validation"
         },
         {
+          "job": "dependencySubmissionValidation",
+          "name": "Dependency submission PR validation"
+        },
+        {
           "job": "dependencyReview",
           "name": "Dependency Review"
         }

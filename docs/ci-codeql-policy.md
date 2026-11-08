@@ -12,8 +12,9 @@ This deliberately changes *detection timing*: pull requests are not scanned
 individually. Security findings can wait until the next weekly scan, or until an
 operator manually initiates a full exact-main SHA scan. This **does not**
 preserve PR-time CodeQL coverage or guarantee the same discovery deadline.
-The required PR Merge Gate still validates its original six producers and
-Dependency Review, but it is **not** a substitute for full CodeQL.
+The required PR Merge Gate validates its seven current producers, including
+read-only Dependency Submission validation and Dependency Review, but it is
+**not** a substitute for full CodeQL.
 
 ## Trusted exact SHA workflow
 

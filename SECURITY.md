@@ -22,9 +22,9 @@ Validation` component and weekly via `.github/workflows/hardening-audit.yml`
 - **Required check on `main`:** `Merge Gate`. The active ruleset requires this single
   aggregate context strictly, has no bypass actors, requires review-thread resolution, and
   allows squash-only merges. `Merge Gate` is produced by `ci.yml` and fails unless all
-  six internal components succeed: `macOS App Build + Test`, `macOS 15 Packaged App Compatibility`,
-  `Android Helper Build + Test`, `Documentation Validation`, `Evidence & Tooling Validation`, and
-  `Dependency Review`.
+  seven internal components succeed: `macOS App Build + Test`, `macOS 15 Packaged App Compatibility`,
+  `Android Helper Build + Test`, `Documentation Validation`, `Evidence & Tooling Validation`,
+  `Dependency submission PR validation`, and `Dependency Review`.
 - **Code scanning authority:** the custom `.github/workflows/codeql.yml` workflow is the
   single authority. Actions, Java/Kotlin, Python, and Swift are active on the pinned
   official action-managed bundle. CodeQL 2.27.1 restored support for the maintained
