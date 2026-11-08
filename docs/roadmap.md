@@ -54,9 +54,10 @@ execution order.
 Repository/delivery hardening is separately owned by Epic #110. Its controls do
 not define the runtime target architecture.
 
-The hardening baseline includes the single live required `Merge Gate`, whose five
-internal validation components cover macOS, Android, documentation, evidence/tooling,
-and Dependency Review; workflow-security/drift checks; release provenance; and the
+The hardening baseline includes the single live required `Merge Gate`, whose seven
+internal validation components cover macOS, packaged compatibility, Android,
+documentation, evidence/tooling, read-only Dependency Submission validation, and
+Dependency Review; workflow-security/drift checks; release provenance; and the
 independent ADR-0012 physical stability evidence contract.
 
 ### ADR-0012 Level-3 physical stability — #68

@@ -176,7 +176,7 @@ def main():
     case("Merge Gate cannot omit a component",
          lambda root: edit(
              workflow(root, "ci.yml"),
-             "needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencyReview]",
+             "needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencySubmissionValidation, dependencyReview]",
              "needs: [macos-app, macos-15-compat, android-helper, markdown, scripts]",
              1),
          "GATE_AGGREGATE")
@@ -451,6 +451,37 @@ def main():
              "      - \".github/workflows/android-dependency-submission.yml\"\n",
              "      - \"apps/macos/Sources/**\"\n"
              "      - \".github/workflows/android-dependency-submission.yml\"\n"),
+         "ANDROID_DEPS_SUBMISSION")
+
+    case("Android PR dependency adapter cannot submit",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "          dependency-graph: generate-and-upload\n",
+             "          dependency-graph: generate-and-submit\n", 1),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android PR dependency adapter cannot gain write authority",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "      pull-requests: read\n",
+             "      pull-requests: write\n", 1),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android PR dependency adapter action pin must match production",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "gradle/actions/dependency-submission@8da46b539cd8fe6ab27ca75128919a18d757604c",
+             "gradle/actions/dependency-submission@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Merge Gate must expose Android dependency adapter result",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "          DEPENDENCY_SUBMISSION_RESULT: ${{ needs.dependencySubmissionValidation.result }}\n",
+             "          DEPENDENCY_SUBMISSION_RESULT: success\n", 1),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Merge Gate must aggregate Android dependency adapter result",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             '            "Dependency submission PR validation=$DEPENDENCY_SUBMISSION_RESULT" \\\n',
+             "", 1),
          "ANDROID_DEPS_SUBMISSION")
 
     # Native Android producer input contract: only files that can change the

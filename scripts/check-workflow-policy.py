@@ -217,6 +217,144 @@ def check_android_dependency_submission_contract(workflows, findings):
                 f"{key} must be {expected!r}, got {inputs.get(key)!r}",
             )
 
+    ci = workflows.get("ci.yml")
+    if ci is None:
+        findings.add("ANDROID_DEPS_SUBMISSION", "ci.yml",
+                     "missing PR dependency-submission counterpart")
+        return
+    ci_jobs = ci.get("jobs") or {}
+    adapter = ci_jobs.get("dependencySubmissionValidation") or {}
+    adapter_where = "ci.yml:dependencySubmissionValidation"
+    if adapter.get("name") != "Dependency submission PR validation":
+        findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                     "PR dependency adapter job name drifted")
+    if adapter.get("if") is not None:
+        findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                     "PR dependency adapter must remain an unconditional gate component")
+    if adapter.get("permissions") != {"contents": "read", "pull-requests": "read"}:
+        findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                     "PR dependency adapter permissions must be exactly read-only contents/pull-requests")
+
+    adapter_steps = [s for s in steps_of(adapter) if isinstance(s, dict)]
+    production_steps = [s for s in steps_of(submit) if isinstance(s, dict)]
+
+    def one_action(job_steps, prefix, where):
+        matches = [
+            s for s in job_steps
+            if str(s.get("uses") or "").startswith(prefix + "@")
+        ]
+        if len(matches) != 1:
+            findings.add("ANDROID_DEPS_SUBMISSION", where,
+                         f"expected exactly one {prefix} action, got {len(matches)}")
+            return {}
+        return matches[0]
+
+    for prefix in (
+        "actions/checkout",
+        "actions/setup-java",
+        "android-actions/setup-android",
+        "gradle/actions/dependency-submission",
+    ):
+        prod_action = one_action(production_steps, prefix, filename)
+        pr_action = one_action(adapter_steps, prefix, adapter_where)
+        if prod_action and pr_action and prod_action.get("uses") != pr_action.get("uses"):
+            findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                         f"{prefix} pin must match production publisher")
+
+    checkout = one_action(adapter_steps, "actions/checkout", adapter_where)
+    checkout_inputs = checkout.get("with") or {}
+    if (
+        checkout_inputs.get("repository")
+        != "${{ github.event.pull_request.head.repo.full_name }}"
+        or checkout_inputs.get("ref") != "${{ github.event.pull_request.head.sha }}"
+        or checkout_inputs.get("persist-credentials") is not False
+    ):
+        findings.add(
+            "ANDROID_DEPS_SUBMISSION",
+            adapter_where,
+            "PR dependency adapter must checkout exact PR-head repository/SHA "
+            "without persisted credentials",
+        )
+
+    prod_java = one_action(production_steps, "actions/setup-java", filename)
+    pr_java = one_action(adapter_steps, "actions/setup-java", adapter_where)
+    for key in ("distribution", "java-version"):
+        if (pr_java.get("with") or {}).get(key) != (prod_java.get("with") or {}).get(key):
+            findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                         f"PR dependency adapter Java {key} must match production")
+
+    prod_sdk = next(
+        (s for s in production_steps if s.get("name") == "Install Android 17 SDK"),
+        {},
+    )
+    pr_sdk = next(
+        (s for s in adapter_steps if s.get("name") == "Install Android 17 SDK"),
+        {},
+    )
+    if str(pr_sdk.get("run") or "").strip() != str(prod_sdk.get("run") or "").strip():
+        findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                     "PR dependency adapter Android SDK setup must match production")
+
+    pr_submit = one_action(
+        adapter_steps, "gradle/actions/dependency-submission", adapter_where
+    )
+    pr_inputs = pr_submit.get("with") or {}
+    expected_pr_inputs = {
+        "build-root-directory": "android/helper",
+        "dependency-graph": "generate-and-upload",
+        "dependency-graph-report-dir": "dependency-graph-reports-pr",
+        "cache-read-only": True,
+        "validate-wrappers": True,
+    }
+    for key, expected in expected_pr_inputs.items():
+        if pr_inputs.get(key) != expected:
+            findings.add(
+                "ANDROID_DEPS_SUBMISSION",
+                adapter_where,
+                f"PR dependency adapter {key} must be {expected!r}, "
+                f"got {pr_inputs.get(key)!r}",
+            )
+
+    policy_step = next(
+        (s for s in adapter_steps
+         if s.get("name") == "Verify dependency-submission PR adapter policy"),
+        {},
+    )
+    policy_run = str(policy_step.get("run") or "")
+    for fragment in (
+        "trusted-dependency-submission-validation.py self-test",
+        "trusted-dependency-submission-validation.py check-contract",
+    ):
+        if fragment not in policy_run:
+            findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                         f"PR dependency adapter lost policy fragment {fragment!r}")
+
+    verify_step = next(
+        (s for s in adapter_steps
+         if s.get("name") == "Verify PR dependency graph provenance and coverage"),
+        {},
+    )
+    if "trusted-dependency-submission-validation.py verify" not in str(
+        verify_step.get("run") or ""
+    ):
+        findings.add("ANDROID_DEPS_SUBMISSION", adapter_where,
+                     "PR dependency adapter lost graph provenance/coverage verification")
+
+    merge_gate = ci_jobs.get("mergeGate") or {}
+    merge_steps = [s for s in steps_of(merge_gate) if isinstance(s, dict)]
+    gate_run = "\n".join(str(s.get("run") or "") for s in merge_steps)
+    gate_env = {}
+    for gate_step in merge_steps:
+        gate_env.update(gate_step.get("env") or {})
+    if gate_env.get("DEPENDENCY_SUBMISSION_RESULT") != (
+        "${{ needs.dependencySubmissionValidation.result }}"
+    ):
+        findings.add("ANDROID_DEPS_SUBMISSION", "ci.yml:mergeGate",
+                     "Merge Gate does not expose dependencySubmissionValidation result")
+    if "Dependency submission PR validation=$DEPENDENCY_SUBMISSION_RESULT" not in gate_run:
+        findings.add("ANDROID_DEPS_SUBMISSION", "ci.yml:mergeGate",
+                     "Merge Gate does not aggregate dependencySubmissionValidation result")
+
 
 def check_android_seed_contract(workflows, findings):
     """Only trusted main may write, and only real Gradle cache-key inputs seed."""

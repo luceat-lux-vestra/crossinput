@@ -197,6 +197,7 @@ class FinalGateStructureTests(unittest.TestCase):
                 "android-helper",
                 "markdown",
                 "scripts",
+                "dependencySubmissionValidation",
                 "dependencyReview",
             },
         )
