@@ -356,6 +356,108 @@ def check_android_dependency_submission_contract(workflows, findings):
                      "Merge Gate does not aggregate dependencySubmissionValidation result")
 
 
+def check_codeql_pr_runtime_contract(workflows, findings):
+    """Selective PR CodeQL runtime must stay read-only and production-pinned."""
+    ci = workflows.get("ci.yml") or {}
+    codeql = workflows.get("codeql.yml") or {}
+    ci_jobs = ci.get("jobs") or {}
+    adapter = ci_jobs.get("dependencySubmissionValidation") or {}
+    where = "ci.yml:dependencySubmissionValidation"
+
+    if adapter.get("permissions") != {"contents": "read", "pull-requests": "read"}:
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime must stay in the exact read-only dependency adapter job")
+
+    adapter_steps = [s for s in steps_of(adapter) if isinstance(s, dict)]
+    analyze_job = ((codeql.get("jobs") or {}).get("analyze") or {})
+    production_steps = [s for s in steps_of(analyze_job) if isinstance(s, dict)]
+
+    def one_action(job_steps, prefix, action_where):
+        matches = [s for s in job_steps
+                   if str(s.get("uses") or "").startswith(prefix + "@")]
+        if len(matches) != 1:
+            findings.add("CODEQL_PR_RUNTIME", action_where,
+                         f"expected exactly one {prefix} action, got {len(matches)}")
+            return {}
+        return matches[0]
+
+    prod_init = one_action(production_steps, "github/codeql-action/init", "codeql.yml:analyze")
+    prod_analyze = one_action(production_steps, "github/codeql-action/analyze", "codeql.yml:analyze")
+    pr_init = one_action(adapter_steps, "github/codeql-action/init", where)
+    pr_analyze = one_action(adapter_steps, "github/codeql-action/analyze", where)
+
+    def immutable_pin(step, action_where):
+        uses = str(step.get("uses") or "")
+        match = re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@([0-9a-f]{40})", uses)
+        if not match:
+            findings.add("CODEQL_PR_RUNTIME", action_where,
+                         f"CodeQL action is not immutably SHA-pinned: {uses!r}")
+            return None
+        return match.group(1)
+
+    prod_init_pin = immutable_pin(prod_init, "codeql.yml:analyze") if prod_init else None
+    prod_analyze_pin = immutable_pin(prod_analyze, "codeql.yml:analyze") if prod_analyze else None
+    pr_init_pin = immutable_pin(pr_init, where) if pr_init else None
+    pr_analyze_pin = immutable_pin(pr_analyze, where) if pr_analyze else None
+
+    if prod_init_pin and prod_analyze_pin and prod_init_pin != prod_analyze_pin:
+        findings.add("CODEQL_PR_RUNTIME", "codeql.yml:analyze",
+                     "production CodeQL init/analyze pins must match")
+    if prod_init_pin and pr_init_pin and prod_init_pin != pr_init_pin:
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL init pin must match production")
+    if prod_analyze_pin and pr_analyze_pin and prod_analyze_pin != pr_analyze_pin:
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL analyze pin must match production")
+
+    checkout = next((s for s in adapter_steps if s.get("name") == "Checkout exact PR head"), {})
+    checkout_inputs = checkout.get("with") or {}
+    if (checkout_inputs.get("repository") != "${{ github.event.pull_request.head.repo.full_name }}"
+        or checkout_inputs.get("ref") != "${{ github.event.pull_request.head.sha }}"
+        or checkout_inputs.get("persist-credentials") is not False):
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime must checkout exact PR head without persisted credentials")
+
+    named = {s.get("name"): s for s in adapter_steps if s.get("name")}
+    policy = named.get("Verify CodeQL PR runtime adapter policy") or {}
+    policy_run = str(policy.get("run") or "")
+    if ("trusted-codeql-runtime-validation.py self-test" not in policy_run
+        or "trusted-codeql-runtime-validation.py check-contract" not in policy_run):
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime policy/self-test step is missing")
+
+    classifier = named.get("Classify CodeQL runtime validation scope") or {}
+    classifier_run = str(classifier.get("run") or "")
+    if ("gh api --paginate --slurp" not in classifier_run
+        or "trusted-codeql-runtime-validation.py classify" not in classifier_run):
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime classifier lost complete changed-file enumeration")
+
+    init = named.get("Initialize PR-only CodeQL runtime") or {}
+    init_inputs = init.get("with") or {}
+    if init_inputs.get("languages") != "actions" or init_inputs.get("build-mode") != "none":
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime must remain Actions/build-mode:none")
+
+    analyze = named.get("Analyze PR-only CodeQL runtime without upload") or {}
+    analyze_inputs = analyze.get("with") or {}
+    if (analyze_inputs.get("category") != "/language:actions"
+        or analyze_inputs.get("upload") != "never"
+        or analyze_inputs.get("output") != "${{ runner.temp }}/pr-codeql-runtime"):
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL analysis must keep Actions SARIF local with upload:never")
+
+    verify = named.get("Verify local PR-only CodeQL runtime SARIF and reject promotion") or {}
+    if "trusted-codeql-runtime-validation.py verify" not in str(verify.get("run") or ""):
+        findings.add("CODEQL_PR_RUNTIME", where,
+                     "PR CodeQL runtime lost local SARIF/evidence-promotion verdict")
+
+    merge_gate = ci_jobs.get("mergeGate") or {}
+    if "dependencySubmissionValidation" not in (merge_gate.get("needs") or []):
+        findings.add("CODEQL_PR_RUNTIME", "ci.yml:mergeGate",
+                     "CodeQL runtime adapter job disappeared from Merge Gate authority")
+
+
 def check_android_seed_contract(workflows, findings):
     """Only trusted main may write, and only real Gradle cache-key inputs seed."""
     filename = "android-cache-seed.yml"
@@ -1487,6 +1589,7 @@ def main():
     check_labels(args.root, findings)
     check_issue_labeler_safety(args.root, workflows, findings)
     check_codeql_authority(args.root, workflows, policy, findings)
+    check_codeql_pr_runtime_contract(workflows, findings)
     check_android_seed_contract(workflows, findings)
     check_android_dependency_submission_contract(workflows, findings)
     check_manual_live_readback_policy(policy, findings)

@@ -443,6 +443,58 @@ jobs:
             --production .github/workflows/android-dependency-submission.yml \
             --pr-workflow .github/workflows/ci.yml
 
+      - name: Verify CodeQL PR runtime adapter policy
+        run: |
+          python3 scripts/trusted-codeql-runtime-validation.py self-test
+          python3 scripts/trusted-codeql-runtime-validation.py check-contract \
+            --codeql .github/workflows/codeql.yml \
+            --pr-workflow .github/workflows/ci.yml
+
+      - name: Classify CodeQL runtime validation scope
+        id: codeql-runtime-scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pull="$RUNNER_TEMP/codeql-pr.json"
+          pages="$RUNNER_TEMP/codeql-pr-files.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$pull"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" > "$pages"
+          python3 scripts/trusted-codeql-runtime-validation.py classify \
+            --pull "$pull" \
+            --pages "$pages" \
+            --head "$EXPECTED_HEAD" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize PR-only CodeQL runtime
+        if: ${{ steps.codeql-runtime-scope.outputs.required == 'true' }}
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: actions
+          build-mode: none
+
+      - name: Analyze PR-only CodeQL runtime without upload
+        id: codeql-runtime-analyze
+        if: ${{ steps.codeql-runtime-scope.outputs.required == 'true' }}
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: "/language:actions"
+          upload: never
+          output: ${{ runner.temp }}/pr-codeql-runtime
+
+      - name: Verify local PR-only CodeQL runtime SARIF and reject promotion
+        if: ${{ steps.codeql-runtime-scope.outputs.required == 'true' }}
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          SARIF_DIR: ${{ steps.codeql-runtime-analyze.outputs.sarif-output }}
+        run: |
+          python3 scripts/trusted-codeql-runtime-validation.py verify \
+            --dir "$SARIF_DIR" \
+            --head "$EXPECTED_HEAD"
+
       - name: Classify dependency-submission validation scope
         id: dependency-scope
         env:

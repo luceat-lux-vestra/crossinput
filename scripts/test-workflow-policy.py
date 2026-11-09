@@ -521,6 +521,26 @@ def main():
                            "          tools: https://example.invalid/codeql-bundle.tar.zst\n"),
          "CODEQL_TOOLS_OVERRIDE")
 
+    case("CodeQL PR runtime upload must stay disabled",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           "          upload: never\n",
+                           "          upload: always\n", 1),
+         "CODEQL_PR_RUNTIME")
+
+    case("CodeQL PR runtime pin must match production",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
+             "github/codeql-action/init@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
+         "CODEQL_PR_RUNTIME")
+
+    case("CodeQL PR runtime verifier cannot disappear",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             "      - name: Verify local PR-only CodeQL runtime SARIF and reject promotion\n",
+             "      - name: Removed PR CodeQL runtime verifier\n", 1),
+         "CODEQL_PR_RUNTIME")
+
     # Stage B prevents accidental restoration of PR CodeQL and scope shortcuts.
     case("PR CodeQL trigger must stay disabled",
          lambda root: edit(workflow(root, "codeql.yml"),

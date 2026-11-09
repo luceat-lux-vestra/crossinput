@@ -118,7 +118,7 @@
       "swift"
     ],
     "exceptions": [],
-    "scan_timing": "Weekly exact-SHA scheduled detector (skip unchanged main) and protected-main ancestor explicit/release full scans; no PR/push CodeQL."
+    "scan_timing": "Weekly exact-SHA scheduled detector (skip unchanged main) and protected-main ancestor explicit/release full scans; no routine full PR/push CodeQL. Relevant trusted-workflow changes selectively exercise a read-only Actions init/analyze compatibility lane with local non-uploading SARIF."
   },
   "release_provenance": {
     "workflow": "release.yml",
@@ -153,7 +153,7 @@
     "first_publication": "Reuses trustworthy exact-source four-language SARIF or dispatches and joins a bounded trusted scan before new automated GitHub Release",
     "existing_release_recovery": "legacy existing-release asset upload preserved; does not prove first-publication security",
     "owner_direct_release": "out-of-band owner GitHub UI/API publication cannot be blocked by this workflow",
-    "pr_detection_tradeoff": "CodeQL is no longer executed for PRs. Vulnerabilities may be found only at the next weekly or manually dispatched full scan.",
+    "pr_detection_tradeoff": "Full four-language CodeQL security analysis is not executed for PRs. A selective read-only Actions init/analyze compatibility lane runs only for relevant trusted-workflow changes and is not production security evidence; other vulnerabilities may be found only at the next weekly or manually dispatched full scan.",
     "scheduled_unchanged_main": "Exact main SHA only; successful schedule guard-only runs are not release evidence",
     "scanner_job": "codeql-preflight",
     "publisher_job": "dmg",
