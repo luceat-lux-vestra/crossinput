@@ -8,13 +8,18 @@ languages: Actions, Java/Kotlin, Python, Swift. Swift retains macOS-15 autobuild
 Android retains Linux ARM64. No security query, source scope, or language was
 removed from the **full scan**.
 
-This deliberately changes *detection timing*: pull requests are not scanned
-individually. Security findings can wait until the next weekly scan, or until an
-operator manually initiates a full exact-main SHA scan. This **does not**
-preserve PR-time CodeQL coverage or guarantee the same discovery deadline.
-The required PR Merge Gate validates its seven current producers, including
-read-only Dependency Submission validation and Dependency Review, but it is
-**not** a substitute for full CodeQL.
+This deliberately changes *detection timing*: pull requests do not receive the
+full four-language security scan. Security findings can wait until the next
+weekly scan, or until an operator manually initiates a full exact-main SHA scan.
+A narrow exception exists for maintenance of the trusted CodeQL runtime itself:
+relevant workflow/action-pin changes selectively execute the production-pinned
+Actions-language `init` + `analyze` runtime in the existing read-only PR DAG,
+with `build-mode: none`, `upload: never`, runner-local SARIF, and explicit
+rejection of PR output as production/release evidence. That compatibility probe
+is **not** PR-time full CodeQL coverage and does not guarantee the same security
+discovery deadline. The required PR Merge Gate validates its seven current
+producers, including read-only Dependency Submission validation and Dependency
+Review, but it is **not** a substitute for full CodeQL.
 
 ## Trusted exact SHA workflow
 
@@ -52,8 +57,9 @@ release SHA's evidence.
 
 - **required merge-ready latency**: until required Merge Gate passes.
 - **all-security-complete latency**: when applicable, independent full CodeQL
-  finishes. After this change PRs have no automatic CodeQL completion event;
-  therefore these metrics are not directly comparable with prior PR scans.
+  finishes. The selective Actions runtime compatibility probe is not a full
+  security-completion event; therefore these metrics remain incomparable with
+  historical routine PR scans.
 - **runner work/cost**: count actual job execution minutes by OS and billing
   multipliers separately. Historical PR CodeQL duration is not an invoice.
 - **security detection delay**: up to the next weekly scan without manual
