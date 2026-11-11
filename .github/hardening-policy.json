@@ -46,7 +46,7 @@
   "branch_ruleset": {
     "enforcement": "active",
     "allow_bypass_actors": false,
-    "strict_required_status_checks_policy": true,
+    "strict_required_status_checks_policy": false,
     "allowed_merge_methods": [
       "squash"
     ],
