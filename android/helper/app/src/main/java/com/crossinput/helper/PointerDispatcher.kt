@@ -67,6 +67,10 @@ class PointerDispatcher(
     private var selectedDisplay: Display? = null
     private var active: PointerInjector? = null
     private var compositorBoundaryRequired = false
+    // Rejected old-target release makes this helper's remote pointer state
+    // untrustworthy. Do not permit a later SELECT_DISPLAY to bypass the fence.
+    // Only a new helper/dispatcher context may attempt a fresh session.
+    private var targetChangeBlocked = false
 
     @Synchronized
     fun selectedDisplayId(): Int? = selectedDisplay?.displayId
@@ -84,6 +88,27 @@ class PointerDispatcher(
 
     @Synchronized
     override fun selectDisplay(display: Display): Boolean {
+        if (targetChangeBlocked) {
+            log.error(TAG, "target selection rejected: pointer state remains unconfirmed")
+            return false
+        }
+        // A target change can switch away from InputManager entirely. Always
+        // retire its old-target button ledger *before* choosing UHID or
+        // reselecting InputManager. A rejected release cannot be turned into
+        // a successful new routing context by the dispatcher.
+        if (active === inputManager) {
+            if (!inputManager.releaseForTargetChange()) {
+                targetChangeBlocked = true
+                active = null
+                selectedDisplay = null
+                compositorBoundaryRequired = false
+                log.error(TAG, "target selection blocked: old InputManager release unconfirmed")
+                return false
+            }
+            inputManager.close()
+            active = null
+        }
+
         selectedDisplay = display
         val systemRouteCandidate =
             mode == PointerBackendMode.AUTO && isSystemRouteCandidate(display)

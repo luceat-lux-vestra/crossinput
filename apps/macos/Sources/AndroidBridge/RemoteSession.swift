@@ -238,6 +238,13 @@ public final class RemoteSession: SessionConnection, @unchecked Sendable {
         let startedMicros = nowMicros()
         do {
             let frame = try await requestUncounted(type, payload: payload, timeout: timeout)
+            // FATAL_ERROR is a session-level signal even when it is correlated
+            // to a request (SELECT_DISPLAY currently uses that form). Surface
+            // it before returning the response so lifecycle ownership cannot
+            // silently lose the terminal event behind request correlation.
+            if frame.type == .fatalError {
+                onEvent?(frame)
+            }
             let elapsed = Double(nowMicros() - startedMicros) / 1_000_000
             emit(RequestObservation(kind: RequestObservation.Kind(of: type),
                                     outcome: .success(elapsed: elapsed)))
