@@ -206,6 +206,7 @@ def check_android_dependency_submission_contract(workflows, findings):
     expected_inputs = {
         "build-root-directory": "android/helper",
         "dependency-graph": "generate-and-submit",
+        "dependency-graph-include-configurations": ".*(Compile|Runtime)Classpath",
         "cache-read-only": True,
         "validate-wrappers": True,
     }
@@ -303,6 +304,7 @@ def check_android_dependency_submission_contract(workflows, findings):
         "build-root-directory": "android/helper",
         "dependency-graph": "generate-and-upload",
         "dependency-graph-report-dir": "dependency-graph-reports-pr",
+        "dependency-graph-include-configurations": ".*(Compile|Runtime)Classpath",
         "cache-read-only": True,
         "validate-wrappers": True,
     }

@@ -446,6 +446,12 @@ def main():
              "    if: ${{ github.ref == 'refs/heads/main' }}\n",
              ""),
          "ANDROID_DEPS_SUBMISSION")
+    case("Android dependency publisher must keep compile/runtime scope",
+         lambda root: edit(
+             workflow(root, "android-dependency-submission.yml"),
+             '          dependency-graph-include-configurations: ".*(Compile|Runtime)Classpath"\n',
+             "", 1),
+         "ANDROID_DEPS_SUBMISSION")
     case("Android dependency publisher cache must stay read-only",
          lambda root: edit(
              workflow(root, "android-dependency-submission.yml"),
@@ -471,6 +477,12 @@ def main():
              workflow(root, "ci.yml"),
              "          dependency-graph: generate-and-upload\n",
              "          dependency-graph: generate-and-submit\n", 1),
+         "ANDROID_DEPS_SUBMISSION")
+    case("Android PR dependency adapter must mirror compile/runtime scope",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             '          dependency-graph-include-configurations: ".*(Compile|Runtime)Classpath"\n',
+             '          dependency-graph-include-configurations: ".*RuntimeClasspath"\n', 1),
          "ANDROID_DEPS_SUBMISSION")
     case("Android PR dependency adapter cannot gain write authority",
          lambda root: edit(

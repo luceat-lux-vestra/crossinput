@@ -16,6 +16,8 @@ ACTION_PREFIXES = (
     "android-actions/setup-android",
     "gradle/actions/dependency-submission",
 )
+DEPENDENCY_GRAPH_CONFIGURATIONS = ".*(Compile|Runtime)Classpath"
+
 CONTROL_PATHS = {
     ".github/workflows/android-dependency-submission.yml",
     ".github/workflows/ci.yml",
@@ -122,6 +124,11 @@ def check_contract(production: str, pr_workflow: str) -> None:
             "production publisher is not in generate-and-submit mode")
     require("build-root-directory: android/helper" in production,
             "production publisher build root drifted")
+    require(
+        f'dependency-graph-include-configurations: "{DEPENDENCY_GRAPH_CONFIGURATIONS}"'
+        in production,
+        "production publisher dependency scope drifted",
+    )
     require("cache-read-only: true" in production,
             "production publisher may write Gradle cache")
     require("validate-wrappers: true" in production,
@@ -147,6 +154,11 @@ def check_contract(production: str, pr_workflow: str) -> None:
             "PR dependency adapter report directory drifted")
     require("build-root-directory: android/helper" in job,
             "PR dependency adapter build root drifted")
+    require(
+        f'dependency-graph-include-configurations: "{DEPENDENCY_GRAPH_CONFIGURATIONS}"'
+        in job,
+        "PR dependency adapter dependency scope drifted",
+    )
     require("cache-read-only: true" in job,
             "PR dependency adapter may write Gradle cache")
     require("validate-wrappers: true" in job,
@@ -169,10 +181,18 @@ def check_contract(production: str, pr_workflow: str) -> None:
                 f"PR adapter {action} pin does not match production publisher")
 
 
-def expected_coordinates(root: Path) -> set[str]:
-    top = (root / "android/helper/build.gradle.kts").read_text(encoding="utf-8")
+def declared_app_coordinates(root: Path) -> set[str]:
     app = (root / "android/helper/app/build.gradle.kts").read_text(encoding="utf-8")
+    coordinates = set(re.findall(
+        r'\b[A-Za-z][A-Za-z0-9_]*\("([^"]+:[^"]+:[^"]+)"\)',
+        app,
+    ))
+    require(coordinates, "Android app dependency declarations unexpectedly disappeared")
+    return coordinates
 
+
+def build_tool_coordinates(root: Path) -> set[str]:
+    top = (root / "android/helper/build.gradle.kts").read_text(encoding="utf-8")
     kgp = re.findall(
         r'classpath\("org[.]jetbrains[.]kotlin:kotlin-gradle-plugin:([^"]+)"\)',
         top,
@@ -183,13 +203,9 @@ def expected_coordinates(root: Path) -> set[str]:
     )
     require(len(kgp) == 1 and len(agp) == 1,
             "Android build plugin versions could not be derived exactly")
-    test_coordinates = re.findall(r'testImplementation\("([^"]+)"\)', app)
-    require(len(test_coordinates) >= 3,
-            "Android test dependency coverage unexpectedly shrank")
     return {
         f"org.jetbrains.kotlin:kotlin-gradle-plugin:{kgp[0]}",
         f"com.android.tools.build:gradle:{agp[0]}",
-        *test_coordinates,
     }
 
 
@@ -232,10 +248,14 @@ def verify_graph(
         resolved.update(nodes)
 
     require(resolved, "dependency graph resolved set is empty")
-    required = expected_coordinates(root)
+    required = declared_app_coordinates(root)
     missing = required - resolved.keys()
     require(not missing,
-            f"dependency graph lost required Android coordinates: {sorted(missing)}")
+            f"dependency graph lost declared Android app coordinates: {sorted(missing)}")
+    leaked_build_tools = build_tool_coordinates(root) & resolved.keys()
+    require(not leaked_build_tools,
+            "dependency graph leaked Gradle build-tool coordinates: "
+            f"{sorted(leaked_build_tools)}")
     direct = sum(
         isinstance(node, dict) and node.get("relationship") == "direct"
         for node in resolved.values()
@@ -248,6 +268,7 @@ def verify_graph(
         "resolved": len(resolved),
         "direct": direct,
         "required_coordinates": len(required),
+        "excluded_build_tools": len(build_tool_coordinates(root)),
         "production_evidence": False,
     }
 
@@ -309,6 +330,7 @@ def self_test() -> None:
         "      - uses: gradle/actions/dependency-submission@" + "4" * 40 + "\n"
         "        with:\n          build-root-directory: android/helper\n"
         "          dependency-graph: generate-and-submit\n"
+        "          dependency-graph-include-configurations: \".*(Compile|Runtime)Classpath\"\n"
         "          cache-read-only: true\n          validate-wrappers: true\n"
     )
     pr = (
@@ -330,6 +352,7 @@ def self_test() -> None:
         "        with:\n          build-root-directory: android/helper\n"
         "          dependency-graph: generate-and-upload\n"
         "          dependency-graph-report-dir: dependency-graph-reports-pr\n"
+        "          dependency-graph-include-configurations: \".*(Compile|Runtime)Classpath\"\n"
         "          cache-read-only: true\n          validate-wrappers: true\n"
     )
     check_contract(prod, pr)
@@ -365,7 +388,7 @@ def self_test() -> None:
             '}\n',
             encoding="utf-8",
         )
-        coords = expected_coordinates(root)
+        coords = declared_app_coordinates(root)
         resolved = {coord: {"relationship": "direct"} for coord in coords}
         graph = {
             "sha": sha,
@@ -376,9 +399,24 @@ def self_test() -> None:
         report.mkdir()
         (report / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
         result = verify_graph(report, sha, "refs/pull/7/merge", root)
-        assert result["required_coordinates"] == 5
+        assert result["required_coordinates"] == 3
+        assert result["excluded_build_tools"] == 2
         assert result["production_evidence"] is False
 
+        graph["manifests"]["android"]["resolved"].update({
+            coord: {"relationship": "direct"}
+            for coord in build_tool_coordinates(root)
+        })
+        (report / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
+        try:
+            verify_graph(report, sha, "refs/pull/7/merge", root)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Gradle build-tool coordinates were accepted")
+
+        graph["manifests"]["android"]["resolved"] = resolved
+        (report / "graph.json").write_text(json.dumps(graph), encoding="utf-8")
         try:
             verify_graph(report, sha, "refs/heads/main", root)
         except ValueError:

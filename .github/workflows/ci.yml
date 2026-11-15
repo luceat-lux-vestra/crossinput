@@ -538,6 +538,8 @@ jobs:
           build-root-directory: android/helper
           dependency-graph: generate-and-upload
           dependency-graph-report-dir: dependency-graph-reports-pr
+          # Mirror the production dependency scope without granting submission authority.
+          dependency-graph-include-configurations: ".*(Compile|Runtime)Classpath"
           cache-read-only: true
           validate-wrappers: true
 
