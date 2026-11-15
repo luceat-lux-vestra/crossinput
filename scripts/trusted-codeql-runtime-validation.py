@@ -58,17 +58,27 @@ def require_supported_codeql_patch(entry: dict) -> None:
     patch = entry.get("patch")
     require(isinstance(patch, str) and patch,
             "CodeQL workflow change has no reviewable patch")
-    changed = [
-        line[1:].strip()
-        for line in patch.splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    ]
+
     allowed = re.compile(
-        r"uses:\s*github/codeql-action/(?:init|analyze)@"
-        r"[0-9a-f]{40}(?:\s+#.*)?\Z"
+        r"uses:\s*("
+        r"github/codeql-action/(?:init|analyze|autobuild)"
+        r"|actions/setup-java"
+        r")@[0-9a-f]{40}(?:\s+#.*)?\Z"
     )
-    require(changed and all(allowed.fullmatch(line) for line in changed),
-            "CodeQL workflow mutation exceeds the init/analyze runtime adapter")
+    removed = []
+    added = []
+    for line in patch.splitlines():
+        if line.startswith(("+++", "---")) or not line.startswith(("+", "-")):
+            continue
+        match = allowed.fullmatch(line[1:].strip())
+        require(match is not None,
+                "CodeQL workflow mutation exceeds approved action pin updates")
+        (added if line.startswith("+") else removed).append(match.group(1))
+
+    require(removed and added,
+            "CodeQL workflow pin update must include old and new pins")
+    require(sorted(removed) == sorted(added),
+            "CodeQL workflow action identity changed instead of pin-only update")
 
 
 def classify(pull: dict, pages: list, expected_head: str) -> bool:
@@ -276,9 +286,13 @@ def self_test() -> None:
     }]], sha)
 
     pin_patch = (
-        "@@ -1,2 +1,2 @@\n"
+        "@@ -1,4 +1,4 @@\n"
         "-        uses: github/codeql-action/init@" + "b" * 40 + " # old\n"
         "+        uses: github/codeql-action/init@" + "c" * 40 + " # new\n"
+        "-        uses: actions/setup-java@" + "d" * 40 + " # old\n"
+        "+        uses: actions/setup-java@" + "e" * 40 + " # new\n"
+        "-        uses: github/codeql-action/autobuild@" + "b" * 40 + " # old\n"
+        "+        uses: github/codeql-action/autobuild@" + "c" * 40 + " # new\n"
         "-        uses: github/codeql-action/analyze@" + "b" * 40 + " # old\n"
         "+        uses: github/codeql-action/analyze@" + "c" * 40 + " # new"
     )
@@ -297,6 +311,15 @@ def self_test() -> None:
             "filename": ".github/workflows/codeql.yml",
             "status": "modified",
             "patch": "@@ -1 +1 @@\n-upload: always\n+upload: never",
+        }]], sha),
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": (
+                "@@ -1 +1 @@\n"
+                "-uses: github/codeql-action/init@" + "b" * 40 + "\n"
+                "+uses: github/codeql-action/autobuild@" + "c" * 40
+            ),
         }]], sha),
         (pull, [[{"filename": "README.md", "status": "modified"}]], "d" * 40),
     )
