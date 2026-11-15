@@ -50,5 +50,7 @@ jobs:
         with:
           build-root-directory: android/helper
           dependency-graph: generate-and-submit
+          # Report app compile/runtime classpaths, including tests, but not Gradle plugin/build-tool classpaths.
+          dependency-graph-include-configurations: ".*(Compile|Runtime)Classpath"
           cache-read-only: true
           validate-wrappers: true
