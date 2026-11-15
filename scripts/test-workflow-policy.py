@@ -12,6 +12,7 @@ Exit 0 = all fixtures pass.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,18 @@ def run_checker(root):
 
 def workflow(root, name):
     return os.path.join(root, ".github", "workflows", name)
+
+
+def codeql_action_pin(path, action):
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+    match = re.search(
+        rf"github/codeql-action/{re.escape(action)}@([0-9a-f]{{40}})",
+        text,
+    )
+    if not match:
+        raise AssertionError(f"CodeQL {action} pin not found in {path}")
+    return match.group(1)
 
 
 LIFECYCLE_WORKFLOW = """name: Lifecycle fixture
@@ -530,7 +543,7 @@ def main():
     case("CodeQL PR runtime pin must match production",
          lambda root: edit(
              workflow(root, "ci.yml"),
-             "github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370",
+             f"github/codeql-action/init@{codeql_action_pin(workflow(root, 'ci.yml'), 'init')}",
              "github/codeql-action/init@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
          "CODEQL_PR_RUNTIME")
 
