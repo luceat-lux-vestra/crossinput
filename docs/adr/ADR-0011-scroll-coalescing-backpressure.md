@@ -17,7 +17,7 @@
 > clean remote state. Those are replaced by one ordered delivery domain per ControlSession,
 > immutable endpoint/route/control-channel context, semantic outcome accounting,
 > predecessor remote-close fencing, and RemoteEndpoint trust/recovery when
-> persistent state is ambiguous.
+> persistent state is unknown.
 
 ## Context
 
@@ -59,8 +59,8 @@ acknowledgement/accounting obligation, never one per original captured sample.
 Per-event fan-out would credit the aggregate movement N times and corrupt
 handoff position.
 
-ADR-0017 retains this semantic rule while moving it into one ordered semantic
-lane per ControlLease rather than preserving a pointer-only queue.
+ADR-0017 retains this semantic rule inside one ordered remote delivery domain
+per ControlSession rather than preserving a pointer-only queue.
 
 ### 2. Batch completion invariant
 
@@ -113,13 +113,13 @@ contract. In ADR-0017/#106:
 
 - the triggering non-droppable host transition that fails admission is not
   silently consumed; local return occurs synchronously;
-- confirmed held state belongs to the closing Control's outcome-based delivery
-  ledger;
+- confirmed held state belongs to the closing ControlSession's outcome-based
+  remote delivery ledger;
 - already-issued persistent transitions retain correlation/outcome ownership
   after local return;
-- terminal cleanup runs under the old routing context behind the predecessor
-  remote-close fence; and
-- cleanup failure/ambiguity does **not** become clean merely because local
+- terminal cleanup runs under the immutable old RemoteControlChannel before its
+  close barrier can complete; and
+- cleanup failure/unknown outcome does **not** become clean merely because local
   bookkeeping is cleared. The RemoteEndpoint becomes uncertain/non-control-capable
   until remote cleanliness is proved.
 
@@ -136,8 +136,8 @@ Historical #62 classification and retained interpretation:
 | move/scroll saturation | admission | local shed allowed only under explicit additive policy; no fabricated remote failure |
 | button/key persistent transition saturation | admission/safety | non-lossy fail-local; triggering persistent host event is not silently consumed |
 | delivered additive/persistent work | delivery | semantic success/ack according to the remote contract |
-| timeout / transport / malformed protocol | delivery | classify by event semantics and transport trust; persistent ambiguity is stronger than additive uncertainty |
-| stale old owner | lifecycle | reject structurally through lease/session ownership, not a replacement global generation |
+| timeout / transport / malformed protocol | delivery | classify by event semantics and transport trust; persistent unknown state is stronger than additive uncertainty |
+| stale old owner | lifecycle | reject structurally through immutable control-channel/route context, not a replacement global generation |
 
 The old `.cancelled` / `.failed` enum names and generation plumbing are not target
 architecture requirements.
@@ -150,8 +150,8 @@ capture path performs no transport I/O, actor wait, semaphore wait, or arbitrary
 callback while holding its tiny safety/admission lock.
 
 The old `stateLock` and pointer-only queue are implementation history. ADR-0017
-uses one bounded synchronous `InputIngress` per ControlLease and one ordered
-semantic delivery lane.
+uses one bounded synchronous host-admission boundary per ControlSession and one
+ordered remote delivery domain.
 
 ### 7. Watchdog semantics
 
@@ -251,5 +251,5 @@ physical evidence.
   timeout after the Leap implementation.
 - Introduction of additional additive input kinds (for example momentum/inertial
   scroll) — extend the semantic coalescing table rather than special-casing.
-- A measured reason to pipeline the stateful RemoteCommandLane, subject to the
+- A measured reason to pipeline stateful work inside the ordered remote delivery domain, subject to the
   ADR-0017 ordering/barrier proof obligations.
