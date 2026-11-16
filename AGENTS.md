@@ -19,7 +19,7 @@ Preserve validated product behavior, device/protocol facts, safety invariants, a
 
 ## Absolute prohibitions (Hard rules)
 
-1. **Never leave the pointer trapped** — intentional host confinement is allowed only while one valid active ControlSession host-control period owns the accepted #96 P0 boundary. It must always have an idempotent local release, watchdog, and emergency return; Session/Target/delivery/capability failure must fail toward local control without waiting for Android.
+1. **Never leave the pointer trapped** — intentional host confinement is allowed only while one valid active ControlSession host-control period owns the accepted #96 P0 boundary. It must always have an idempotent local release, watchdog, and emergency return; endpoint/route/delivery/capability failure must fail toward local control without waiting for Android.
 2. **No "verified complete" claim without on-device logs** — success cannot be claimed from emulator/local tests alone. Requires real-device ADB logs + screen confirmation for device-dependent behavior.
 3. **No hardcoded display ID 2** — display IDs differ per device/settings. The helper discovers all displays via `DisplayManager` and selection uses the target model.
 4. **No logging of keystrokes / clipboard / input payloads** — key codes, clipboard contents, and HID report payloads are never logged. In debugging, log metadata only (type, length, direction).
