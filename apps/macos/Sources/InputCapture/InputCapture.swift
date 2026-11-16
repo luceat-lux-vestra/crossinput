@@ -1,6 +1,5 @@
 import Foundation
 import CoreGraphics
-@preconcurrency import ApplicationServices
 import AppKit
 import Carbon.HIToolbox
 import InputDomain
@@ -345,19 +344,13 @@ public final class InputCapture: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    /// Installs the event tap and starts the capture run loop.
-    /// Returns false if the app lacks Accessibility permission.
-    /// When permission is missing, the system prompt is triggered once so the
-    /// user can grant it (the app should retry start() afterwards).
+    /// Installs the event taps and starts the capture run loops.
+    ///
+    /// Permission ownership lives in InputCapabilityController. This mechanism
+    /// never prompts for TCC access and never guesses why tap creation failed;
+    /// callers must preflight capabilities and classify a false result at the
+    /// capability/control boundary.
     public func start() -> Bool {
-        guard !AXIsProcessTrusted() else { return startTrusted() }
-        Diagnostics.log("start(): accessibility not granted; prompting")
-        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
-        return false
-    }
-
-    public func startTrusted() -> Bool {
         let existing = stateLock.withLock {
             (pointerTap, keyboardTap, emergencyTap)
         }
@@ -373,7 +366,7 @@ public final class InputCapture: @unchecked Sendable {
             // A timed-out/user-disabled tap can remain non-nil even when
             // re-enabling failed. Recreate the pair atomically rather than
             // accepting a half-live ownership topology.
-            Diagnostics.log("startTrusted(): stale/partial tap pair; recreating")
+            Diagnostics.log("start(): stale/partial tap pair; recreating")
             stop()
         }
 
