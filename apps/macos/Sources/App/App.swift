@@ -81,10 +81,6 @@ final class AppModel: ObservableObject {
     @Published var serial: String = ""
     @Published var lastSerial: String = ""
     @Published private(set) var inputCapabilities: InputCapabilitySnapshot
-    /// Once tap creation has failed with listen access missing, this process
-    /// has evidence that Input Monitoring is required on this Mac/runtime.
-    /// Keep that fact after the user grants it so a later revoke is fail-safe.
-    @Published private(set) var inputMonitoringRequired = false
     @Published private var inputControlIssue: InputControlIssue?
 
     /// Invalidates an in-flight connect/reconnect action when the user starts
@@ -100,7 +96,7 @@ final class AppModel: ObservableObject {
     var capture: InputCapture { handoffController.capture }
 
     init(inputCapabilityController: InputCapabilityController = InputCapabilityController(),
-         captureStart: (@MainActor () -> Bool)? = nil,
+         captureStart: (@MainActor () -> HostCaptureStartResult)? = nil,
          captureStop: (@MainActor () -> Void)? = nil) {
         self.inputCapabilityController = inputCapabilityController
         self.inputCapabilities = inputCapabilityController.snapshot
@@ -331,7 +327,7 @@ final class AppModel: ObservableObject {
     private func applyInputCapabilitySnapshot(_ snapshot: InputCapabilitySnapshot) {
         let previous = inputCapabilities
         let lostAccessibility = previous.accessibilityGranted && !snapshot.accessibilityGranted
-        let lostRequiredInputMonitoring = inputMonitoringRequired
+        let lostRequiredInputMonitoring = snapshot.inputMonitoringRequired
             && previous.inputMonitoringGranted
             && !snapshot.inputMonitoringGranted
         inputCapabilities = snapshot
@@ -363,13 +359,9 @@ final class AppModel: ObservableObject {
         switch result {
         case .enabled, .alreadyEnabled:
             inputControlIssue = nil
-            // Do not clear `inputMonitoringRequired`: if a prior failed tap
-            // proved that this environment requires it, the requirement must
-            // survive the subsequent grant so revocation can be detected.
         case .missingAccessibility:
             inputControlIssue = .missingAccessibility
         case .missingInputMonitoring:
-            inputMonitoringRequired = true
             inputControlIssue = .missingInputMonitoring
         case .captureUnavailable:
             inputControlIssue = .captureUnavailable
@@ -407,7 +399,7 @@ final class AppModel: ObservableObject {
 
     var inputMonitoringStatusText: String {
         if inputCapabilities.inputMonitoringGranted { return "Granted" }
-        return inputMonitoringRequired ? "Required" : "Not separately granted"
+        return inputCapabilities.inputMonitoringRequired ? "Required" : "Not separately granted"
     }
 
     var inputControlStatusText: String? {
@@ -540,7 +532,7 @@ private struct AppMenu: View {
                 Button("Open Accessibility Settings…") { model.openAccessibilitySettings() }
             }
             Text("Input Monitoring — \(model.inputMonitoringStatusText)")
-            if model.inputMonitoringRequired && !model.inputCapabilities.inputMonitoringGranted {
+            if model.inputCapabilities.inputMonitoringRequired && !model.inputCapabilities.inputMonitoringGranted {
                 Button("Grant Input Monitoring…") { model.requestInputMonitoring() }
             }
             if let inputControlStatus = model.inputControlStatusText {
