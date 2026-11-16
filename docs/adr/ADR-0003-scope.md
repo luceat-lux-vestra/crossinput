@@ -7,7 +7,7 @@
 > current, but ADR-0013 later made Android → macOS pointer/keyboard control an
 > explicit product non-goal unless a new product decision reopens it. The
 > reverse-direction mechanisms listed below are historical feasibility notes,
-> not current roadmap/extension commitments. ADR-0016 separately governs the
+> not current roadmap/extension commitments. ADR-0017 separately governs the
 > current internal ownership/concurrency architecture and does not reopen the
 > reverse direction.
 
@@ -18,7 +18,7 @@ The product's essence is an "input bridge". The primary direction (macOS input �
 ## Decision
 
 1. **macOS → Android one-way** is the supported input direction (both the DeX external display and the phone screen). **Retained and strengthened by ADR-0013.**
-2. **Mac pointer devices** — trackpad, wired mouse, wireless mouse — are captured through the host input mechanism without per-device configuration. The concrete host ownership/mechanism is subject to ADR-0016 rather than frozen by this historical ADR.
+2. **Mac pointer devices** — trackpad, wired mouse, wireless mouse — are captured through the host input mechanism without per-device configuration. The concrete host ownership/mechanism is subject to ADR-0017 rather than frozen by this historical ADR.
 3. ~~**Keyboard (mac → Android) is not in v1**~~ **Superseded by [ADR-0007](ADR-0007-keyboard-delivery.md)** (2026-08-05): keyboard delivery, macOS system-shortcut handling, and Korean 2-set input entered scope. ADR-0013 retains one-way macOS → Android keyboard input.
 4. The CXI message space was designed to permit additive message types. **This is a protocol-structure observation, not a current commitment to bidirectional input; ADR-0013 controls product direction.**
 5. Historical feasibility exploration for reverse direction identified possible mechanisms:
@@ -54,4 +54,4 @@ The product's essence is an "input bridge". The primary direction (macOS input �
 - (done) CXI extension: mac→Android keyboard message type defined and shipped (`KEY_EVENT`, ADR-0007, PR #23)
 
 These historical validations do not alter the current product authority in
-ADR-0013 or the Architecture Leap ownership contract in ADR-0016.
+ADR-0013 or the Architecture Leap ownership contract in ADR-0017.
