@@ -11,11 +11,11 @@ Transport: ADB subprocess stdin/stdout (app_process execution).
 > `KEY_EVENT` path is currently fire-and-forget at the protocol level: unlike
 > semantic pointer requests, the helper sends no correlated key-delivery result.
 > Helper/backend failure may therefore be observable only through metadata
-> diagnostics while the Session remains alive. Architecture Leap ADR-0016 found
-> that insufficient for persistent key-state ownership. Issue #141 owns an
-> additive v1 capability/result extension (or equivalent reviewed mechanism)
-> that must distinguish semantic certainty before the rebuilt delivery pipeline
-> is complete. This note documents the **current wire**; it does not implement or
+> diagnostics while the connection remains alive. Architecture Leap ADR-0017
+> treats that as insufficient for persistent key-state ownership. Issue #141
+> owns an additive v1 capability/result extension (or equivalent reviewed
+> mechanism) that must classify the backend commit boundary as `committed`,
+> `rejected`, or `unknown` before the rebuilt delivery pipeline is complete. This note documents the **current wire**; it does not implement or
 > reserve the final #141 encoding, and therefore changes no fixtures in this PR.
 
 ## Frame format
@@ -89,8 +89,10 @@ Every message is a single frame; all integers are **little-endian**:
 
 There is currently **no correlated keyboard-result message** in the implemented
 v1 table. #141 will define its additive capability/message semantics together
-with fixtures and both implementations; ADR-0016 requires semantic outcome
-classes equivalent to `applied`, proven `notApplied`, and `ambiguous`.
+with fixtures and both implementations; ADR-0017 requires persistent outcome
+semantics equivalent to `committed`, `rejected`, and `unknown`. These terms
+refer to the strongest reviewed backend commit point, not arbitrary application
+or UI consumption.
 
 `POINTER_RESULT.status` is `0=DELIVERED`, `1=FAILED`, or
 `2=PARTIALLY_DELIVERED`. For semantic pointer frames with a non-zero
@@ -138,9 +140,10 @@ covered by byte-exact unit tests.
 by the helper as a CXI v1 compatibility path for existing clients and fixtures.
 They are not removed, renamed, or negotiated as CXI v2 in the Architecture Leap.
 
-ADR-0016 adds ownership/ordering requirements around this existing wire. In
-particular, target selection is a helper-global route barrier; old-Control
-stateful work/cleanup must retire before a later route mutation. This does not
+ADR-0017 adds ownership/ordering requirements around this existing wire. In
+particular, target selection is a RemoteEndpoint-owned helper-global route
+barrier; work bound to an older immutable RemoteControlChannel/route revision
+must retire or be classified before a later route mutation. This does not
 change the v1 frame encoding by itself.
 
 ## display structure
@@ -193,9 +196,9 @@ Backend selection rules:
    (or is not available on the device), the helper can inject Android
    `KeyEvent`s through the internal InputManager path.
 3. Current helper teardown attempts to release owned keyboard state. That is
-   useful defense in depth, but ADR-0016/#107 require backend-specific cleanup
-   proof and #141 requires a normal per-transition semantic outcome; teardown
-   alone is not final delivery acknowledgement.
+   useful defense in depth, but ADR-0017/#107 require backend-specific cleanup
+   proof and #141 requires a normal per-transition commit outcome; teardown or
+   helper/connection replacement alone does not restore RemoteEndpoint trust.
 4. Under Architecture Leap #103, Android `KEYCODE_*` / `META_*` values remain a
    compatibility-wire/remote-adapter concern rather than a platform-neutral
    host/domain API.
@@ -309,7 +312,7 @@ sequenceDiagram
   required by the current application.
 - #141 is intended as an additive v1 safety extension. Its exact capability,
   message type(s), result encoding, fixtures, and compatibility behavior are not
-  defined by ADR-0016; they must be defined and reviewed together in #141 before
+  defined by ADR-0017; they must be defined and reviewed together in #141 before
   implementation is considered complete.
 
 ## Reference: leap-scrcpy protocol (research)

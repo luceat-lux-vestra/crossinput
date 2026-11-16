@@ -3,7 +3,7 @@
 > On-device verification protocol. Linked to AGENTS.md hard rule 2 (no verification claim without on-device logs).
 >
 > ADR-0012 is authoritative for verification levels, release-stability cycle
-> credit, and evidence-window reset policy. Architecture Leap #101 / ADR-0016
+> credit, and evidence-window reset policy. Architecture Leap #101 / ADR-0017
 > may replace the concrete implementation types named by historical procedures
 > below; verification follows affected behavior/responsibility, not obsolete
 > class names.
@@ -210,7 +210,7 @@ APK buildable (`scripts/build-android-helper.sh assembleDebug`).
 2. `scripts/deploy-helper.sh start` — build + push + launch `app_process` with FIFO stdin.
 3. `scripts/deploy-helper.sh hello` — expect HELLO_ACK (type 0x8001) in `dump` output.
 4. `scripts/deploy-helper.sh list` — expect DISPLAY_LIST (0x8002) containing the Desktop display.
-5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; current pre-Leap macOS selection publishes only after this response. The Leap retains the confirmation/barrier requirement through TargetLease rather than preserving that controller type.
+5. `scripts/deploy-helper.sh select <desktop-id>` — expect DISPLAY_CHANGED (0x8003) echo for that display; current pre-Leap macOS selection publishes only after this response. The Leap retains the confirmation/barrier requirement through RemoteEndpoint-owned route state and an immutable route revision rather than preserving that controller type.
 6. Send semantic `POINTER_MOVE_REL`, `POINTER_BUTTON`, and `POINTER_SCROLL` frames. Correlated pointer frames return `POINTER_RESULT` with status/accepted movement, without logging payloads. In the production DeX compositor-authority path, high-rate movement uses requestId `0` as a one-way lane so movement is not serialized on response RTT; buttons/scroll remain correlated ordering barriers. In `auto` mode the backend depends on the target: desktop-flagged sinks (DeX) are served by the system-routed UHID mouse so the visible sprite follows; non-desktop targets use explicit InputManager display targeting. On UHID failure the current dispatcher degrades to InputManager until the next `SELECT_DISPLAY`, which invalidates compositor authority and must fail local.
 7. The `create-hid.bin` and `hid-report.bin` fixtures remain a separate v1 compatibility check; they are not the normal Ampersand pointer path.
 8. `scripts/deploy-helper.sh dump` — inspect captured frames + helper stderr log (metadata only; hard rule 4).
@@ -237,7 +237,7 @@ Issue #57 acceptance (desktop-sink pointer routing):
   reports must reach the desktop.
 - Mid-session UHID failure: current behavior attempts held-button release before
   the virtual device closes and continues through InputManager. For Leap
-  implementation claims, ADR-0016/#107 additionally require proof that cleanup
+  implementation claims, ADR-0017/#107 additionally require proof that cleanup
   or recovery establishes trustworthy remote state; the historical best-effort
   behavior alone is not proof of cleanliness.
 
@@ -296,7 +296,7 @@ into PASS): visible pointer motion/appearance on the DeX screen, idle-fade
 reappearance, visible scroll direction (the attached screen-recording assists
 review but cursor composition is not machine-verifiable), and the complete
 macOS → Android → macOS edge handoff. Handoff-policy logic stays covered by
-automated macOS tests; exact test/type names may change under ADR-0016.
+automated macOS tests; exact test/type names may change under ADR-0017.
 
 PASS/HOLD rules: overall is `FAIL` if any automatable assertion failed;
 otherwise `AUTOMATED_PASS_PHYSICAL_VISUAL_PENDING` while any visual item
@@ -306,8 +306,8 @@ per AGENTS.md rule 2.
 ### Keyboard compatibility verification (ADR-0007 / current CXI v1)
 
 The following exercises the existing pre-Leap `KEY_EVENT` wire/backend behavior.
-It does **not** prove the ADR-0016/#141 correlated semantic-outcome contract;
-#141 requires its own exact-head positive, negative, ambiguous, timeout, late,
+It does **not** prove the ADR-0017/#141 correlated semantic-outcome contract;
+#141 requires its own exact-head committed, rejected, unknown, timeout, late,
 stale, and physical verification after implementation.
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
@@ -427,7 +427,7 @@ The following matrix records the verification obligations from the pre-Leap
 controller/pointer-backend split. It remains regression evidence and a source of
 behaviors the Leap must preserve/revalidate, but it does not freeze the old
 controller/type layout. New Leap PRs use their own issue-specific matrices plus
-ADR-0016/ADR-0012 obligations.
+ADR-0017/ADR-0012 obligations.
 
 | Area | Required checks | Evidence status |
 |---|---|---|

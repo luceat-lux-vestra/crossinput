@@ -1,6 +1,6 @@
 # ADR-0007: Keyboard Delivery (mac→Android, UHID + Virtual Injection)
 
-> Status: **accepted for product/backend evidence; Leap target outcome/ownership semantics superseded by ADR-0016 and #141**
+> Status: **accepted for product/backend evidence; Leap target outcome/ownership semantics superseded by ADR-0017 and #141**
 > Date: 2026-08-05
 > Supersedes: ADR-0003 decision 3 ("keyboard is not in v1, deferred post-v1")
 >
@@ -8,7 +8,7 @@
 > the established macOS → Android keyboard product behavior, UHID-primary /
 > InputManager-fallback backend evidence, shortcut suppression, Korean-input
 > validation, and the existing CXI v1 compatibility surface. It is **not** the
-> target architecture for keyboard ownership or delivery certainty. ADR-0016
+> target architecture for keyboard ownership or delivery certainty. ADR-0017
 > supersedes the pre-Leap host-domain Android-key semantics and fire-and-forget
 > failure model; #103 moves platform-neutral semantic input in front of the CXI
 > v1 adapter, and #141 requires an additive correlated semantic key outcome.
@@ -66,10 +66,10 @@ No CXI keyboard message existed before this work (only mouse `HID_REPORT` /
      must not abort the CXI session.
 
    **Pre-Leap implementation note:** the current helper may drop such a failed
-   event and report only metadata diagnostics. ADR-0016/#141 supersede that as a
+   event and report only metadata diagnostics. ADR-0017/#141 supersede that as a
    target delivery contract: persistent key transitions require correlated
-   semantic certainty (`applied`, proven `notApplied`, or `ambiguous`) and an
-   ambiguous result cannot seed a clean replacement Control/Session context.
+   semantic certainty (`committed`, `rejected`, or `unknown`) and an
+   unknown result cannot seed a clean replacement ControlSession/RemoteEndpoint context.
    The compatibility wire may continue to carry Android-shaped v1 data at the
    remote adapter boundary, but the host/domain API introduced by #103 must be
    platform-neutral.
@@ -106,7 +106,7 @@ architecture:
   assuming known key state; or
 - teardown cleanup as a substitute for per-transition semantic outcome.
 
-See ADR-0016, #103, #106, #107, and #141 for the replacement ownership,
+See ADR-0017, #103, #106, #107, and #141 for the replacement ownership,
 serialization, cleanup, and outcome contracts.
 
 ## Alternatives

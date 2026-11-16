@@ -1,6 +1,6 @@
 # ADR-0013: Rebaseline Product Scope as DeX-first, Android-capable
 
-> Status: **accepted for product scope; architecture-preservation statements superseded by Architecture Leap #101 / ADR-0016**
+> Status: **accepted for product scope; architecture-preservation statements superseded by Architecture Leap #101 / ADR-0017 (ADR-0016 is historical)**
 > Date: 2026-08-29
 > Supersedes: the product-positioning parts of ADR-0003 and ADR-0009
 >
@@ -11,7 +11,7 @@
 > then-current lifecycle/class boundaries should remain intact were constraints
 > on using **product repositioning alone** as a rewrite justification. They are
 > superseded for internal ownership/concurrency/migration strategy by #101 and
-> ADR-0016, which later documented concrete defects/change axes and explicitly
+> ADR-0017, which later documented concrete defects/change axes and explicitly
 > authorized broad internal replacement while preserving this product scope.
 
 ## Context
@@ -39,7 +39,7 @@ points do not become speculative frameworks.
 7. Clipboard is a separate bidirectional data-sharing capability: text is near-term; image and file transfer remain backlog work.
 8. ADB/app_process remains the current/default transport. Alternate local transports are an approved future extension point, not a current implementation commitment.
 9. CXI v1 remains production. CXI v2 remains a future semantic, capability-negotiated, target-normalized, backend-independent, and transport-independent protocol design that may include clipboard/data sharing.
-10. Product repositioning by itself does not justify speculative architecture or unrelated framework work. **Historical architecture-preservation implication superseded:** Architecture Leap #101 / ADR-0016 later established concrete ownership/concurrency change axes and authorizes broad internal redesign within this unchanged product scope.
+10. Product repositioning by itself does not justify speculative architecture or unrelated framework work. **Historical architecture-preservation implication superseded:** Architecture Leap #101 / ADR-0017 later established concrete ownership/concurrency change axes and authorizes broad internal redesign within this unchanged product scope.
 
 ## Architecture relationship
 
@@ -56,9 +56,9 @@ valid unless a later ADR explicitly supersedes them:
   hypothetical platforms or generic framework purity.
 
 Concrete pre-Leap class/module boundaries are **not** retained by this ADR after
-Architecture Leap. ADR-0016 is normative for SessionHandle, TargetLease,
-ControlLease, InputIngress, RemoteCommandLane, remote-close fencing, recovery
-cleanliness, and migration ownership.
+Architecture Leap. ADR-0017 is normative for RemoteEndpoint trust, RemoteRoute revision,
+ControlSession, immutable RemoteControlChannel, ordered remote delivery,
+persistent commit outcomes, and migration ownership.
 
 This ADR still supersedes ADR-0009 where that ADR positioned Samsung DeX as
 merely incidental to the product definition.
@@ -93,7 +93,7 @@ type model would remove current capability for naming purity.
 Rejected. Product repositioning alone was not evidence for a repository rewrite.
 Architecture Leap later reached a different implementation conclusion for a
 different reason: #101/#102 documented concrete ownership, lifecycle,
-concurrency, stale-work, blocking, and cleanup defects. ADR-0016 therefore
+concurrency, stale-work, blocking, and cleanup defects. ADR-0017 therefore
 supersedes the preservation-first implementation consequence without changing
 this ADR's product scope.
 
@@ -124,7 +124,7 @@ This is primarily a product/documentation decision, so validation is consistency
 
 - `docs/product.md`, `docs/architecture.md`, `docs/roadmap.md`, README, `AGENTS.md`, and `protocol/v2-design.md` must agree on direction, targets, clipboard scope, transport status, and CXI v2 status.
 - Documentation must match the implemented pointer policy: desktop sink candidates prefer system-routed UHID in AUTO mode; non-desktop targets use explicit-display InputManager routing.
-- Internal ownership/class boundaries follow ADR-0016 rather than the pre-Leap implementation described by older ADRs.
+- Internal ownership/class boundaries follow ADR-0017 rather than the pre-Leap implementation described by older ADRs.
 - CXI v1 remains the production/compatibility protocol; additive v1 safety extensions such as #141 require their own protocol docs/fixtures/implementation/evidence.
 - Device-dependent claims remain subject to `AGENTS.md` and `docs/testing.md`; this ADR does not convert unverified keyboard routing into a support claim.
 

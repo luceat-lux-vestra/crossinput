@@ -1,12 +1,12 @@
 # ADR-0011: Pointer Batch Admission and Delivery Semantics in InputSender
 
-**Status:** Accepted for backpressure/coalescing evidence; pre-Leap `InputSender` / split-queue / generation / cleanup ownership contract superseded by ADR-0016
+**Status:** Accepted for backpressure/coalescing evidence; pre-Leap `InputSender` / split-queue / generation / cleanup ownership contract superseded by ADR-0017
 **Date:** 2026-08-24
 **Issue:** #62
-**Related:** ADR-0007 (keyboard delivery), ADR-0009 (architecture rebaseline), ADR-0010 (UHID desktop pointer routing), ADR-0016 (Leap ownership/concurrency), docs/architecture.md
+**Related:** ADR-0007 (keyboard delivery), ADR-0009 (architecture rebaseline), ADR-0010 (UHID desktop pointer routing), ADR-0017 (Leap ownership/concurrency), docs/architecture.md
 
 > **Architecture Leap note (2026-09-13):** the measured/problem-solving results
-> in this ADR remain authoritative where ADR-0016 explicitly retains them:
+> in this ADR remain authoritative where ADR-0017 explicitly retains them:
 > bounded admission, O(1) adjacent additive coalescing, admission-vs-delivery
 > separation, non-lossy persistent button transitions, aggregate/payload-safe
 > diagnostics, and the fact that local additive saturation must not masquerade
@@ -14,10 +14,10 @@
 > historical. The final Leap architecture does **not** retain separate pointer
 > and keyboard queues, `InputSender` as the owner, raw generation-based stale
 > rejection, or "clear held tracking regardless of cleanup outcome" as proof of
-> clean remote state. Those are replaced by one semantic lane per ControlLease,
-> immutable Session/Target/Control ownership, semantic outcome accounting,
-> predecessor remote-close fencing, and Session recovery cleanliness when
-> persistent state is ambiguous.
+> clean remote state. Those are replaced by one ordered delivery domain per ControlSession,
+> immutable endpoint/route/control-channel context, semantic outcome accounting,
+> predecessor remote-close fencing, and RemoteEndpoint trust/recovery when
+> persistent state is unknown.
 
 ## Context
 
@@ -59,8 +59,8 @@ acknowledgement/accounting obligation, never one per original captured sample.
 Per-event fan-out would credit the aggregate movement N times and corrupt
 handoff position.
 
-ADR-0016 retains this semantic rule while moving it into one ordered semantic
-lane per ControlLease rather than preserving a pointer-only queue.
+ADR-0017 retains this semantic rule inside one ordered remote delivery domain
+per ControlSession rather than preserving a pointer-only queue.
 
 ### 2. Batch completion invariant
 
@@ -87,7 +87,7 @@ was never delivered, so it must not fabricate a transport failure or completion.
 
 **Delivery** produces outcomes only for admitted remote work. The pre-Leap
 `PointerAdmissionOutcome` / `PointerDeliveryResult` concrete APIs are historical;
-ADR-0016/#106 may replace them while preserving the domain separation.
+ADR-0017/#106 may replace them while preserving the domain separation.
 
 Invariant retained by the Leap: **local queue/ingress saturation must never imply
 `remoteUnavailable`.** Failure classification is event-class-specific.
@@ -109,18 +109,18 @@ The pre-Leap implementation responds through `ControlHandoffController` and
 - no retry loop that delays local return.
 
 **Leap supersession:** these implementation details are not the final ownership
-contract. In ADR-0016/#106:
+contract. In ADR-0017/#106:
 
 - the triggering non-droppable host transition that fails admission is not
   silently consumed; local return occurs synchronously;
-- confirmed held state belongs to the closing Control's outcome-based delivery
-  ledger;
+- confirmed held state belongs to the closing ControlSession's outcome-based
+  remote delivery ledger;
 - already-issued persistent transitions retain correlation/outcome ownership
   after local return;
-- terminal cleanup runs under the old routing context behind the predecessor
-  remote-close fence; and
-- cleanup failure/ambiguity does **not** become clean merely because local
-  bookkeeping is cleared. The Session enters recovery/non-control-capable state
+- terminal cleanup runs under the immutable old RemoteControlChannel before its
+  close barrier can complete; and
+- cleanup failure/unknown outcome does **not** become clean merely because local
+  bookkeeping is cleared. The RemoteEndpoint becomes uncertain/non-control-capable
   until remote cleanliness is proved.
 
 Local host control still never waits for cleanup.
@@ -136,8 +136,8 @@ Historical #62 classification and retained interpretation:
 | move/scroll saturation | admission | local shed allowed only under explicit additive policy; no fabricated remote failure |
 | button/key persistent transition saturation | admission/safety | non-lossy fail-local; triggering persistent host event is not silently consumed |
 | delivered additive/persistent work | delivery | semantic success/ack according to the remote contract |
-| timeout / transport / malformed protocol | delivery | classify by event semantics and transport trust; persistent ambiguity is stronger than additive uncertainty |
-| stale old owner | lifecycle | reject structurally through lease/session ownership, not a replacement global generation |
+| timeout / transport / malformed protocol | delivery | classify by event semantics and transport trust; persistent unknown state is stronger than additive uncertainty |
+| stale old owner | lifecycle | reject structurally through immutable control-channel/route context, not a replacement global generation |
 
 The old `.cancelled` / `.failed` enum names and generation plumbing are not target
 architecture requirements.
@@ -149,9 +149,9 @@ rewrite an adjacent tail, append/capacity check, and return immediately. The
 capture path performs no transport I/O, actor wait, semaphore wait, or arbitrary
 callback while holding its tiny safety/admission lock.
 
-The old `stateLock` and pointer-only queue are implementation history. ADR-0016
-uses one bounded synchronous `InputIngress` per ControlLease and one ordered
-semantic delivery lane.
+The old `stateLock` and pointer-only queue are implementation history. ADR-0017
+uses one bounded synchronous host-admission boundary per ControlSession and one
+ordered remote delivery domain.
 
 ### 7. Watchdog semantics
 
@@ -181,7 +181,7 @@ Retained:
 - payload-safe aggregate diagnostics; and
 - local return never waits indefinitely for remote cleanup.
 
-Superseded by ADR-0016/#105/#106/#107/#141:
+Superseded by ADR-0017/#105/#106/#107/#141:
 
 - `InputSender` as the architectural owner;
 - separate pointer and keyboard queues;
@@ -240,7 +240,7 @@ failures at that historical candidate and targeted physical #62 acceptance on
 SM-G977N DeX.
 
 Those results remain evidence for coalescing/backpressure semantics; they are not
-proof of ADR-0016's new ownership, remote-close, acquisition-linearization,
+proof of ADR-0017's new ownership, remote-close, acquisition-linearization,
 semantic-key-outcome, or recovery-fence contracts. Each implementation slice
 must supply its own exact-final-HEAD deterministic and, where device-dependent,
 physical evidence.
@@ -251,5 +251,5 @@ physical evidence.
   timeout after the Leap implementation.
 - Introduction of additional additive input kinds (for example momentum/inertial
   scroll) — extend the semantic coalescing table rather than special-casing.
-- A measured reason to pipeline the stateful RemoteCommandLane, subject to the
-  ADR-0016 ordering/barrier proof obligations.
+- A measured reason to pipeline stateful work inside the ordered remote delivery domain, subject to the
+  ADR-0017 ordering/barrier proof obligations.

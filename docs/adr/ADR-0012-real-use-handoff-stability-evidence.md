@@ -3,13 +3,13 @@
 **Status:** Accepted
 **Date:** 2026-08-25
 **Issue:** #64
-**Related:** AGENTS.md (Verification criteria), docs/testing.md (Verification levels), ADR-0009, ADR-0011, ADR-0016
+**Related:** AGENTS.md (Verification criteria), docs/testing.md (Verification levels), ADR-0009, ADR-0011, ADR-0017
 
 > **Architecture Leap note (2026-09-13):** this ADR remains the authority for
 > physical Level-3 evidence. Its reset rules are responsibility/behavior based,
 > not tied to pre-Leap class names. Historical names such as `InputCapture`,
 > `InputSender`, and `ControlHandoffController` identify the old implementation
-> of those responsibilities only. Replacing those classes under ADR-0016 does
+> of those responsibilities only. Replacing those classes under ADR-0017 does
 > not avoid an evidence-window reset when the production behavior that can affect
 > handoff/return safety changes.
 >
@@ -111,8 +111,8 @@ categories that survive architecture changes:
 - watchdog recovery;
 - bounded-admission / additive-coalescing pressure events;
 - cancelled/retired remote work caused by lifecycle closure/replacement;
-- held-input cleanup attempted/succeeded/failed/ambiguous; and
-- Session/remote-state recovery required because cleanliness cannot be proved.
+- held-input cleanup attempted/succeeded/failed/unknown; and
+- RemoteEndpoint trust/recovery required because cleanliness cannot be proved.
 
 Concrete diagnostic event names may change during the Leap, but the analyzer
 must preserve equivalent semantic classification.
@@ -244,7 +244,7 @@ change is proven behavior-neutral.
   (Verification levels, Physical handoff cycle definition).
 - Applied to PR #63: acceptance reduced to targeted #62 physical checks; the
   broader physical qualification remains a release-level gate.
-- ADR-0016 keeps this physical-evidence policy authoritative while replacing the
+- ADR-0017 keeps this physical-evidence policy authoritative while replacing the
   implementation ownership model.
 
 ## Revisit Conditions
