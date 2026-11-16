@@ -1,9 +1,17 @@
 # ADR-0016: Architecture Leap Ownership and Concurrency Model
 
-> Status: **proposed**
+> Status: **superseded by ADR-0017**
 > Date: 2026-09-13
 > Issue: #102
 > Epic: #101
+> Superseded: 2026-11-16 by ADR-0017 / #284
+>
+> **Historical architecture note:** the remainder of this ADR records the first
+> Architecture Leap ownership model and its rationale. It is no longer the
+> normative target architecture. ADR-0017 retains its validated safety/device
+> constraints while replacing the Session-scoped cleanliness model, mandatory
+> Session/Target/Control lease graph, handoff queue/sequence model, and delivery
+> outcome terminology.
 >
 > This ADR supersedes the **internal architecture-preservation, lifecycle, and
 > concurrency implementation contract** of ADR-0009. It does not supersede
