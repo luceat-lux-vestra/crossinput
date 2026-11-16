@@ -300,14 +300,7 @@ final class AppModel: ObservableObject {
         let snapshot = inputCapabilityController.refresh()
         // `onChange` only fires on a real transition, so keep the presentation
         // projection synchronized even when this is an explicit no-op refresh.
-        inputCapabilities = snapshot
-        if snapshot.inputMonitoringGranted,
-           inputControlIssue == .missingInputMonitoring {
-            inputControlIssue = nil
-        }
-        if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
-            inputControlIssue = nil
-        }
+        projectInputCapabilitySnapshot(snapshot)
         return snapshot
     }
 
@@ -330,15 +323,7 @@ final class AppModel: ObservableObject {
         let lostRequiredInputMonitoring = snapshot.inputMonitoringRequired
             && previous.inputMonitoringGranted
             && !snapshot.inputMonitoringGranted
-        inputCapabilities = snapshot
-
-        if snapshot.inputMonitoringGranted,
-           inputControlIssue == .missingInputMonitoring {
-            inputControlIssue = nil
-        }
-        if snapshot.accessibilityGranted, inputControlIssue == .missingAccessibility {
-            inputControlIssue = nil
-        }
+        projectInputCapabilitySnapshot(snapshot)
 
         if lostAccessibility {
             Diagnostics.log("input capability lost capability=accessibility action=local-return")
@@ -350,6 +335,21 @@ final class AppModel: ObservableObject {
             Diagnostics.log("input capability lost capability=input-monitoring action=local-return")
             inputControlIssue = .missingInputMonitoring
             handoffController.inputCapabilityLost()
+        }
+    }
+
+    private func projectInputCapabilitySnapshot(_ snapshot: InputCapabilitySnapshot) {
+        inputCapabilities = snapshot
+        switch snapshot.controlBlocker {
+        case .accessibility:
+            inputControlIssue = .missingAccessibility
+        case .inputMonitoring:
+            inputControlIssue = .missingInputMonitoring
+        case nil:
+            if inputControlIssue == .missingAccessibility
+                || inputControlIssue == .missingInputMonitoring {
+                inputControlIssue = nil
+            }
         }
     }
 
