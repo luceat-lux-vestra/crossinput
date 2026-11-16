@@ -1,6 +1,6 @@
 # ADR-0013: Rebaseline Product Scope as DeX-first, Android-capable
 
-> Status: **accepted for product scope; architecture-preservation statements superseded by Architecture Leap #101 / ADR-0017 (ADR-0017 is historical)**
+> Status: **accepted for product scope; architecture-preservation statements superseded by Architecture Leap #101 / ADR-0017 (ADR-0016 is historical)**
 > Date: 2026-08-29
 > Supersedes: the product-positioning parts of ADR-0003 and ADR-0009
 >
