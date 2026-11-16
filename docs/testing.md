@@ -307,7 +307,7 @@ per AGENTS.md rule 2.
 
 The following exercises the existing pre-Leap `KEY_EVENT` wire/backend behavior.
 It does **not** prove the ADR-0017/#141 correlated semantic-outcome contract;
-#141 requires its own exact-head positive, negative, ambiguous, timeout, late,
+#141 requires its own exact-head committed, rejected, unknown, timeout, late,
 stale, and physical verification after implementation.
 
 10. `scripts/deploy-helper.sh start` — helper log shows `Ampersand Keyboard` UHID device created; `adb shell "dumpsys input | grep -A2 'Ampersand Keyboard'"` shows `KEYBOARD | ALPHAKEY | EXTERNAL` classes.
