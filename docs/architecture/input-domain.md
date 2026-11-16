@@ -1,7 +1,7 @@
 # Semantic input boundary
 
 Issue: #103  
-Authority: ADR-0016 / #102
+Authority: ADR-0017 / #284; semantic boundary established by #103
 
 ## Purpose
 
@@ -60,7 +60,7 @@ CGEvent / macOS virtual key
 - `KeyTransition` — down / up;
 - `SemanticKeyEvent` — key + modifiers + transition + repeat count.
 
-The domain intentionally contains no Session/Target/Control mutable owner. Under ADR-0016 an event becomes ownership-bound when admitted through a Control-scoped `InputIngress`; #103 only establishes the semantic value boundary required by that later migration.
+The domain intentionally contains no endpoint/route/control mutable owner. Under ADR-0017 an event becomes ownership-bound when admitted to one active ControlSession and its immutable RemoteControlChannel; #103 establishes the semantic value boundary used by that runtime ownership.
 
 ## Compatibility contract
 
