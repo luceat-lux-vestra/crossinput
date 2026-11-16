@@ -1782,7 +1782,7 @@ public final class InputCapture: @unchecked Sendable {
         // Carbon event targets are serviced by the application's main event
         // loop. Registering from the dedicated CGEventTap thread can succeed
         // superficially while leaving the handler unreachable in production.
-        // Self-dispatch here keeps startTrusted() safe even if a future caller
+        // Self-dispatch here keeps start() safe even if a future caller
         // invokes it off-main.
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
