@@ -1,6 +1,6 @@
 # ADR-0017: Architecture Leap Midpoint Rebaseline
 
-> Status: **proposed**
+> Status: **accepted**
 > Date: 2026-11-16
 > Issue: #284
 > Parent Track: #114
