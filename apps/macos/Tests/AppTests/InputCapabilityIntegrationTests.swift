@@ -186,6 +186,42 @@ final class InputCapabilityIntegrationTests: XCTestCase {
         XCTAssertEqual(model.sessionState, .ready)
     }
 
+
+    func testCapabilityProjectionFallsThroughToRequiredMonitoringAfterAccessibilityRestores() {
+        let system = AppTestCapabilitySystem(accessibility: true, monitoring: false)
+        let capabilities = InputCapabilityController(system: system)
+        let captureState = AppTestCaptureState(canStart: false)
+        let model = AppModel(
+            inputCapabilityController: capabilities,
+            captureStart: { captureState.start() ? .started : .unavailable },
+            captureStop: { captureState.stop() }
+        )
+        model.sessionState = .ready
+        model.targetState = .selected(selectedTarget.id)
+
+        XCTAssertEqual(model.enable(), .missingInputMonitoring)
+        XCTAssertTrue(model.inputCapabilities.inputMonitoringRequired)
+
+        system.set(monitoring: true)
+        _ = capabilities.refresh()
+        captureState.setCanStart(true)
+        XCTAssertEqual(model.enable(), .enabled)
+
+        system.set(accessibility: false, monitoring: false)
+        _ = capabilities.refresh()
+        XCTAssertEqual(model.inputControlStatusText,
+                       "Accessibility is required for Edge Switch")
+
+        system.set(accessibility: true)
+        _ = capabilities.refresh()
+
+        XCTAssertEqual(model.sessionState, .ready)
+        XCTAssertEqual(model.controlState, .disabled)
+        XCTAssertEqual(model.inputControlStatusText,
+                       "Input Monitoring is required on this Mac configuration")
+        XCTAssertEqual(model.inputMonitoringStatusText, "Required")
+    }
+
     func testRuntimeAccessibilityLossDisablesControlButPreservesSession() {
         let (model, system, capabilities) = readyModel(accessibility: true, monitoring: false,
                                                        captureStarts: true)
