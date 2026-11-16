@@ -111,7 +111,7 @@ categories that survive architecture changes:
 - watchdog recovery;
 - bounded-admission / additive-coalescing pressure events;
 - cancelled/retired remote work caused by lifecycle closure/replacement;
-- held-input cleanup attempted/succeeded/failed/ambiguous; and
+- held-input cleanup attempted/succeeded/failed/unknown; and
 - RemoteEndpoint trust/recovery required because cleanliness cannot be proved.
 
 Concrete diagnostic event names may change during the Leap, but the analyzer
