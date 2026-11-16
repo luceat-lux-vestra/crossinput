@@ -1,14 +1,13 @@
 # CrossInput Architecture
 
-> Status: **Architecture Leap midpoint rebaseline candidate from ADR-0017 / #284.**
+> Status: **Accepted Architecture Leap midpoint rebaseline from ADR-0017 / #284; implementation remains in progress.**
 >
 > [ADR-0017](adr/ADR-0017-architecture-leap-midpoint-rebaseline.md) is the
-> current candidate target ownership/concurrency model. ADR-0016 is retained as
+> normative target ownership/concurrency model. ADR-0016 is retained as
 > historical Architecture Leap rationale and is no longer normative.
 >
 > Runtime implementation is still in progress under [Epic #101](https://github.com/luceat-lux-vestra/crossinput/issues/101)
-> and Tracks #114–#118. Until ADR-0017 is accepted on merged `main`, do not
-> treat current class/module shape or ADR-0016-specific lease names as compatibility requirements.
+> and Tracks #114–#118. Current class/module shape and ADR-0016-specific lease names are not compatibility requirements.
 
 CrossInput is a **DeX-first, Android-capable macOS input bridge**. Samsung DeX is
 the primary use case while the built-in Android display remains a supported
