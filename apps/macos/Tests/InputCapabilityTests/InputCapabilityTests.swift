@@ -70,6 +70,52 @@ final class InputCapabilityTests: XCTestCase {
         ])
     }
 
+    func testCaptureFailureLearnsInputMonitoringRequirement() {
+        let system = FakeInputCapabilitySystem(accessibility: true, inputMonitoring: false)
+        let controller = InputCapabilityController(system: system)
+        var snapshots: [InputCapabilitySnapshot] = []
+        controller.onChange = { snapshots.append($0) }
+
+        XCTAssertNil(controller.snapshot.controlBlocker)
+        XCTAssertEqual(controller.classifyCaptureFailure(), .missingInputMonitoring)
+        XCTAssertTrue(controller.snapshot.inputMonitoringRequired)
+        XCTAssertEqual(controller.snapshot.controlBlocker, .inputMonitoring)
+        XCTAssertEqual(snapshots.last?.inputMonitoringRequired, true)
+    }
+
+    func testLearnedInputMonitoringRequirementSurvivesGrantAndRevoke() {
+        let system = FakeInputCapabilitySystem(accessibility: true, inputMonitoring: false)
+        let controller = InputCapabilityController(system: system)
+
+        XCTAssertEqual(controller.classifyCaptureFailure(), .missingInputMonitoring)
+
+        system.set(inputMonitoring: true)
+        XCTAssertEqual(controller.refresh().controlBlocker, nil)
+        XCTAssertTrue(controller.snapshot.inputMonitoringRequired)
+
+        system.set(inputMonitoring: false)
+        XCTAssertEqual(controller.refresh().controlBlocker, .inputMonitoring)
+        XCTAssertTrue(controller.snapshot.inputMonitoringRequired)
+    }
+
+    func testMissingAccessibilityDoesNotInferInputMonitoringRequirement() {
+        let system = FakeInputCapabilitySystem(accessibility: false, inputMonitoring: false)
+        let controller = InputCapabilityController(system: system)
+
+        XCTAssertEqual(controller.classifyCaptureFailure(), .missingAccessibility)
+        XCTAssertFalse(controller.snapshot.inputMonitoringRequired)
+        XCTAssertEqual(controller.snapshot.controlBlocker, .accessibility)
+    }
+
+    func testCaptureFailureWithBothCapabilitiesIsMechanismFailure() {
+        let system = FakeInputCapabilitySystem(accessibility: true, inputMonitoring: true)
+        let controller = InputCapabilityController(system: system)
+
+        XCTAssertEqual(controller.classifyCaptureFailure(), .captureUnavailable)
+        XCTAssertFalse(controller.snapshot.inputMonitoringRequired)
+        XCTAssertNil(controller.snapshot.controlBlocker)
+    }
+
     func testAccessibilityRequestIsExplicitAndIdempotentAfterGrant() {
         let system = FakeInputCapabilitySystem(accessibility: false, inputMonitoring: true)
         let controller = InputCapabilityController(system: system)
