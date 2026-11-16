@@ -73,8 +73,10 @@ final class InputCapabilityIntegrationTests: XCTestCase {
     ) -> (AppModel, AppTestCapabilitySystem, InputCapabilityController) {
         let system = AppTestCapabilitySystem(accessibility: accessibility, monitoring: monitoring)
         let capabilities = InputCapabilityController(system: system)
-        let model = AppModel(inputCapabilityController: capabilities,
-                             captureStart: { captureStarts })
+        let model = AppModel(
+            inputCapabilityController: capabilities,
+            captureStart: { captureStarts ? .started : .unavailable }
+        )
         model.sessionState = .ready
         model.targetState = .selected(selectedTarget.id)
         return (model, system, capabilities)
@@ -98,7 +100,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
 
         XCTAssertEqual(model.enable(), .missingInputMonitoring)
         XCTAssertEqual(model.sessionState, .ready)
-        XCTAssertTrue(model.inputMonitoringRequired)
+        XCTAssertTrue(model.inputCapabilities.inputMonitoringRequired)
         XCTAssertEqual(model.inputMonitoringStatusText, "Required")
     }
 
@@ -117,7 +119,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
 
         XCTAssertEqual(model.enable(), .enabled)
         XCTAssertEqual(model.sessionState, .ready)
-        XCTAssertFalse(model.inputMonitoringRequired)
+        XCTAssertFalse(model.inputCapabilities.inputMonitoringRequired)
         XCTAssertEqual(model.inputMonitoringStatusText, "Not separately granted")
         XCTAssertNil(model.inputControlStatusText)
     }
@@ -128,7 +130,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
         let captureState = AppTestCaptureState(canStart: true)
         let model = AppModel(
             inputCapabilityController: capabilities,
-            captureStart: { captureState.start() },
+            captureStart: { captureState.start() ? .started : .unavailable },
             captureStop: { captureState.stop() }
         )
         model.sessionState = .ready
@@ -152,7 +154,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
         let captureState = AppTestCaptureState(canStart: false)
         let model = AppModel(
             inputCapabilityController: capabilities,
-            captureStart: { captureState.start() },
+            captureStart: { captureState.start() ? .started : .unavailable },
             captureStop: { captureState.stop() }
         )
         model.sessionState = .ready
@@ -160,7 +162,7 @@ final class InputCapabilityIntegrationTests: XCTestCase {
 
         XCTAssertEqual(model.enable(), .missingInputMonitoring)
         XCTAssertEqual(captureState.startCount, 1)
-        XCTAssertTrue(model.inputMonitoringRequired)
+        XCTAssertTrue(model.inputCapabilities.inputMonitoringRequired)
 
         system.set(monitoring: true)
         _ = capabilities.refresh()
