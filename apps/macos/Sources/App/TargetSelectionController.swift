@@ -144,6 +144,14 @@ final class TargetSelectionController {
                     throw SelectionError.stale
                 }
             }
+            if frame.type == .fatalError {
+                // A fatal target-selection response means the helper/session
+                // can no longer support the previously published target.
+                // Reset advances the selection token, so the catch path below
+                // cannot restore stale target A after target B failed fatally.
+                reset()
+                throw SelectionError.rejected
+            }
             guard frame.type == .displayChanged else {
                 throw SelectionError.rejected
             }

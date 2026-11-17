@@ -32,6 +32,36 @@ final class TargetSelectionControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .available)
     }
 
+    func testFatalSelectionResponseInvalidatesExistingTarget() async throws {
+        let reference = SessionReference()
+        let phoneID = phone.id
+        let controller = TargetSelectionController(
+            session: reference,
+            selectRequest: { id in
+                if id == phoneID {
+                    return CxiFrame(
+                        type: .displayChanged,
+                        requestId: 1,
+                        payload: Self.displayPayload(for: id)
+                    )
+                }
+                return CxiFrame(type: .fatalError, requestId: 2)
+            }
+        )
+        controller.applySnapshot([phone, dex])
+        try await controller.select(phone)
+        XCTAssertEqual(controller.selectedTarget?.id, phone.id)
+
+        do {
+            try await controller.select(dex)
+            XCTFail("expected fatal selection rejection")
+        } catch {}
+
+        XCTAssertNil(controller.selectedTarget)
+        XCTAssertTrue(controller.targets.isEmpty)
+        XCTAssertEqual(controller.state, .unavailable)
+    }
+
     func testTargetRemovalInvalidatesPendingSelection() async throws {
         let reference = SessionReference()
         let controller = TargetSelectionController(session: reference,
