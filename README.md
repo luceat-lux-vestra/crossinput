@@ -1,5 +1,7 @@
 # Ampersand
 
+[![GitHub Stars](https://img.shields.io/github/stars/luceat-lux-vestra/crossinput?style=flat&label=Stars)](https://www.star-history.com/?repos=luceat-lux-vestra%2Fcrossinput&type=date)
+
 **A DeX-first macOS-to-Android input bridge.**
 
 Ampersand captures pointer and keyboard input on macOS and hands control to a selected Android display when the pointer crosses a configured screen edge. Its primary use case is Samsung DeX: use a Galaxy device as a desktop target while keeping keyboard and pointer control on the Mac.
