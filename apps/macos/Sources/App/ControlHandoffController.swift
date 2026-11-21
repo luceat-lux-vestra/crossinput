@@ -13,6 +13,11 @@ enum ControlEnableResult: Equatable {
     case captureUnavailable
 }
 
+enum HostCaptureStartResult: Equatable {
+    case started
+    case unavailable
+}
+
 final class HostPointerLeaseSlot: @unchecked Sendable {
     private struct Entry {
         let lease: any HostPointerOwnershipLease
@@ -431,7 +436,7 @@ final class ControlHandoffController: @unchecked Sendable {
     private let sender: InputSender
     private let boundaryWatch: any BoundaryWatchServicing
     private let capabilityController: InputCapabilityController
-    private let captureStart: @MainActor () -> Bool
+    private let captureStart: @MainActor () -> HostCaptureStartResult
     private let captureStop: @MainActor () -> Void
     private let hostPointerBackend: (any HostPointerOwnershipBackend)?
     private let remoteCursorPresenter: any RemoteCursorPresenting
@@ -469,7 +474,7 @@ final class ControlHandoffController: @unchecked Sendable {
         capture: InputCapture = InputCapture(),
         switchMachine: EdgeSwitchStateMachine = EdgeSwitchStateMachine(),
         capabilityController: InputCapabilityController = InputCapabilityController(),
-        captureStart: (@MainActor () -> Bool)? = nil,
+        captureStart: (@MainActor () -> HostCaptureStartResult)? = nil,
         captureStop: (@MainActor () -> Void)? = nil,
         hostPointerBackend: (any HostPointerOwnershipBackend)? = nil,
         remoteCursorPresenter: any RemoteCursorPresenting =
@@ -481,7 +486,9 @@ final class ControlHandoffController: @unchecked Sendable {
         self.capture = capture
         self.switchMachine = switchMachine
         self.capabilityController = capabilityController
-        self.captureStart = captureStart ?? { capture.startTrusted() }
+        self.captureStart = captureStart ?? {
+            capture.start() ? .started : .unavailable
+        }
         self.captureStop = captureStop ?? { capture.stop() }
         self.hostPointerBackend = hostPointerBackend
         self.remoteCursorPresenter = remoteCursorPresenter
@@ -600,17 +607,27 @@ final class ControlHandoffController: @unchecked Sendable {
     func enable() -> ControlEnableResult {
         guard !isEdgeSwitchEnabled else { return .alreadyEnabled }
 
-        let capabilities = capabilityController.refresh()
-        guard capabilities.accessibilityGranted else {
+        switch capabilityController.refresh().controlBlocker {
+        case .accessibility:
             return .missingAccessibility
+        case .inputMonitoring:
+            return .missingInputMonitoring
+        case nil:
+            break
         }
 
-        guard captureStart() else {
-            let afterFailure = capabilityController.refresh()
-            if !afterFailure.inputMonitoringGranted {
+        switch captureStart() {
+        case .started:
+            break
+        case .unavailable:
+            switch capabilityController.classifyCaptureFailure() {
+            case .missingAccessibility:
+                return .missingAccessibility
+            case .missingInputMonitoring:
                 return .missingInputMonitoring
+            case .captureUnavailable:
+                return .captureUnavailable
             }
-            return .captureUnavailable
         }
 
         lifecycleLock.withLock {
