@@ -116,7 +116,19 @@
     "negative_control": {
       "actionlint": "runner-label",
       "zizmor": "unpinned-uses"
-    }
+    },
+    "expected_failure_steps": [
+      {
+        "workflow": "ci.yml",
+        "job": "scripts",
+        "id": "zizmor-negative",
+        "action": "zizmorcore/zizmor-action",
+        "verifier_name": "Verify zizmor negative-control finding",
+        "outcome_env": "ZIZMOR_NEGATIVE_OUTCOME",
+        "expected_outcome": "failure",
+        "expected_finding": "unpinned-uses"
+      }
+    ]
   },
   "repository_full_name": "luceat-lux-vestra/crossinput",
   "codeql_coverage": {

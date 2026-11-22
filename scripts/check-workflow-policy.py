@@ -498,6 +498,90 @@ def check_android_seed_contract(workflows, findings):
                      "trusted-main producer must be the only explicit Android writer")
 
 
+def expected_failure_step_guarded(filename, job_id, steps, index, policy, findings):
+    step = steps[index]
+    step_id = step.get("id")
+    contracts = (
+        (policy.get("workflow_static_analysis") or {}).get("expected_failure_steps")
+        or []
+    )
+    contract = next(
+        (
+            item
+            for item in contracts
+            if item.get("workflow") == filename
+            and item.get("job") == job_id
+            and item.get("id") == step_id
+        ),
+        None,
+    )
+    if contract is None:
+        return False
+
+    where = f"{filename}:{job_id}:{step_id}"
+    uses = str(step.get("uses") or "")
+    action = str(contract.get("action") or "")
+    if not action or not uses.startswith(f"{action}@"):
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            f"expected-failure action {uses!r} does not match policy action {action!r}",
+        )
+        return False
+
+    verifier_index = index + 1
+    if verifier_index >= len(steps) or not isinstance(steps[verifier_index], dict):
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            "expected-failure step must be followed immediately by its verifier",
+        )
+        return False
+
+    verifier = steps[verifier_index]
+    verifier_name = str(contract.get("verifier_name") or "")
+    if verifier.get("name") != verifier_name:
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            f"next step {verifier.get('name')!r} is not verifier {verifier_name!r}",
+        )
+        return False
+    if verifier.get("continue-on-error"):
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            "expected-failure verifier cannot continue on error",
+        )
+        return False
+
+    outcome_env = str(contract.get("outcome_env") or "")
+    expected_outcome = str(contract.get("expected_outcome") or "")
+    expected_finding = str(contract.get("expected_finding") or "")
+    verifier_env = verifier.get("env") or {}
+    expected_expression = "${{ steps." + step_id + ".outcome }}"
+    if verifier_env.get(outcome_env) != expected_expression:
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            f"verifier env {outcome_env!r} must read {expected_expression!r}",
+        )
+        return False
+
+    verifier_run = str(verifier.get("run") or "")
+    expected_outcome_test = f'if [ "${outcome_env}" != "{expected_outcome}" ]; then'
+    required_tokens = (expected_outcome_test, expected_finding)
+    missing = [token for token in required_tokens if token not in verifier_run]
+    if missing:
+        findings.add(
+            "EXPECTED_FAILURE_CONTRACT",
+            where,
+            f"verifier is missing required contract token(s): {missing!r}",
+        )
+        return False
+
+    return True
+
 def check_required_gates(workflows, policy, findings):
     """Contexts <-> producing jobs, and no way for a producer to disappear."""
     seen = set()
@@ -560,8 +644,18 @@ def check_required_gates(workflows, policy, findings):
                 if component_job.get("continue-on-error"):
                     findings.add("GATE_FAIL_OPEN", component_where,
                                  "Merge Gate component sets continue-on-error")
-                for step in steps_of(component_job):
+                component_steps = steps_of(component_job)
+                for index, step in enumerate(component_steps):
                     if isinstance(step, dict) and step.get("continue-on-error"):
+                        if expected_failure_step_guarded(
+                            filename,
+                            component_id,
+                            component_steps,
+                            index,
+                            policy,
+                            findings,
+                        ):
+                            continue
                         findings.add(
                             "GATE_FAIL_OPEN",
                             component_where,
@@ -614,8 +708,18 @@ def check_required_gates(workflows, policy, findings):
                          f"(a skipped required check never turns red)")
         if job.get("continue-on-error"):
             findings.add("GATE_FAIL_OPEN", where, "required job sets continue-on-error")
-        for step in steps_of(job):
+        required_steps = steps_of(job)
+        for index, step in enumerate(required_steps):
             if isinstance(step, dict) and step.get("continue-on-error"):
+                if expected_failure_step_guarded(
+                    filename,
+                    job_id,
+                    required_steps,
+                    index,
+                    policy,
+                    findings,
+                ):
+                    continue
                 findings.add("GATE_FAIL_OPEN", where,
                              f"step {step.get('name') or step.get('uses')!r} sets continue-on-error")
 

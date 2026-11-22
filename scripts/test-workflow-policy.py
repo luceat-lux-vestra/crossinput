@@ -224,6 +224,23 @@ def main():
                            "    continue-on-error: true\n"),
          "GATE_FAIL_OPEN")
 
+    case("continue-on-error on ordinary required step",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             '      - name: "Repository hardening policy (workflows vs .github/hardening-policy.json)"\n',
+             '      - name: "Repository hardening policy (workflows vs .github/hardening-policy.json)"\n'
+             '        continue-on-error: true\n',
+             1),
+         "GATE_FAIL_OPEN")
+
+    case("zizmor expected-failure verifier must check outcome",
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             '          if [ "$ZIZMOR_NEGATIVE_OUTCOME" != "failure" ]; then\n',
+             '          if false; then\n',
+             1),
+         "EXPECTED_FAILURE_CONTRACT")
+
     case("docs-only allowlist cannot include workflow files",
          lambda root: edit(
              workflow(root, "ci.yml"),
