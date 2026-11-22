@@ -32,6 +32,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Setup current Go stable for managed actionlint
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: 'stable'
+          check-latest: true
+          cache: false
+
+      - name: Build managed actionlint
+        run: |
+          set -euo pipefail
+          (
+            cd .github/tools/actionlint
+            go build -mod=mod -o "$GITHUB_WORKSPACE/actionlint" github.com/rhysd/actionlint/cmd/actionlint
+          )
+          ./actionlint --version
 
       - name: Static and live hardening audit
         id: audit
@@ -49,8 +64,48 @@ jobs:
             | tee hardening-audit.txt
         continue-on-error: true
 
-      - name: GitHub Actions static security
+      - name: Run managed actionlint and prepare security negative control
+        id: workflow-security-actionlint
         run: bash scripts/check-actions-security.sh
+
+      - name: Run managed zizmor
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          inputs: .github/workflows
+          persona: regular
+          online-audits: false
+          advanced-security: false
+          annotations: false
+          color: false
+
+      - name: Prove zizmor negative control
+        id: zizmor-negative
+        continue-on-error: true
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          inputs: ${{ steps.workflow-security-actionlint.outputs.zizmor_fixture }}
+          persona: regular
+          online-audits: false
+          advanced-security: false
+          annotations: false
+          color: false
+
+      - name: Verify zizmor negative-control finding
+        env:
+          ZIZMOR_NEGATIVE_OUTCOME: ${{ steps.zizmor-negative.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$ZIZMOR_NEGATIVE_OUTCOME" != "failure" ]; then
+            echo "::error::zizmor negative control unexpectedly passed."
+            exit 1
+          fi
+          if ! grep -q 'unpinned-uses' "$RUNNER_TEMP/zizmor"; then
+            echo "::error::zizmor failed without reporting the expected unpinned-uses finding."
+            cat "$RUNNER_TEMP/zizmor" >&2 || true
+            exit 1
+          fi
+          echo "workflow static analysis: PASS"
 
       - name: Issue metadata semantics
         run: node --test scripts/issue-metadata.test.cjs

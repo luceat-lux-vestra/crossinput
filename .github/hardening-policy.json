@@ -103,10 +103,20 @@
     "required_in_context": "Evidence & Tooling Validation",
     "script": "scripts/check-actions-security.sh",
     "tools": {
-      "actionlint": "1.7.12",
-      "zizmor": "1.30.0"
+      "actionlint": {
+        "strategy": "DEPENDABOT_GOMOD",
+        "manifest": ".github/tools/actionlint/go.mod"
+      },
+      "zizmor": {
+        "strategy": "OFFICIAL_GITHUB_ACTION",
+        "action": "zizmorcore/zizmor-action",
+        "updater": "DEPENDABOT_GITHUB_ACTIONS"
+      }
     },
-    "negative_control": true
+    "negative_control": {
+      "actionlint": "runner-label",
+      "zizmor": "unpinned-uses"
+    }
   },
   "repository_full_name": "luceat-lux-vestra/crossinput",
   "codeql_coverage": {
