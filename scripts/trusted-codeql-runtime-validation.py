@@ -27,6 +27,7 @@ _verdict = load_module("crossinput_pr_runtime_verdict", "release_codeql_verdict.
 _gate = load_module("crossinput_pr_runtime_gate", "release_codeql_gate.py")
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+JAVA_COMPATIBILITY_MAJOR = "25"
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$", re.MULTILINE)
 RELEVANT_PATHS = frozenset({
     ".github/hardening-policy.json",
@@ -66,7 +67,8 @@ def require_supported_codeql_patch(entry: dict) -> None:
         r")@[0-9a-f]{40}(?:\\s+#.*)?\\Z"
     )
     java_version_line = re.compile(
-        r"java-version:\\s*['\\\"](25(?:\\.[0-9]+(?:\\.[0-9]+)?)?)['\\\"]\\Z"
+        rf"java-version:\\s*['\\\"]({re.escape(JAVA_COMPATIBILITY_MAJOR)}"
+        rf"(?:\\.[0-9]+(?:\\.[0-9]+)?)?)['\\\"]\\Z"
     )
     check_latest_line = re.compile(r"check-latest:\\s*true\\Z")
 
@@ -116,8 +118,8 @@ def require_supported_codeql_patch(entry: dict) -> None:
         require(
             len(removed_java) == 1
             and len(added_java) == 1
-            and removed_java[0].startswith("25.")
-            and added_java[0] == "25"
+            and removed_java[0].startswith(f"{JAVA_COMPATIBILITY_MAJOR}.")
+            and added_java[0] == JAVA_COMPATIBILITY_MAJOR
             and added_check_latest == 1,
             "CodeQL Java maintenance change must be exactly patch-pin -> "
             "Java 25 channel plus check-latest",
@@ -330,6 +332,8 @@ def self_test() -> None:
         "status": "modified",
     }]], sha)
 
+    legacy_java_patch = f"{JAVA_COMPATIBILITY_MAJOR}.0.0"
+
     pin_patch = (
         "@@ -1,4 +1,4 @@\n"
         "-        uses: github/codeql-action/init@" + "b" * 40 + " # old\n"
@@ -349,8 +353,8 @@ def self_test() -> None:
 
     runtime_patch = (
         "@@ -1,3 +1,4 @@\n"
-        "-          java-version: '25.0.4'\n"
-        "+          java-version: '25'\n"
+        f"-          java-version: '{legacy_java_patch}'\n"
+        f"+          java-version: '{JAVA_COMPATIBILITY_MAJOR}'\n"
         "+          check-latest: true"
     )
     assert classify(pull, [[{
@@ -383,7 +387,7 @@ def self_test() -> None:
             "status": "modified",
             "patch": (
                 "@@ -1,3 +1,4 @@\n"
-                "-          java-version: '25.0.4'\n"
+                f"-          java-version: '{legacy_java_patch}'\n"
                 "+          java-version: '26'\n"
                 "+          check-latest: true"
             ),
@@ -393,8 +397,8 @@ def self_test() -> None:
             "status": "modified",
             "patch": (
                 "@@ -1,3 +1,4 @@\n"
-                "-          java-version: '25.0.4'\n"
-                "+          java-version: '25'\n"
+                f"-          java-version: '{legacy_java_patch}'\n"
+                f"+          java-version: '{JAVA_COMPATIBILITY_MAJOR}'\n"
                 "+          cache-read-only: false"
             ),
         }]], sha),
