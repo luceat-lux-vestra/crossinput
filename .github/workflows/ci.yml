@@ -248,7 +248,8 @@ jobs:
         if: ${{ steps.scope.outputs.docs_only != 'true' }}
         with:
           distribution: temurin
-          java-version: '25.0.4'
+          java-version: '25'
+          check-latest: true
           cache: gradle
           cache-jdk: true
           # Only trusted main seed/scheduled CodeQL writes cache entries.
@@ -327,7 +328,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         with:
-          node-version: "26.9.0"
+          node-version: "lts/*"
+          check-latest: true
       - name: Protocol Document Fixture Validation
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: |
@@ -578,7 +580,8 @@ jobs:
         if: ${{ steps.dependency-scope.outputs.required == 'true' }}
         with:
           distribution: temurin
-          java-version: "25.0.4"
+          java-version: "25"
+          check-latest: true
 
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         if: ${{ steps.dependency-scope.outputs.required == 'true' }}

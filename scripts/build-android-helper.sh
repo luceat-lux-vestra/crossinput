@@ -24,7 +24,7 @@ JAVA_VERSION="$("$JAVA_HOME/bin/java" -version 2>&1 | awk -F'"' '/version/ {prin
 JAVA_MAJOR="${JAVA_VERSION%%.*}"
 if [ "$JAVA_MAJOR" != "25" ]; then
   echo "ERROR: Java 25 is required, found $JAVA_VERSION at $JAVA_HOME" >&2
-  echo "  with SDKMAN: sdk install java 25.0.4-tem && sdk use java 25.0.4-tem" >&2
+  echo "  with SDKMAN: choose the current Temurin 25 identifier from 'sdk list java'" >&2
   exit 1
 fi
 
