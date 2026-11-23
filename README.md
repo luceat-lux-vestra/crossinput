@@ -114,9 +114,9 @@ Development environment:
 | Component | Version |
 |---|---|
 | Xcode | 27 for release/CI packaging; Swift 6 |
-| JDK | 25 LTS (Temurin 25.0.4.1) |
+| JDK | 25 LTS (latest Temurin 25 patch) |
 | Kotlin | 2.4.20 |
-| Node.js | 26.9.0 (tooling) |
+| Node.js | 26 LTS (latest 26.x patch; tooling only) |
 | Android SDK | platforms;android-37.0, build-tools;37.0.0 |
 | adb | 37.x |
 

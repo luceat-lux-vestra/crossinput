@@ -27,7 +27,7 @@ fail() {
 # --- tool checks ------------------------------------------------------------
 command -v adb >/dev/null || fail "adb not found in PATH (platform-tools)"
 command -v xcodebuild >/dev/null || fail "xcodebuild not found (Xcode required)"
-command -v node >/dev/null || fail "node not found in PATH (Node.js 26.9.0 required)"
+command -v node >/dev/null || fail "node not found in PATH (Node.js 26 LTS required)"
 [ -d "$ANDROID_SDK" ] || fail "Android SDK not found: $ANDROID_SDK (set ANDROID_HOME)"
 [ -f "$ANDROID_SDK/platforms/android-37.0/android.jar" ] || fail "Android 17 SDK platform missing: $ANDROID_SDK/platforms/android-37.0/android.jar"
 [ -d "$ANDROID_SDK/build-tools/37.0.0" ] || fail "Android build-tools 37.0.0 missing: $ANDROID_SDK/build-tools/37.0.0"

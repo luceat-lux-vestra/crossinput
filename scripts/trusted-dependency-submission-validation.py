@@ -165,9 +165,11 @@ def check_contract(production: str, pr_workflow: str) -> None:
             "PR dependency adapter no longer validates wrappers")
     require("distribution: temurin" in production and "distribution: temurin" in job,
             "Java distribution drifted between production and PR adapter")
-    require('java-version: "25.0.4"' in production
-            and 'java-version: "25.0.4"' in job,
-            "Java version drifted between production and PR adapter")
+    require('java-version: "25"' in production
+            and 'java-version: "25"' in job,
+            "Java compatibility line drifted between production and PR adapter")
+    require("check-latest: true" in production and "check-latest: true" in job,
+            "Java maintenance channel no longer follows the latest Java 25 patch")
     require(
         'sdkmanager --install "platforms;android-37.0" "build-tools;37.0.0"'
         in production
@@ -322,7 +324,8 @@ def self_test() -> None:
         "        with:\n          persist-credentials: false\n"
         "      - uses: actions/setup-java@" + "2" * 40 + "\n"
         "        with:\n          distribution: temurin\n"
-        "          java-version: \"25.0.4\"\n"
+        "          java-version: \"25\"\n"
+        "          check-latest: true\n"
         "      - uses: android-actions/setup-android@" + "3" * 40 + "\n"
         "      - name: Install Android 17 SDK\n        run: |\n"
         "          sdkmanager --install \"platforms;android-37.0\" "
@@ -343,7 +346,8 @@ def self_test() -> None:
         "          persist-credentials: false\n"
         "      - uses: actions/setup-java@" + "2" * 40 + "\n"
         "        with:\n          distribution: temurin\n"
-        "          java-version: \"25.0.4\"\n"
+        "          java-version: \"25\"\n"
+        "          check-latest: true\n"
         "      - uses: android-actions/setup-android@" + "3" * 40 + "\n"
         "      - name: Install Android 17 SDK\n        run: |\n"
         "          sdkmanager --install \"platforms;android-37.0\" "
