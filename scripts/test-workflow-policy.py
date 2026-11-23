@@ -131,6 +131,42 @@ def policy_edit(root, mutate):
         json.dump(policy, handle, indent=2)
 
 
+def linux_arm64_runner(root):
+    path = os.path.join(root, ".github", "hardening-policy.json")
+    with open(path, "r", encoding="utf-8") as handle:
+        value = (json.load(handle).get("runner_policy") or {}).get("linux_arm64")
+    if not isinstance(value, str) or not value:
+        raise AssertionError("runner_policy.linux_arm64 is missing")
+    return value
+
+
+def alternate_linux_arm64_runner(label):
+    match = re.fullmatch(r"ubuntu-([0-9]+)[.]([0-9]+)-arm", label)
+    if match is None:
+        raise AssertionError(f"invalid canonical Linux ARM runner: {label!r}")
+    return f"ubuntu-{int(match.group(1)) + 1}.{match.group(2)}-arm"
+
+
+def drift_linux_arm64_runner(root):
+    target = linux_arm64_runner(root)
+    edit(
+        workflow(root, "ci.yml"),
+        f"    runs-on: {target}\n",
+        f"    runs-on: {alternate_linux_arm64_runner(target)}\n",
+        1,
+    )
+
+
+def remove_actionlint_runner_override(root):
+    target = linux_arm64_runner(root)
+    edit(
+        os.path.join(root, ".github", "actionlint.yaml"),
+        f"    - {target}\n",
+        "",
+        1,
+    )
+
+
 def main():
     baseline()
 
@@ -329,10 +365,19 @@ def main():
          "TRUST_PERSISTED_CREDENTIALS")
 
     case("job without timeout",
-         lambda root: edit(workflow(root, "ci.yml"),
-                           "    runs-on: ubuntu-24.04-arm\n    timeout-minutes: 10\n",
-                           "    runs-on: ubuntu-24.04-arm\n"),
+         lambda root: edit(
+             workflow(root, "ci.yml"),
+             f"    runs-on: {linux_arm64_runner(root)}\n    timeout-minutes: 10\n",
+             f"    runs-on: {linux_arm64_runner(root)}\n"),
          "HYGIENE_NO_TIMEOUT")
+
+    case("versioned Ubuntu ARM runner must match policy",
+         drift_linux_arm64_runner,
+         "RUNNER_POLICY")
+
+    case("actionlint runner catalog override must match policy",
+         remove_actionlint_runner_override,
+         "RUNNER_POLICY")
 
     # Automation referencing a label nothing guarantees exists.
     case("labeler references unmanaged label",
@@ -592,13 +637,14 @@ def main():
     case("CodeQL PR classifier job must stay retired",
          lambda root: edit(workflow(root, "codeql.yml"),
                            "jobs:\n  scan-guard:",
-                           "jobs:\n  scope:\n    runs-on: ubuntu-24.04-arm\n"
+                           f"jobs:\n  scope:\n    runs-on: {linux_arm64_runner(root)}\n"
                            "    steps:\n      - run: echo obsolete\n  scan-guard:"),
          "CODEQL_SCOPE_RETIRED")
 
     case("Swift CodeQL still requires macOS",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           "            os: macos-15\n", "            os: ubuntu-24.04-arm\n"),
+                           "            os: macos-15\n",
+                           f"            os: {linux_arm64_runner(root)}\n"),
          "CODEQL_FULL_MATRIX")
 
     case("Swift official autobuild cannot be skipped",

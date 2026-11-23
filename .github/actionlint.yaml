@@ -1,5 +1,6 @@
 self-hosted-runner:
-  # GitHub-hosted public-preview label supported by Actions but not yet known
-  # to the managed actionlint runner catalog. Remove once upstream recognizes it.
+  # GitHub-hosted labels supported by Actions but not yet known to the managed
+  # actionlint runner catalog. Remove each override once upstream recognizes it.
   labels:
     - xcode-27
+    - ubuntu-26.04-arm
