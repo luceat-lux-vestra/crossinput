@@ -61,16 +61,16 @@ def require_supported_codeql_patch(entry: dict) -> None:
             "CodeQL workflow change has no reviewable patch")
 
     action_line = re.compile(
-        r"uses:\\s*("
+        r"uses:\s*("
         r"github/codeql-action/(?:init|analyze|autobuild)"
         r"|actions/setup-java"
-        r")@[0-9a-f]{40}(?:\\s+#.*)?\\Z"
+        r")@[0-9a-f]{40}(?:\s+#.*)?\Z"
     )
     java_version_line = re.compile(
-        rf"java-version:\\s*['\\\"]({re.escape(JAVA_COMPATIBILITY_MAJOR)}"
-        rf"(?:\\.[0-9]+(?:\\.[0-9]+)?)?)['\\\"]\\Z"
+        rf"java-version:\s*['\"]({re.escape(JAVA_COMPATIBILITY_MAJOR)}"
+        rf"(?:\.[0-9]+(?:\.[0-9]+)?)?)['\"]\Z"
     )
-    check_latest_line = re.compile(r"check-latest:\\s*true\\Z")
+    check_latest_line = re.compile(r"check-latest:\s*true\Z")
 
     removed_actions = []
     added_actions = []
