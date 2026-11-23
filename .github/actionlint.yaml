@@ -1,5 +1,5 @@
 self-hosted-runner:
   # GitHub-hosted public-preview label supported by Actions but not yet known
-  # to the repository-pinned actionlint 1.7.12 runner catalog.
+  # to the managed actionlint runner catalog. Remove once upstream recognizes it.
   labels:
     - xcode-27

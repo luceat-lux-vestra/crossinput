@@ -364,6 +364,23 @@ jobs:
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         with:
           persist-credentials: false
+      - name: Setup current Go stable for managed actionlint
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: 'stable'
+          check-latest: true
+          cache: false
+
+      - name: Build managed actionlint
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        run: |
+          set -euo pipefail
+          (
+            cd .github/tools/actionlint
+            go build -mod=mod -o "$GITHUB_WORKSPACE/actionlint" github.com/rhysd/actionlint/cmd/actionlint
+          )
+          ./actionlint --version
       - name: "Repository hardening policy (workflows vs .github/hardening-policy.json)"
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         # Static, offline half of the drift audit: required-context producers,
@@ -387,9 +404,52 @@ jobs:
       - name: "Issue metadata semantics"
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: node --test scripts/issue-metadata.test.cjs
-      - name: "GitHub Actions static security"
+      - name: "Run managed actionlint and prepare security negative control"
+        id: workflow-security-actionlint
         if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
         run: bash scripts/check-actions-security.sh
+
+      - name: "Run managed zizmor"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          inputs: .github/workflows
+          persona: regular
+          online-audits: false
+          advanced-security: false
+          annotations: false
+          color: false
+
+      - name: "Prove zizmor negative control"
+        id: zizmor-negative
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        continue-on-error: true
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          inputs: ${{ steps.workflow-security-actionlint.outputs.zizmor_fixture }}
+          persona: regular
+          online-audits: false
+          advanced-security: false
+          annotations: false
+          color: false
+
+      - name: "Verify zizmor negative-control finding"
+        if: ${{ github.event_name != 'pull_request' || github.event.action != 'ready_for_review' || steps.fast-evidence.outputs.reuse != 'true' }}
+        env:
+          ZIZMOR_NEGATIVE_OUTCOME: ${{ steps.zizmor-negative.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$ZIZMOR_NEGATIVE_OUTCOME" != "failure" ]; then
+            echo "::error::zizmor negative control unexpectedly passed."
+            exit 1
+          fi
+          if ! grep -q 'unpinned-uses' "$RUNNER_TEMP/zizmor"; then
+            echo "::error::zizmor failed without reporting the expected unpinned-uses finding."
+            cat "$RUNNER_TEMP/zizmor" >&2 || true
+            exit 1
+          fi
+          echo "workflow static analysis: PASS"
       # The on-device drivers are not exercised by any other job; an unbalanced
       # brace here only surfaces at verification time on a real device.
       - name: "bash -n"
