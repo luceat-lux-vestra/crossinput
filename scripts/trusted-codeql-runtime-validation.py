@@ -59,26 +59,71 @@ def require_supported_codeql_patch(entry: dict) -> None:
     require(isinstance(patch, str) and patch,
             "CodeQL workflow change has no reviewable patch")
 
-    allowed = re.compile(
-        r"uses:\s*("
+    action_line = re.compile(
+        r"uses:\\s*("
         r"github/codeql-action/(?:init|analyze|autobuild)"
         r"|actions/setup-java"
-        r")@[0-9a-f]{40}(?:\s+#.*)?\Z"
+        r")@[0-9a-f]{40}(?:\\s+#.*)?\\Z"
     )
-    removed = []
-    added = []
+    java_version_line = re.compile(
+        r"java-version:\\s*['\\\"](25(?:\\.[0-9]+(?:\\.[0-9]+)?)?)['\\\"]\\Z"
+    )
+    check_latest_line = re.compile(r"check-latest:\\s*true\\Z")
+
+    removed_actions = []
+    added_actions = []
+    removed_java = []
+    added_java = []
+    added_check_latest = 0
+    changed = 0
+
     for line in patch.splitlines():
         if line.startswith(("+++", "---")) or not line.startswith(("+", "-")):
             continue
-        match = allowed.fullmatch(line[1:].strip())
-        require(match is not None,
-                "CodeQL workflow mutation exceeds approved action pin updates")
-        (added if line.startswith("+") else removed).append(match.group(1))
+        changed += 1
+        body = line[1:].strip()
 
-    require(removed and added,
-            "CodeQL workflow pin update must include old and new pins")
-    require(sorted(removed) == sorted(added),
-            "CodeQL workflow action identity changed instead of pin-only update")
+        action = action_line.fullmatch(body)
+        if action is not None:
+            (added_actions if line.startswith("+") else removed_actions).append(
+                action.group(1)
+            )
+            continue
+
+        java_version = java_version_line.fullmatch(body)
+        if java_version is not None:
+            (added_java if line.startswith("+") else removed_java).append(
+                java_version.group(1)
+            )
+            continue
+
+        if line.startswith("+") and check_latest_line.fullmatch(body):
+            added_check_latest += 1
+            continue
+
+        require(False,
+                "CodeQL workflow mutation exceeds approved maintenance changes")
+
+    require(changed > 0, "CodeQL workflow patch has no changed lines")
+
+    if removed_actions or added_actions:
+        require(removed_actions and added_actions,
+                "CodeQL action pin update must include old and new pins")
+        require(sorted(removed_actions) == sorted(added_actions),
+                "CodeQL action identity changed instead of pin-only update")
+
+    if removed_java or added_java or added_check_latest:
+        require(
+            len(removed_java) == 1
+            and len(added_java) == 1
+            and removed_java[0].startswith("25.")
+            and added_java[0] == "25"
+            and added_check_latest == 1,
+            "CodeQL Java maintenance change must be exactly patch-pin -> "
+            "Java 25 channel plus check-latest",
+        )
+
+
 
 
 def classify(pull: dict, pages: list, expected_head: str) -> bool:
@@ -302,6 +347,18 @@ def self_test() -> None:
         "patch": pin_patch,
     }]], sha)
 
+    runtime_patch = (
+        "@@ -1,3 +1,4 @@\n"
+        "-          java-version: '25.0.4'\n"
+        "+          java-version: '25'\n"
+        "+          check-latest: true"
+    )
+    assert classify(pull, [[{
+        "filename": ".github/workflows/codeql.yml",
+        "status": "modified",
+        "patch": runtime_patch,
+    }]], sha)
+
     bad_cases = (
         ({"head": {"sha": sha}, "changed_files": 2},
          [[{"filename": "README.md", "status": "modified"}]], sha),
@@ -319,6 +376,26 @@ def self_test() -> None:
                 "@@ -1 +1 @@\n"
                 "-uses: github/codeql-action/init@" + "b" * 40 + "\n"
                 "+uses: github/codeql-action/autobuild@" + "c" * 40
+            ),
+        }]], sha),
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": (
+                "@@ -1,3 +1,4 @@\n"
+                "-          java-version: '25.0.4'\n"
+                "+          java-version: '26'\n"
+                "+          check-latest: true"
+            ),
+        }]], sha),
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": (
+                "@@ -1,3 +1,4 @@\n"
+                "-          java-version: '25.0.4'\n"
+                "+          java-version: '25'\n"
+                "+          cache-read-only: false"
             ),
         }]], sha),
         (pull, [[{"filename": "README.md", "status": "modified"}]], "d" * 40),
