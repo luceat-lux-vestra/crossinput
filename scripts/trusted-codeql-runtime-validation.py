@@ -61,6 +61,12 @@ def linux_arm64_runner() -> str:
     return value
 
 
+def alternate_linux_arm64_runner(label: str) -> str:
+    match = re.fullmatch(r"ubuntu-([0-9]+)[.]([0-9]+)-arm", label)
+    require(match is not None, "invalid Linux ARM runner fixture source")
+    return f"ubuntu-{int(match.group(1)) + 1}.{match.group(2)}-arm"
+
+
 def safe_path(value: object) -> str:
     require(isinstance(value, str) and value, "missing changed-file path")
     require(not value.startswith("/") and ".." not in value.split("/"),
@@ -372,7 +378,8 @@ def self_test() -> None:
 
     legacy_java_patch = f"{JAVA_COMPATIBILITY_MAJOR}.0.0"
     target_runner = linux_arm64_runner()
-    legacy_runner = "ubuntu-00.00-arm"
+    legacy_runner = alternate_linux_arm64_runner(target_runner)
+    unexpected_runner = alternate_linux_arm64_runner(legacy_runner)
 
     pin_patch = (
         "@@ -1,4 +1,4 @@\n"
@@ -461,7 +468,7 @@ def self_test() -> None:
             "patch": (
                 "@@ -1 +1 @@\n"
                 f"-    runs-on: {legacy_runner}\n"
-                "+    runs-on: ubuntu-99.99-arm"
+                f"+    runs-on: {unexpected_runner}"
             ),
         }]], sha),
         (pull, [[{"filename": "README.md", "status": "modified"}]], "d" * 40),

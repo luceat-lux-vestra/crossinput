@@ -140,12 +140,19 @@ def linux_arm64_runner(root):
     return value
 
 
+def alternate_linux_arm64_runner(label):
+    match = re.fullmatch(r"ubuntu-([0-9]+)[.]([0-9]+)-arm", label)
+    if match is None:
+        raise AssertionError(f"invalid canonical Linux ARM runner: {label!r}")
+    return f"ubuntu-{int(match.group(1)) + 1}.{match.group(2)}-arm"
+
+
 def drift_linux_arm64_runner(root):
     target = linux_arm64_runner(root)
     edit(
         workflow(root, "ci.yml"),
         f"    runs-on: {target}\n",
-        "    runs-on: ubuntu-00.00-arm\n",
+        f"    runs-on: {alternate_linux_arm64_runner(target)}\n",
         1,
     )
 
