@@ -182,5 +182,12 @@
     "trusted_verifier_ref": "main",
     "privilege_boundary": "actions:write is isolated to read-only CodeQL preflight; DMG publisher retains contents/attestation writes without actions:write",
     "extraction_contract": "Original SARIF must prove all expected production source files for each retained language were actually extracted, with no extraction warnings/errors"
+  },
+  "runner_policy": {
+    "linux_arm64": "ubuntu-26.04-arm",
+    "actionlint_catalog_overrides": [
+      "xcode-27",
+      "ubuntu-26.04-arm"
+    ]
   }
 }

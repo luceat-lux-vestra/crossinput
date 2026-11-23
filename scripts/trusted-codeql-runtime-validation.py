@@ -46,6 +46,21 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def linux_arm64_runner() -> str:
+    path = SCRIPT_DIR.parent / ".github" / "hardening-policy.json"
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read canonical runner policy: {error}") from error
+    value = (policy.get("runner_policy") or {}).get("linux_arm64")
+    require(
+        isinstance(value, str)
+        and re.fullmatch(r"ubuntu-[0-9]+[.][0-9]+-arm", value) is not None,
+        "canonical linux ARM runner is missing or invalid",
+    )
+    return value
+
+
 def safe_path(value: object) -> str:
     require(isinstance(value, str) and value, "missing changed-file path")
     require(not value.startswith("/") and ".." not in value.split("/"),
@@ -71,11 +86,16 @@ def require_supported_codeql_patch(entry: dict) -> None:
         rf"(?:\.[0-9]+(?:\.[0-9]+)?)?)['\"]\Z"
     )
     check_latest_line = re.compile(r"check-latest:\s*true\Z")
+    runner_line = re.compile(
+        r"(?:runs-on|os):\s*(ubuntu-[0-9]+[.][0-9]+-arm)\Z"
+    )
 
     removed_actions = []
     added_actions = []
     removed_java = []
     added_java = []
+    removed_runners = []
+    added_runners = []
     added_check_latest = 0
     changed = 0
 
@@ -103,6 +123,13 @@ def require_supported_codeql_patch(entry: dict) -> None:
             added_check_latest += 1
             continue
 
+        runner = runner_line.fullmatch(body)
+        if runner is not None:
+            (added_runners if line.startswith("+") else removed_runners).append(
+                runner.group(1)
+            )
+            continue
+
         require(False,
                 "CodeQL workflow mutation exceeds approved maintenance changes")
 
@@ -125,6 +152,17 @@ def require_supported_codeql_patch(entry: dict) -> None:
             "Java 25 channel plus check-latest",
         )
 
+    if removed_runners or added_runners:
+        target_runner = linux_arm64_runner()
+        require(
+            len(removed_runners) == len(added_runners)
+            and len(removed_runners) > 0
+            and len(set(removed_runners)) == 1
+            and removed_runners[0] != target_runner
+            and set(added_runners) == {target_runner},
+            "CodeQL Linux ARM runner migration must replace one legacy versioned "
+            "label uniformly with the canonical policy target",
+        )
 
 
 
@@ -333,6 +371,8 @@ def self_test() -> None:
     }]], sha)
 
     legacy_java_patch = f"{JAVA_COMPATIBILITY_MAJOR}.0.0"
+    target_runner = linux_arm64_runner()
+    legacy_runner = "ubuntu-00.00-arm"
 
     pin_patch = (
         "@@ -1,4 +1,4 @@\n"
@@ -361,6 +401,19 @@ def self_test() -> None:
         "filename": ".github/workflows/codeql.yml",
         "status": "modified",
         "patch": runtime_patch,
+    }]], sha)
+
+    runner_patch = (
+        "@@ -1,4 +1,4 @@\n"
+        f"-    runs-on: {legacy_runner}\n"
+        f"+    runs-on: {target_runner}\n"
+        f"-            os: {legacy_runner}\n"
+        f"+            os: {target_runner}"
+    )
+    assert classify(pull, [[{
+        "filename": ".github/workflows/codeql.yml",
+        "status": "modified",
+        "patch": runner_patch,
     }]], sha)
 
     bad_cases = (
@@ -400,6 +453,15 @@ def self_test() -> None:
                 f"-          java-version: '{legacy_java_patch}'\n"
                 f"+          java-version: '{JAVA_COMPATIBILITY_MAJOR}'\n"
                 "+          cache-read-only: false"
+            ),
+        }]], sha),
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": (
+                "@@ -1 +1 @@\n"
+                f"-    runs-on: {legacy_runner}\n"
+                "+    runs-on: ubuntu-99.99-arm"
             ),
         }]], sha),
         (pull, [[{"filename": "README.md", "status": "modified"}]], "d" * 40),

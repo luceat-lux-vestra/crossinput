@@ -917,6 +917,93 @@ def check_trust_boundaries(workflows, policy, findings):
                                      "`persist-credentials: false` unless a later step pushes")
 
 
+def check_runner_policy(root, workflows, policy, findings):
+    """Keep explicit versioned Ubuntu ARM runners aligned to one policy target."""
+    spec = policy.get("runner_policy") or {}
+    target = spec.get("linux_arm64")
+    expected_overrides = spec.get("actionlint_catalog_overrides")
+
+    if not isinstance(target, str) or re.fullmatch(r"ubuntu-[0-9]+[.][0-9]+-arm", target) is None:
+        findings.add(
+            "RUNNER_POLICY",
+            ".github/hardening-policy.json",
+            f"runner_policy.linux_arm64 must be an explicit versioned ARM label, got {target!r}",
+        )
+        return
+    if (
+        not isinstance(expected_overrides, list)
+        or not expected_overrides
+        or any(not isinstance(value, str) or not value for value in expected_overrides)
+        or len(set(expected_overrides)) != len(expected_overrides)
+    ):
+        findings.add(
+            "RUNNER_POLICY",
+            ".github/hardening-policy.json",
+            "runner_policy.actionlint_catalog_overrides must be a non-empty unique string list",
+        )
+        return
+
+    versioned_arm = re.compile(r"ubuntu-[0-9]+[.][0-9]+-arm")
+    observed = []
+    for filename, workflow in workflows.items():
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            labels = []
+            runs_on = job.get("runs-on")
+            if isinstance(runs_on, str):
+                labels.append(runs_on)
+            elif isinstance(runs_on, list):
+                labels.extend(value for value in runs_on if isinstance(value, str))
+
+            matrix = ((job.get("strategy") or {}).get("matrix") or {})
+            include = matrix.get("include") if isinstance(matrix, dict) else None
+            if isinstance(include, list):
+                for row in include:
+                    if isinstance(row, dict) and isinstance(row.get("os"), str):
+                        labels.append(row["os"])
+
+            for label in labels:
+                if versioned_arm.fullmatch(label) is None:
+                    continue
+                observed.append((filename, job_id, label))
+                if label != target:
+                    findings.add(
+                        "RUNNER_POLICY",
+                        f"{filename}:{job_id}",
+                        f"versioned Ubuntu ARM runner {label!r} must match policy target {target!r}",
+                    )
+
+    if not observed:
+        findings.add(
+            "RUNNER_POLICY",
+            ".github/workflows",
+            f"runner policy target {target!r} is not used by any workflow job or matrix",
+        )
+
+    config_path = os.path.join(root, ".github", "actionlint.yaml")
+    try:
+        actionlint = workflow_yaml.load_file(config_path)
+    except (OSError, workflow_yaml.WorkflowYamlError) as error:
+        findings.add("RUNNER_POLICY", ".github/actionlint.yaml",
+                     f"cannot read actionlint runner catalog overrides: {error}")
+        return
+
+    actual_overrides = (
+        ((actionlint.get("self-hosted-runner") or {}).get("labels"))
+        if isinstance(actionlint, dict)
+        else None
+    )
+    if (
+        not isinstance(actual_overrides, list)
+        or actual_overrides != expected_overrides
+    ):
+        findings.add(
+            "RUNNER_POLICY",
+            ".github/actionlint.yaml",
+            f"actionlint catalog overrides {actual_overrides!r} must exactly match policy "
+            f"{expected_overrides!r}",
+        )
+
+
 def check_hygiene(workflows, findings):
     for filename, workflow in workflows.items():
         if "concurrency" not in workflow:
@@ -1083,10 +1170,11 @@ def check_codeql_authority(root, workflows, policy, findings):
         findings.add("CODEQL_FULL_MATRIX", ".github/hardening-policy.json",
                      "all original four CodeQL languages must remain active")
     matrix = ((analyze.get("strategy") or {}).get("matrix") or {}).get("include") or []
+    linux_arm64 = (policy.get("runner_policy") or {}).get("linux_arm64")
     expected_matrix = [
-        {"language": "actions", "build-mode": "none", "os": "ubuntu-24.04-arm"},
-        {"language": "java-kotlin", "build-mode": "manual", "os": "ubuntu-24.04-arm"},
-        {"language": "python", "build-mode": "none", "os": "ubuntu-24.04-arm"},
+        {"language": "actions", "build-mode": "none", "os": linux_arm64},
+        {"language": "java-kotlin", "build-mode": "manual", "os": linux_arm64},
+        {"language": "python", "build-mode": "none", "os": linux_arm64},
         {"language": "swift", "build-mode": "autobuild", "os": "macos-15"},
     ]
     if matrix != expected_matrix or (analyze.get("strategy") or {}).get("fail-fast") is not False:
@@ -1691,6 +1779,7 @@ def main():
     check_action_pins(workflows, findings)
     check_permissions(workflows, policy, findings)
     check_trust_boundaries(workflows, policy, findings)
+    check_runner_policy(args.root, workflows, policy, findings)
     check_hygiene(workflows, findings)
     check_labels(args.root, findings)
     check_issue_labeler_safety(args.root, workflows, findings)

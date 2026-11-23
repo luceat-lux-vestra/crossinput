@@ -23,7 +23,7 @@ concurrency:
 jobs:
   scan-guard:
     name: CodeQL schedule guard
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
     permissions:
       actions: read
@@ -71,13 +71,13 @@ jobs:
         include:
           - language: actions
             build-mode: none
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
           - language: java-kotlin
             build-mode: manual
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
           - language: python
             build-mode: none
-            os: ubuntu-24.04-arm
+            os: ubuntu-26.04-arm
           - language: swift
             build-mode: autobuild
             os: macos-15

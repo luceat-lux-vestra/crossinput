@@ -172,7 +172,7 @@ jobs:
 
   android-helper:
     name: Android Helper Build + Test
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     steps:
       - name: Detect documentation-only scope
@@ -296,7 +296,7 @@ jobs:
 
   markdown:
     name: Documentation Validation
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
     steps:
       - name: Reuse exact-SHA Fast evidence
@@ -337,7 +337,7 @@ jobs:
 
   scripts:
     name: Evidence & Tooling Validation
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     steps:
       - name: Reuse exact-SHA Fast evidence
@@ -485,7 +485,7 @@ jobs:
 
   dependencySubmissionValidation:
     name: Dependency submission PR validation
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     permissions:
       contents: read
@@ -620,7 +620,7 @@ jobs:
 
   dependencyReview:
     name: Dependency Review
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
     steps:
       - name: Review dependency changes
@@ -632,7 +632,7 @@ jobs:
     name: Merge Gate
     needs: [macos-app, macos-15-compat, android-helper, markdown, scripts, dependencySubmissionValidation, dependencyReview]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 5
     steps:
       - name: Require every merge-gate component to succeed
