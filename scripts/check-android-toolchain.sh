@@ -19,19 +19,22 @@ JAVA_VERSION="$("$JAVA_HOME/bin/java" -version 2>&1 | awk -F'"' '/version/ {prin
 [ -d "$ANDROID_HOME/build-tools/37.0.0" ] ||
   fail "Android build-tools 37.0.0 missing: $ANDROID_HOME/build-tools/37.0.0"
 
+# The wrapper distribution is the reviewed version authority. Validate the
+# official stable binary distribution before running it, without duplicating
+# the wrapper's version in this checker.
+GRADLE_WRAPPER_PROPERTIES="$ROOT/android/helper/gradle/wrapper/gradle-wrapper.properties"
+[ "$(grep -c '^distributionUrl=' "$GRADLE_WRAPPER_PROPERTIES" || true)" = "1" ] ||
+  fail "Expected exactly one Gradle wrapper distributionUrl"
+GRADLE_EXPECTED_VERSION="$(
+  sed -nE 's@^distributionUrl=https\\://services\.gradle\.org/distributions/gradle-([0-9]+\.[0-9]+\.[0-9]+)-bin\.zip$@\1@p' "$GRADLE_WRAPPER_PROPERTIES"
+)"
+[ -n "$GRADLE_EXPECTED_VERSION" ] ||
+  fail "Gradle wrapper distribution must be an official stable Gradle bin.zip"
 GRADLE_INFO="$(
   cd "$ROOT/android/helper"
   JAVA_HOME="$JAVA_HOME" ANDROID_HOME="$ANDROID_HOME" ./gradlew --version
 )"
 printf '%s\n' "$GRADLE_INFO"
-# The wrapper distribution is the reviewed version authority. Permit 9.8.x
-# patches, but reject a different vendor, distribution type or Gradle minor.
-GRADLE_WRAPPER_PROPERTIES="$ROOT/android/helper/gradle/wrapper/gradle-wrapper.properties"
-GRADLE_EXPECTED_VERSION="$(
-  sed -nE 's@^distributionUrl=https\\://services\.gradle\.org/distributions/gradle-(9\.8\.[0-9]+)-bin\.zip$@\1@p' "$GRADLE_WRAPPER_PROPERTIES"
-)"
-[ -n "$GRADLE_EXPECTED_VERSION" ] ||
-  fail "Gradle wrapper distribution must be the official Gradle 9.8.x bin.zip"
 printf '%s\n' "$GRADLE_INFO" | grep -Fxq "Gradle $GRADLE_EXPECTED_VERSION" ||
   fail "Running Gradle does not match pinned wrapper version $GRADLE_EXPECTED_VERSION"
 printf '%s\n' "$GRADLE_INFO" | grep -Eq '^(Launcher JVM|JVM): .*25' ||
