@@ -4,8 +4,9 @@
 
 CodeQL is no longer dispatched by `pull_request` or `push`. Every **scheduled**
 (Monday 04:17 UTC) and explicit `workflow_dispatch` run analyzes **all four**
-languages: Actions, Java/Kotlin, Python, Swift. Swift retains macOS-15 autobuild;
-Android retains Linux ARM64. No security query, source scope, or language was
+languages: Actions, Java/Kotlin, Python, Swift. Swift autobuild follows the official
+`macos-latest` GA arm64 channel after #294; Android retains Linux ARM64. The
+macOS 15 packaged consumer compatibility job remains mandatory and separate. No security query, source scope, or language was
 removed from the **full scan**.
 
 This deliberately changes *detection timing*: pull requests do not receive the
@@ -72,3 +73,15 @@ Follow-up issue: [#252](https://github.com/luceat-lux-vestra/crossinput/issues/2
 portfolio coordination: [R2A #93](https://github.com/luceat-lux-vestra/research-to-action/issues/93).
 The historical PR language-impact classifier and fixtures remain archived in
 `scripts/`, not executed automatically. They are no longer production controls.
+
+## Runner lifecycle (EG-DEP-001, #294)
+
+The local `.github/dependency-update-policy.json` owns all current explicit Linux ARM64
+runner sites, the macOS 15 consumer compatibility floor, the Swift GA maintenance
+channel, and the Xcode build/release pair. The existing read-only central audit
+coordinates ordinary reviewed provider-gap changes. No extra updater or token.
+The historical #229 macOS 26 full Swift scan passed; its timing comparison did
+not establish a permanent safety incompatibility. Actual new-runner Swift autobuild
+and SARIF verdict are required before accepting this migration. Isolated read-only
+research evidence cannot satisfy protected-main release evidence. No routine PR
+full scan, language reduction, query suppression, or release authority change.

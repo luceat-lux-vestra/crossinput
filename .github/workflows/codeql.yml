@@ -80,7 +80,7 @@ jobs:
             os: ubuntu-26.04-arm
           - language: swift
             build-mode: autobuild
-            os: macos-15
+            os: macos-latest
 
     steps:
       - name: Require exact protected-main source for full CodeQL evidence

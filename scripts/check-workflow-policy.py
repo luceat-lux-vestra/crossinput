@@ -922,6 +922,22 @@ def check_runner_policy(root, workflows, policy, findings):
     spec = policy.get("runner_policy") or {}
     target = spec.get("linux_arm64")
     expected_overrides = spec.get("actionlint_catalog_overrides")
+    swift_target = spec.get("swift_codeql")
+    compat_target = spec.get("macos_compatibility")
+    macos_build = spec.get("macos_build")
+    ci_jobs = (workflows.get("ci.yml") or {}).get("jobs") or {}
+    release_jobs = (workflows.get("release.yml") or {}).get("jobs") or {}
+    if swift_target != "macos-latest" or not isinstance(compat_target, str) or re.fullmatch(r"macos-[0-9]+", compat_target) is None:
+        findings.add("RUNNER_POLICY", ".github/hardening-policy.json",
+                     "Swift CodeQL must follow the GA channel separately from an explicit consumer floor")
+    if (ci_jobs.get("macos-15-compat") or {}).get("runs-on") != compat_target:
+        findings.add("RUNNER_POLICY", "ci.yml:macos-15-compat",
+                     "consumer compatibility lane must retain its reviewed runner")
+    if (not isinstance(macos_build, str) or re.fullmatch(r"xcode-[0-9]+", macos_build) is None
+        or (ci_jobs.get("macos-app") or {}).get("runs-on") != macos_build
+        or (release_jobs.get("dmg") or {}).get("runs-on") != macos_build):
+        findings.add("RUNNER_POLICY", ".github/workflows",
+                     "macOS build and release must use the same reviewed Xcode runner")
 
     if not isinstance(target, str) or re.fullmatch(r"ubuntu-[0-9]+[.][0-9]+-arm", target) is None:
         findings.add(
@@ -978,6 +994,34 @@ def check_runner_policy(root, workflows, policy, findings):
             ".github/workflows",
             f"runner policy target {target!r} is not used by any workflow job or matrix",
         )
+
+    # The central audit consumes the same tracked ownership registry.
+    try:
+        with open(os.path.join(root, ".github", "dependency-update-policy.json"), encoding="utf-8") as handle:
+            entries = json.load(handle)["entries"]
+        owners = {entry["id"]: entry for entry in entries}
+        linux_owner = owners["github-hosted-linux-arm64"]
+        floor_owner = owners["macos-consumer-compatibility-floor"]
+        swift_owner = owners["swift-codeql-ga-channel"]
+        build_owner = owners["xcode-build-runner"]
+        if (len(owners) != len(entries)
+            or linux_owner["strategy"] != "UPDATE_PR"
+            or linux_owner["provenance"]["label"] != target
+            or set(linux_owner["source_paths"]) != {".github/workflows/" + filename for filename, _, _ in observed}
+            or floor_owner["strategy"] != "REVIEWED_FREEZE"
+            or floor_owner["source_paths"] != [".github/workflows/ci.yml"]
+            or floor_owner["provenance"] != {"label": compat_target, "job": "macos-15-compat"}
+            or swift_owner["strategy"] != "CHANNEL"
+            or swift_owner["source_paths"] != [".github/workflows/codeql.yml"]
+            or swift_owner["provenance"]["selector"] != swift_target
+            or build_owner["strategy"] != "UPDATE_PR"
+            or build_owner["provenance"]["label"] != macos_build
+            or set(build_owner["source_paths"]) != {".github/workflows/ci.yml", ".github/workflows/release.yml"}):
+            findings.add("RUNNER_POLICY", ".github/dependency-update-policy.json",
+                         "runner ownership must match actual workflows and canonical runner policy")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        findings.add("RUNNER_POLICY", ".github/dependency-update-policy.json",
+                     f"cannot validate runner ownership: {error}")
 
     config_path = os.path.join(root, ".github", "actionlint.yaml")
     try:
@@ -1175,7 +1219,7 @@ def check_codeql_authority(root, workflows, policy, findings):
         {"language": "actions", "build-mode": "none", "os": linux_arm64},
         {"language": "java-kotlin", "build-mode": "manual", "os": linux_arm64},
         {"language": "python", "build-mode": "none", "os": linux_arm64},
-        {"language": "swift", "build-mode": "autobuild", "os": "macos-15"},
+        {"language": "swift", "build-mode": "autobuild", "os": (policy.get("runner_policy") or {}).get("swift_codeql")},
     ]
     if matrix != expected_matrix or (analyze.get("strategy") or {}).get("fail-fast") is not False:
         findings.add("CODEQL_FULL_MATRIX", where,
