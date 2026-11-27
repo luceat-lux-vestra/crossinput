@@ -375,6 +375,16 @@ def main():
          drift_linux_arm64_runner,
          "RUNNER_POLICY")
 
+    case("consumer compatibility runner cannot follow maintenance channel",
+         lambda root: edit(workflow(root, "ci.yml"),
+                           "    runs-on: macos-15\n",
+                           "    runs-on: macos-latest\n"),
+         "RUNNER_POLICY")
+    case("runner ownership cannot silently lose an active workflow",
+         lambda root: edit(
+             os.path.join(root, ".github", "dependency-update-policy.json"),
+             '        ".github/workflows/android-cache-seed.yml",\n', ""),
+         "RUNNER_POLICY")
     case("actionlint runner catalog override must match policy",
          remove_actionlint_runner_override,
          "RUNNER_POLICY")
@@ -643,7 +653,7 @@ def main():
 
     case("Swift CodeQL still requires macOS",
          lambda root: edit(workflow(root, "codeql.yml"),
-                           "            os: macos-15\n",
+                           "            os: macos-latest\n",
                            f"            os: {linux_arm64_runner(root)}\n"),
          "CODEQL_FULL_MATRIX")
 

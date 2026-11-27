@@ -102,6 +102,8 @@ def require_supported_codeql_patch(entry: dict) -> None:
     added_java = []
     removed_runners = []
     added_runners = []
+    removed_swift_runner = []
+    added_swift_runner = []
     added_check_latest = 0
     changed = 0
 
@@ -134,6 +136,15 @@ def require_supported_codeql_patch(entry: dict) -> None:
             (added_runners if line.startswith("+") else removed_runners).append(
                 runner.group(1)
             )
+            continue
+
+        # Exact old Swift matrix OS -> official GA channel, with full
+        # matrix validation independently enforced by hardening policy.
+        if body == "os: macos-15" and line.startswith("-"):
+            removed_swift_runner.append(body)
+            continue
+        if body == "os: macos-latest" and line.startswith("+"):
+            added_swift_runner.append(body)
             continue
 
         require(False,
@@ -170,6 +181,10 @@ def require_supported_codeql_patch(entry: dict) -> None:
             "label uniformly with the canonical policy target",
         )
 
+    if removed_swift_runner or added_swift_runner:
+        require(removed_swift_runner == ["os: macos-15"]
+                and added_swift_runner == ["os: macos-latest"],
+                "Swift CodeQL maintenance must replace one old matrix OS with the GA channel")
 
 
 def classify(pull: dict, pages: list, expected_head: str) -> bool:
@@ -423,7 +438,30 @@ def self_test() -> None:
         "patch": runner_patch,
     }]], sha)
 
+    swift_runner_patch = (
+        "@@ -80,4 +80,4 @@\n"
+        "           - language: swift\n"
+        "             build-mode: autobuild\n"
+        "-            os: macos-15\n"
+        "+            os: macos-latest"
+    )
+    assert classify(pull, [[{
+        "filename": ".github/workflows/codeql.yml",
+        "status": "modified",
+        "patch": swift_runner_patch,
+    }]], sha)
+
     bad_cases = (
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": swift_runner_patch.replace("+            os: macos-latest", "+            os: xcode-27"),
+        }]], sha),
+        (pull, [[{
+            "filename": ".github/workflows/codeql.yml",
+            "status": "modified",
+            "patch": swift_runner_patch + "\n+        upload: never",
+        }]], sha),
         ({"head": {"sha": sha}, "changed_files": 2},
          [[{"filename": "README.md", "status": "modified"}]], sha),
         (pull, [[{"filename": "../bad", "status": "modified"}]], sha),

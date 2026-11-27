@@ -1,0 +1,83 @@
+{
+  "schema": "crossinput/dependency-update-policy/v1",
+  "policy": "EG-DEP-001",
+  "owner": "luceat-lux-vestra/crossinput#294",
+  "reviewed_at": "2026-11-27",
+  "entries": [
+    {
+      "id": "github-hosted-linux-arm64",
+      "source": ".github/workflows/android-cache-seed.yml",
+      "source_paths": [
+        ".github/workflows/android-cache-seed.yml",
+        ".github/workflows/android-dependency-submission.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml",
+        ".github/workflows/hardening-audit.yml",
+        ".github/workflows/issue-labeler.yml",
+        ".github/workflows/pr-labeler.yml",
+        ".github/workflows/release.yml"
+      ],
+      "strategy": "UPDATE_PR",
+      "authority": "https://github.com/actions/runner-images",
+      "mechanism": "Explicit current GA ARM64 runner; existing read-only central audit and ordinary reviewed PR on provider target change.",
+      "owner": "luceat-lux-vestra/crossinput#294",
+      "validation": "Canonical hardening policy, actual ARM64 CI, Android cache/submission, CodeQL and negative controls; no x64 fallback.",
+      "provenance": {
+        "label": "ubuntu-26.04-arm"
+      }
+    },
+    {
+      "id": "macos-consumer-compatibility-floor",
+      "source": ".github/workflows/ci.yml",
+      "source_paths": [
+        ".github/workflows/ci.yml"
+      ],
+      "strategy": "REVIEWED_FREEZE",
+      "authority": "apps/macos/Package.swift",
+      "mechanism": "Actual minimum supported consumer smoke lane; maintenance uses current Xcode and Swift CodeQL uses GA channel.",
+      "owner": "luceat-lux-vestra/crossinput#294",
+      "validation": "Required macOS 15 packaged compatibility of Xcode-produced candidate; exact-SHA reuse requires both prior producer and consumer success.",
+      "provenance": {
+        "label": "macos-15",
+        "job": "macos-15-compat"
+      },
+      "revisit": {
+        "review_by": "2027-02-22",
+        "rationale": "Package.swift explicitly supports macOS 15; moving the consumer lane removes proof of the supported floor.",
+        "evidence": "apps/macos/Package.swift; .github/workflows/ci.yml macos-15-compat",
+        "trigger": "Provider retires runner, minimum supported macOS changes, or smoke proof becomes invalid; obtain real floor evidence or explicit product support decision."
+      }
+    },
+    {
+      "id": "swift-codeql-ga-channel",
+      "source": ".github/workflows/codeql.yml",
+      "source_paths": [
+        ".github/workflows/codeql.yml"
+      ],
+      "strategy": "CHANNEL",
+      "authority": "https://docs.github.com/en/actions/reference/runners/github-hosted-runners",
+      "mechanism": "Official macos-latest GA arm64 channel.",
+      "owner": "luceat-lux-vestra/crossinput#294",
+      "validation": "Full Swift autobuild and original SARIF extraction/High-Critical verdict; protected-main four-language authority retained.",
+      "provenance": {
+        "selector": "macos-latest"
+      }
+    },
+    {
+      "id": "xcode-build-runner",
+      "source": ".github/workflows/ci.yml",
+      "source_paths": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml"
+      ],
+      "strategy": "UPDATE_PR",
+      "authority": "https://github.com/actions/runner-images",
+      "mechanism": "Explicit Xcode SDK image for build/release; ordinary coordinated provider review.",
+      "owner": "luceat-lux-vestra/crossinput#294",
+      "validation": "Actual build/test, packaging, minimum OS smoke and release preflight.",
+      "provenance": {
+        "label": "xcode-27"
+      }
+    }
+  ]
+}

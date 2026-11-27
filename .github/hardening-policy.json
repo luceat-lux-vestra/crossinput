@@ -188,6 +188,9 @@
     "actionlint_catalog_overrides": [
       "xcode-27",
       "ubuntu-26.04-arm"
-    ]
+    ],
+    "swift_codeql": "macos-latest",
+    "macos_compatibility": "macos-15",
+    "macos_build": "xcode-27"
   }
 }
