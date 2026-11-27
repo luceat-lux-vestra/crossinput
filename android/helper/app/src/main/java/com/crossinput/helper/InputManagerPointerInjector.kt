@@ -213,6 +213,15 @@ class InputManagerPointerInjector(
             initialized = false
             return false
         }
+        // Release confirmed local held transitions against the *old* display
+        // before changing the helper-global selected target. A rejected
+        // release is ambiguous remote state: do not silently carry it into a
+        // new routing context. InputManager injection acceptance is still not
+        // proof of Android-side application; see #107 recovery fence.
+        if (!releaseForTargetChange()) {
+            log.warn("InputManagerPointerInjector", "target selection blocked: held-button release unconfirmed")
+            return false
+        }
         buttons = 0
         selectedDisplayId = display.displayId
         selectedDisplay = display
@@ -450,11 +459,43 @@ class InputManagerPointerInjector(
         return ok
     }
 
+    /**
+     * Best-effort terminal release of held mouse buttons on the currently
+     * selected display. No transport/session proof is inferred from success:
+     * InputManager asynchronous acceptance is weaker than confirmed remote
+     * application. Failures retain the local mask until close or retry.
+     */
+    fun releaseForTargetChange(): Boolean = buttons == 0 || releaseHeldButtons()
+
+    private fun releaseHeldButtons(): Boolean {
+        var accepted = true
+        // Release non-primary buttons first, then the primary gesture.
+        for ((index, mask) in arrayOf(
+            2 to MotionEvent.BUTTON_TERTIARY,
+            1 to MotionEvent.BUTTON_SECONDARY,
+            0 to MotionEvent.BUTTON_PRIMARY,
+        )) {
+            if (buttons and mask == 0) continue
+            val released = try {
+                button(index, false).status == PointerDelivery.Status.DELIVERED
+            } catch (error: Throwable) {
+                log.warn(
+                    "InputManagerPointerInjector",
+                    "held-button release exception=${error.javaClass.simpleName}",
+                )
+                false
+            }
+            if (!released) accepted = false
+        }
+        return accepted && buttons == 0
+    }
+
     override fun close() {
-        // InputManager owns no virtual HID device, so teardown is a local
-        // state reset; no synthetic release events are required. Resetting
-        // the mask here guarantees a reused instance never resurrects held
-        // buttons even if callers skip selectDisplay.
+        if (buttons != 0 && !releaseHeldButtons()) {
+            // Never describe a rejected/exceptional injection as a clean
+            // remote release. Session cleanliness is a separate #107 gate.
+            log.warn("InputManagerPointerInjector", "held-button release unconfirmed at close")
+        }
         initialized = false
         selectedDisplayId = -1
         selectedDisplay = null

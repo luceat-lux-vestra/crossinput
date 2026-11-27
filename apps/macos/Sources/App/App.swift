@@ -463,10 +463,12 @@ final class AppModel: ObservableObject {
                 Diagnostics.log("helper log: \(log.message)")
             }
         case .fatalError:
-            if let fatal = try? Messages.decodeFatalError(frame.payload) {
-                sessionController.fail("helper fatal \(fatal.code): \(fatal.message)")
-                handoffController.remoteUnavailable()
-            }
+            // SessionController owns terminal session teardown. Presentation
+            // still invalidates target/control state immediately so a
+            // correlated fatal selection response cannot leave stale remote
+            // ownership visible or eligible for handoff.
+            targetController.reset()
+            handoffController.remoteUnavailable()
         case .displayChanged:
             if let info = try? Messages.decodeDisplayChanged(frame.payload) {
                 handleDisplayChanged(info)

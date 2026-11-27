@@ -123,6 +123,22 @@ public final class SessionController {
         manager.onEvent = { [weak self, weak manager] frame in
             Task { @MainActor in
                 guard let self, let manager, self.session === manager else { return }
+                if frame.type == .fatalError {
+                    let message: String
+                    if let fatal = try? Messages.decodeFatalError(frame.payload) {
+                        message = "helper fatal \(fatal.code): \(fatal.message)"
+                    } else {
+                        message = "helper fatal: malformed payload"
+                    }
+                    // Invalidate Session publication first, then let AppModel
+                    // release target/control ownership, and only then wait on
+                    // best-effort helper shutdown. Local return must never be
+                    // gated on Android cleanup.
+                    let teardown = self.invalidateForFailure(message)
+                    self.onEvent?(frame)
+                    self.shutdownFailureSessions(teardown)
+                    return
+                }
                 self.onEvent?(frame)
             }
         }
@@ -195,17 +211,31 @@ public final class SessionController {
     /// Moves the session to a failed terminal state and tears down any helper
     /// candidate or live channel so presentation and transport cannot diverge.
     public func fail(_ message: String) {
+        shutdownFailureSessions(invalidateForFailure(message))
+    }
+
+    private struct FailureTeardown {
+        let live: (any SessionConnection)?
+        let connecting: (any SessionConnection)?
+    }
+
+    /// Publishes local failure before any remote wait. Callers that need to
+    /// release local input ownership can do so between this step and teardown.
+    private func invalidateForFailure(_ message: String) -> FailureTeardown {
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionAttempt &+= 1
-        let old = session
-        let oldConnecting = connectingSession
+        let teardown = FailureTeardown(live: session, connecting: connectingSession)
         session = nil
         connectingSession = nil
         reference.set(nil)
-        old?.shutdownAndWait()
-        oldConnecting?.shutdownAndWait()
         setState(.failed(message))
+        return teardown
+    }
+
+    private func shutdownFailureSessions(_ teardown: FailureTeardown) {
+        teardown.live?.shutdownAndWait()
+        teardown.connecting?.shutdownAndWait()
     }
 
     func markReconnecting() {
