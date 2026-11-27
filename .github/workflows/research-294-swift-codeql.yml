@@ -1,0 +1,64 @@
+# lifecycle-owner: issue #294
+# lifecycle-retire: delete this research-only workflow after recording bounded exact-candidate evidence
+name: Research 294 Swift GA runtime proof
+on:
+  push:
+    branches: [research/294-swift-codeql-ga-proof]
+    paths: ['.github/workflows/research-294-swift-codeql.yml']
+permissions:
+  contents: read
+concurrency:
+  group: research-294-swift
+  cancel-in-progress: false
+jobs:
+  swift:
+    name: Swift CodeQL GA candidate proof (read-only)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: 791aee896d0aa9882d06eff23276d742711f9160
+    steps:
+      - name: Checkout exact production candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          persist-credentials: false
+      - name: Verify candidate source and runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          swift --version
+          echo "SCANNED_CANDIDATE=$EXPECTED_SHA"
+      - name: Initialize Swift CodeQL
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: swift
+          build-mode: autobuild
+      - name: Autobuild Swift sources
+        uses: github/codeql-action/autobuild@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      - name: Analyze Swift without upload
+        id: analyze
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:swift
+          upload: never
+          output: ${{ runner.temp }}/research-swift
+      - name: Apply existing full Swift extraction and severity verdict
+        env:
+          SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 scripts/release_codeql_verdict.py --sarif-dir "$SARIF_DIR" --language swift --candidate-sha "$EXPECTED_SHA"
+      - name: Retain nonproduction original SARIF
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: research-294-swift-${{ env.EXPECTED_SHA }}
+          path: ${{ steps.analyze.outputs.sarif-output }}
+          if-no-files-found: error
+          retention-days: 14
