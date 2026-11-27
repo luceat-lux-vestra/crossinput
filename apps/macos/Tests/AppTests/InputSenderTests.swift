@@ -296,7 +296,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
         controller.updateRemoteTarget(2)
@@ -358,7 +358,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
 
@@ -401,7 +401,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
 
@@ -601,7 +601,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
 
@@ -661,7 +661,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
 
@@ -736,7 +736,7 @@ final class InputSenderTests: XCTestCase {
             capture: capture,
             switchMachine: machine,
             capabilityController: capabilityController,
-            captureStart: { true },
+            captureStart: { .started },
             captureStop: {}
         )
 
