@@ -2,7 +2,7 @@
   "schema": "crossinput/dependency-update-policy/v1",
   "policy": "EG-DEP-001",
   "owner": "luceat-lux-vestra/crossinput#294",
-  "reviewed_at": "2026-11-27",
+  "reviewed_at": "2026-11-28",
   "entries": [
     {
       "id": "github-hosted-linux-arm64",
@@ -44,8 +44,9 @@
       "revisit": {
         "review_by": "2027-02-22",
         "rationale": "Package.swift explicitly supports macOS 15; moving the consumer lane removes proof of the supported floor.",
-        "evidence": "apps/macos/Package.swift; .github/workflows/ci.yml macos-15-compat",
-        "trigger": "Provider retires runner, minimum supported macOS changes, or smoke proof becomes invalid; obtain real floor evidence or explicit product support decision."
+        "evidence": "apps/macos/Package.swift (.macOS(.v15)); required macos-15-compat job in .github/workflows/ci.yml; exact prior candidate packaged launch: https://github.com/luceat-lux-vestra/crossinput/actions/runs/45984318206/job/140457402704",
+        "trigger": "Provider retires runner, minimum supported macOS changes, or smoke proof becomes invalid; obtain real floor evidence or explicit product support decision.",
+        "constraint": "COMPATIBILITY"
       }
     },
     {
@@ -77,6 +78,24 @@
       "validation": "Actual build/test, packaging, minimum OS smoke and release preflight.",
       "provenance": {
         "label": "xcode-27"
+      }
+    },
+    {
+      "id": "android-java-lts-major",
+      "source": ".github/workflows/android-cache-seed.yml",
+      "source_paths": [
+        ".github/workflows/android-cache-seed.yml",
+        ".github/workflows/android-dependency-submission.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/codeql.yml"
+      ],
+      "strategy": "UPDATE_PR",
+      "authority": "https://api.adoptium.net/v3/info/available_releases",
+      "mechanism": "Native setup-java Temurin numeric LTS major and check-latest patch resolution; central read-only upstream LTS-major comparison and coordinated ordinary reviewed PR for major transitions.",
+      "owner": "luceat-lux-vestra/crossinput#294",
+      "validation": "All setup-java steps share the same reviewed major and current patch selection; real Android build/test, dependency submission, cache seed and protected-main CodeQL evidence; keep consumer Android/JVM compatibility independent.",
+      "provenance": {
+        "selector": "25"
       }
     }
   ]

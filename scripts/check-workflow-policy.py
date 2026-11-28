@@ -1004,11 +1004,31 @@ def check_runner_policy(root, workflows, policy, findings):
         floor_owner = owners["macos-consumer-compatibility-floor"]
         swift_owner = owners["swift-codeql-ga-channel"]
         build_owner = owners["xcode-build-runner"]
+        java_owner = owners["android-java-lts-major"]
+        java_selector = java_owner["provenance"]["selector"]
+        java_paths = set()
+        java_valid = isinstance(java_selector, str) and re.fullmatch(r"[0-9]+", java_selector) is not None
+        for filename, workflow in workflows.items():
+            for job in (workflow.get("jobs") or {}).values():
+                for step in steps_of(job):
+                    if not isinstance(step, dict) or not str(step.get("uses", "")).startswith("actions/setup-java@"):
+                        continue
+                    java_paths.add(".github/workflows/" + filename)
+                    inputs = step.get("with") or {}
+                    if (str(inputs.get("java-version")) != java_selector
+                            or inputs.get("distribution") != "temurin"
+                            or inputs.get("check-latest") is not True):
+                        java_valid = False
+        if (not java_paths or not java_valid or java_owner["strategy"] != "UPDATE_PR"
+                or set(java_owner["source_paths"]) != java_paths):
+            findings.add("JAVA_LIFECYCLE", ".github/dependency-update-policy.json",
+                         "Java lifecycle must cover all setup-java steps with one reviewed LTS major and latest patch selection")
         if (len(owners) != len(entries)
             or linux_owner["strategy"] != "UPDATE_PR"
             or linux_owner["provenance"]["label"] != target
             or set(linux_owner["source_paths"]) != {".github/workflows/" + filename for filename, _, _ in observed}
             or floor_owner["strategy"] != "REVIEWED_FREEZE"
+            or floor_owner["revisit"]["constraint"] != "COMPATIBILITY"
             or floor_owner["source_paths"] != [".github/workflows/ci.yml"]
             or floor_owner["provenance"] != {"label": compat_target, "job": "macos-15-compat"}
             or swift_owner["strategy"] != "CHANNEL"
