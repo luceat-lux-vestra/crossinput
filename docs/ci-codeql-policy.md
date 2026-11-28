@@ -74,7 +74,7 @@ portfolio coordination: [R2A #93](https://github.com/luceat-lux-vestra/research-
 The historical PR language-impact classifier and fixtures remain archived in
 `scripts/`, not executed automatically. They are no longer production controls.
 
-## Runner lifecycle (EG-DEP-001, #294)
+## Dependency and runner lifecycle (EG-DEP-001, #294)
 
 The local `.github/dependency-update-policy.json` owns all current explicit Linux ARM64
 runner sites, the macOS 15 consumer compatibility floor, the Swift GA maintenance
@@ -85,3 +85,15 @@ not establish a permanent safety incompatibility. Actual new-runner Swift autobu
 and SARIF verdict are required before accepting this migration. Isolated read-only
 research evidence cannot satisfy protected-main release evidence. No routine PR
 full scan, language reduction, query suppression, or release authority change.
+
+The v3 lifecycle registry also owns every Android maintenance `setup-java` step.
+Temurin 25 is the observed current LTS major; `check-latest: true` resolves its
+latest patch. Central upstream comparison identifies a future LTS-major change
+for ordinary reviewed migration. The local guard checks the shared major and
+patch-selection contract, not a hardcoded global latest version. The macOS 15
+lane is a concrete compatibility constraint, not an obsolete maintenance image.
+The Swift package currently declares only local targets and no external package
+dependencies; adding a no-op updater does not establish dependency coverage.
+The remaining Swift-root classification and current older-runner support evidence
+must be reconciled with the central auditor rather than weakening the consumer
+floor or claiming a synthetic freeze. No production source or release gate changes.

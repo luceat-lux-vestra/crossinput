@@ -385,6 +385,18 @@ def main():
              os.path.join(root, ".github", "dependency-update-policy.json"),
              '        ".github/workflows/android-cache-seed.yml",\n', ""),
          "RUNNER_POLICY")
+    case("Java lifecycle cannot silently disable latest patch selection",
+         lambda root: edit(workflow(root, "android-cache-seed.yml"),
+                           "          check-latest: true\n", "          check-latest: false\n"),
+         "JAVA_LIFECYCLE")
+    case("Java lifecycle cannot silently diverge from the reviewed major",
+         lambda root: edit(workflow(root, "android-cache-seed.yml"),
+                           "          java-version: '25'\n", "          java-version: '21'\n"),
+         "JAVA_LIFECYCLE")
+    case("consumer floor requires concrete compatibility classification",
+         lambda root: edit(os.path.join(root, ".github", "dependency-update-policy.json"),
+                           '"constraint": "COMPATIBILITY"', '"constraint": "EVIDENCE"'),
+         "RUNNER_POLICY")
     case("actionlint runner catalog override must match policy",
          remove_actionlint_runner_override,
          "RUNNER_POLICY")
